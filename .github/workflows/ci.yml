@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Static checks
+        run: |
+          chmod +x tests/static.sh scripts/install.sh scripts/uninstall.sh bin/chat-bridge
+          npm run check
+          npm test
