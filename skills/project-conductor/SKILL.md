@@ -42,7 +42,7 @@ Use `ask` only when the conductor needs the result synchronously.
 
 Create, reuse, and retire project Chats deliberately.
 
-For each logical project/account, keep one bound Ego Space. New worker Chats must open as new tabs inside that Space; do not allocate a new Space per session. Treat the stable Space name as routing configuration and the numeric Space ID as a runtime cache.
+For each logical project/account, keep one bound Ego Space. New worker Chats must open as new tabs inside that Space; do not allocate a new Space per session. Treat the stable Space name as routing configuration and the numeric Space ID as a runtime cache. Use `chat-bridge space prune --project "PROJECT"` to close stale untracked tabs after tests or session churn.
 
 Create a session when:
 - a workstream has a distinct long-lived context,

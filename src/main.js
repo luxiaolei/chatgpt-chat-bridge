@@ -345,7 +345,11 @@ async function conversationLifecycle(reg, chat, action) {
     await page.waitForTimeout(800);
     hasTrigger=await page.evaluate((id)=>!!document.querySelector(`button[data-conversation-options-trigger="${id}"]`),chat.id);
   }
-  if(!hasTrigger) throw new Error(`Conversation options not found for ${chat.id}`);
+  if(!hasTrigger) {
+    const closedSessionPage=page.label===chat.page;
+    if(closedSessionPage) await page.close().catch(()=>{});
+    return {ok:true,action,alreadyAbsent:true,closedSessionPage};
+  }
   await page.keyboard.press("Escape").catch(()=>{});
   const opened=await page.evaluate((id)=>{const b=document.querySelector(`button[data-conversation-options-trigger="${id}"]`); if(!b)return false; b.click(); return true;},chat.id);
   if(!opened) throw new Error(`Conversation options trigger could not be opened for ${chat.id}`);
@@ -356,18 +360,46 @@ async function conversationLifecycle(reg, chat, action) {
   },action==="delete"?"Delete":"Archive");
   if(!clicked) throw new Error(`Conversation ${action} menu item not found`);
   if(action==="delete"){
-    await page.waitForTimeout(250);
+    const confirmedReady=await page.waitForFunction(()=>{
+      const scope=document.querySelector('[role="dialog"]')||document.body;
+      return [...scope.querySelectorAll('button')].some(x=>(x.innerText||'').trim()==="Delete"||['confirm-delete-conversation','delete-conversation-confirm-button'].includes(x.getAttribute('data-testid')));
+    },undefined,{timeout:5000}).then(()=>true).catch(()=>false);
+    if(!confirmedReady) throw new Error("Delete confirmation control not found");
     const ok=await page.evaluate(()=>{
       const scope=document.querySelector('[role="dialog"]')||document.body;
-      const b=[...scope.querySelectorAll('button')].find(x=>(x.innerText||'').trim()==="Delete"||x.getAttribute('data-testid')==='confirm-delete-conversation');
+      const b=[...scope.querySelectorAll('button')].find(x=>(x.innerText||'').trim()==="Delete"||['confirm-delete-conversation','delete-conversation-confirm-button'].includes(x.getAttribute('data-testid')));
       if(!b) return false; b.click(); return true;
     });
-    if(!ok) throw new Error("Delete confirmation control not found");
+    if(!ok) throw new Error("Delete confirmation control could not be clicked");
   }
   await page.waitForTimeout(500);
+  const ctl=await controlPage(reg,chat.project,chat.account);
+  let stillVisible=true;
+  for(let attempt=0; attempt<5 && stillVisible; attempt++) {
+    await openProjectPage(ctl.page,chat.project,ctl.binding.projectUrl||null);
+    await ctl.page.reload({waitUntil:"load",timeout:20000}).catch(()=>{});
+    await ctl.page.waitForTimeout(1000);
+    stillVisible=await ctl.page.evaluate((id)=>!!document.querySelector(`button[data-conversation-options-trigger="${id}"]`),chat.id);
+    if(stillVisible) await ctl.page.waitForTimeout(1000);
+  }
+  if(stillVisible) throw new Error(`Conversation ${action} was not confirmed by project UI: ${chat.id}`);
   const closedSessionPage=page.label===chat.page;
-  if(closedSessionPage) await page.close().catch(()=>{});
+  if(closedSessionPage && page.label!==ctl.page.label) await page.close().catch(()=>{});
   return {ok:true,action,closedSessionPage};
+}
+
+async function pruneProjectSpace(reg, project, account=null) {
+  const a=activeAccount(reg,project,account), {binding,task}=await openBoundTask(reg,project,a);
+  const pages=await pagesOf(task), keep=new Set([binding.controlPage].filter(Boolean));
+  for(const c of Object.values(reg.chats)) {
+    if(c.project===project && c.account===a && c.status==="active" && c.page) keep.add(c.page);
+  }
+  const closed=[];
+  for(const page of pages) {
+    if(keep.has(page.label)) continue;
+    await page.close().catch(()=>{}); closed.push(page.label);
+  }
+  return {ok:true,project,account:a,spaceName:binding.spaceName,spaceId:task.spaceId,kept:[...keep],closed};
 }
 
 const cmd=args[0] || "help";
@@ -376,7 +408,7 @@ const project=opt("project",reg.defaultProject);
 const accountArg=opt("account",null);
 
 if(cmd==="help"){
-  print("chat-bridge commands: init, bind, account, space, register, list, sync, discover, projects, runtime, task, read, status, send, ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget");
+  print("chat-bridge commands: init, bind, account, space, register, list, sync, discover, projects, runtime, task, read, status, send, ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune");
 }
 else if(cmd==="init"){
   const p=project||args[1]; if(!p) throw new Error("project required");
@@ -428,7 +460,11 @@ else if(cmd==="space"){
     }
     await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:name,lastCommand:"space bind"});
     print({ok:true,project:p,account:a,spaceName:name});
-  } else throw new Error("space subcommand must be show or bind");
+  } else if(sub==="prune"){
+    const result=await pruneProjectSpace(reg,p,a);
+    await touchRuntime(p,{activeAccount:a,spaceName:b.spaceName,lastCommand:"space prune"});
+    print(result);
+  } else throw new Error("space subcommand must be show, bind, or prune");
 }
 else if(cmd==="register"){
   const raw=opt("url")||opt("id")||args[1]; if(!raw) throw new Error("url/id required");
