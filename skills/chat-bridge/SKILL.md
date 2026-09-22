@@ -68,7 +68,39 @@ chat-bridge new --project "PROJECT NAME" \
   --message "Initial role and task"
 ```
 
-The command captures the conversation ID, project-scoped URL, Ego TaskSpace, model, and effort in the registry.
+The command captures the conversation ID, project-scoped URL, model, effort, and current tab attachment in the registry. New sessions for one logical project/account MUST open with `task.newPage()` inside that project/account's bound Ego Space. Do not create a new Space per session.
+
+## Accounts and Space binding
+
+```bash
+chat-bridge account add secondary --label "Secondary ChatGPT"
+chat-bridge account use secondary --project "PROJECT NAME"
+chat-bridge bind --project "PROJECT NAME" --account secondary --url "PROJECT URL" --space "SPACE NAME"
+chat-bridge space show --project "PROJECT NAME" --account secondary
+```
+
+Treat `spaceName` as the stable binding and numeric `spaceId` as a runtime cache. Account bindings do not perform credential login; the bound Ego Space must already have access to the intended ChatGPT account/project.
+
+## Session lifecycle
+
+```bash
+chat-bridge archive AGENT_ALIAS --project "PROJECT NAME"
+chat-bridge retire AGENT_ALIAS --project "PROJECT NAME"
+chat-bridge forget AGENT_ALIAS --project "PROJECT NAME"
+chat-bridge delete AGENT_ALIAS --project "PROJECT NAME" --confirm
+```
+
+Prefer `retire` for replacing a context-heavy or unhealthy role session. `delete` is destructive and must remain explicitly confirmed.
+
+## Runtime task cache
+
+```bash
+chat-bridge task set TASK_ID --project "PROJECT NAME" --role ROLE --status RUNNING --github URL
+chat-bridge task list --project "PROJECT NAME"
+chat-bridge task clear TASK_ID --project "PROJECT NAME"
+```
+
+Runtime state lives under `~/.local/state/chat-bridge/` and is reconstructable. GitHub remains authoritative.
 
 ## Models and thinking
 
@@ -124,7 +156,9 @@ chat-bridge recover AGENT_ALIAS --project "PROJECT NAME"
 
 ## Routing rules
 
-- Prefer stable registry aliases over raw conversation IDs.
+- Prefer stable logical role/registry aliases over raw conversation IDs.
+- Keep one bound Ego Space per logical project/account; open worker sessions as tabs inside it.
+- A role should normally have one active session per project/account; retire the old session before replacement.
 - Sync before dispatching a multi-chat batch.
 - Use `ask` when the caller must synchronously consume the result.
 - Use `send` for callback/event delivery to another Chat.

@@ -37,31 +37,68 @@ ChatGPT Project + conversations
 
 No desktop screen coordinates are required for the normal path.
 
-## Registry
+## Registry and runtime state
 
-The bridge stores discovered and created sessions at:
+The bridge keeps **routing identity** and **operational state** separate.
+
+Registry:
 
 ```text
 ~/.config/chat-bridge/registry.json
 ```
 
-A chat record contains fields such as:
+Runtime cache:
+
+```text
+~/.local/state/chat-bridge/runtime.json
+```
+
+The registry is versioned and stores logical projects, ChatGPT account identities, per-account project bindings, and chat sessions. A project binding looks conceptually like:
 
 ```json
 {
-  "id": "conversation-id",
-  "url": "https://chatgpt.com/g/g-p-.../c/...",
-  "name": "research-agent",
-  "title": "Research",
   "project": "My Project",
-  "model": "GPT-6 Pro",
-  "effort": "Pro",
-  "spaceId": 42,
-  "page": "p1"
+  "activeAccount": "primary",
+  "bindings": {
+    "primary": {
+      "projectId": "g-p-...",
+      "projectUrl": "https://chatgpt.com/g/g-p-.../project",
+      "spaceName": "my-project-primary",
+      "spaceId": 42
+    }
+  }
 }
 ```
 
-The registry is a routing cache, not the authoritative project state.
+`spaceName` is the stable binding key. `spaceId` and page labels are runtime attachments and may be recreated. Version-1 registries are migrated to version 2; stale per-session Space attachments are cleared instead of being treated as permanent identity.
+
+A session record contains conversation identity plus routing metadata such as logical role, account, lifecycle status, model/effort, Space, and tab/page attachment.
+
+The runtime file contains reconstructable orchestration state such as active task IDs and recent project execution metadata. It must never outrank GitHub Issues/PRs as project truth.
+
+### Logical project → account → Space
+
+The control-plane hierarchy is:
+
+```text
+Logical Project
+  ├─ ChatGPT account binding A → one Ego Space → many tabs/sessions
+  └─ ChatGPT account binding B → one Ego Space → many tabs/sessions
+```
+
+All new sessions for the same project/account are created with `task.newPage()` inside the bound Space. A normal session creation must not create a new Space. A separate Space should be created only for explicit Space tests, account isolation, or a deliberate rebind.
+
+A ChatGPT conversation ID is independent of its Ego Space attachment. Rebinding a project/account to another Space preserves conversation identity and causes sessions to reattach in tabs in the new Space.
+
+### Account failover
+
+Account records are routing identities. Each logical project may bind to a different ChatGPT Project and Ego Space for each account. The bridge does not automate credentials; the selected Space must already have authorized access to that ChatGPT account/project.
+
+Cross-account continuation should use GitHub durable state plus a handoff summary, then create or register a replacement session under the alternate account binding.
+
+### Session lifecycle
+
+Sessions have lifecycle state (`active`, `archived`, `retired`, or `deleted`). `retire` archives the remote ChatGPT conversation and removes it from the active routing pool while preserving history in the registry. `forget` is registry-only. `delete` is destructive and requires explicit confirmation.
 
 ## Project sync
 

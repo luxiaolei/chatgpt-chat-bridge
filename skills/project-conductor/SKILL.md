@@ -42,12 +42,14 @@ Use `ask` only when the conductor needs the result synchronously.
 
 Create, reuse, and retire project Chats deliberately.
 
+For each logical project/account, keep one bound Ego Space. New worker Chats must open as new tabs inside that Space; do not allocate a new Space per session. Treat the stable Space name as routing configuration and the numeric Space ID as a runtime cache.
+
 Create a session when:
 - a workstream has a distinct long-lived context,
 - a specialist role should remain stable,
 - or an existing Chat has become unhealthy or too context-heavy.
 
-Reuse an existing Chat when the new task is in the same workstream and its context remains useful.
+Reuse an existing Chat when the new task is in the same workstream and its context remains useful. Normally keep one active session per logical role/project/account. When replacing a context-heavy or unhealthy session, prefer `chat-bridge retire ROLE --project "PROJECT"` before creating the replacement.
 
 Create:
 
@@ -59,7 +61,31 @@ chat-bridge new --project "PROJECT" \
   --message "Role, scope, GitHub issue/PR, callback contract"
 ```
 
-### 4. Resource allocation
+### 4. Account and project binding
+
+A logical project may be bound to more than one ChatGPT account. Each account gets its own ChatGPT Project binding and Ego Space. Use account failover when the active account is unavailable or capacity-constrained, but preserve durable state in GitHub before handoff.
+
+The bridge does not automate credentials. A selected Ego Space must already have access to the intended account/project.
+
+Useful commands:
+
+```bash
+chat-bridge account add secondary
+chat-bridge account use secondary --project "PROJECT"
+chat-bridge bind --project "PROJECT" --account secondary --url "PROJECT URL" --space "SPACE NAME"
+```
+
+### 5. Runtime task cache
+
+Use the local runtime cache for reconstructable orchestration metadata, never as a substitute for GitHub:
+
+```bash
+chat-bridge task set TASK_ID --project "PROJECT" --role ROLE --status RUNNING --github URL
+chat-bridge task list --project "PROJECT"
+chat-bridge task clear TASK_ID --project "PROJECT"
+```
+
+### 6. Resource allocation
 
 Assign model and thinking level according to task difficulty, risk, and ambiguity.
 

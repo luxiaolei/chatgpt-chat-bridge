@@ -8,7 +8,10 @@ Before changing runtime behavior:
 2. Read `docs/architecture.md`.
 3. Preserve the principle: GitHub is durable state; chat is execution context/event delivery.
 4. Prefer Ego Lite `ego-browser` APIs over desktop-coordinate automation.
-5. Keep model-selection failures explicit.
-6. Run `npm run check && npm test`.
+5. Preserve one bound Ego Space per logical project/account; sessions are tabs, not Spaces.
+6. Treat `spaceId` and page labels as runtime attachments, not permanent identity.
+7. Keep destructive session deletion behind explicit confirmation.
+8. Keep model-selection failures explicit.
+9. Run `npm run check && npm test`.
 
 For conductor behavior, read `skills/project-conductor/SKILL.md`.

@@ -44,7 +44,9 @@ Conductor Chat ── chat-bridge ── Worker Chats
 - Select ChatGPT model and thinking effort
 - `GPT-6 Pro` preset: **Latest + Pro** (rightmost thinking slider)
 - Stop, Retry/Regenerate, resend, and automatic recovery
-- Persistent registry under `~/.config/chat-bridge/`
+- Project/account/Space bindings with one Ego Space per project/account
+- Session lifecycle: archive, retire, delete (explicit confirmation), and local forget
+- Persistent registry under `~/.config/chat-bridge/` and runtime cache under `~/.local/state/chat-bridge/`
 - Conductor skill for GitHub-driven multi-chat orchestration
 
 ## Requirements
@@ -120,7 +122,47 @@ chat-bridge new \
   --message "You own implementation for GitHub issue #12. Update the issue/PR, then callback conductor."
 ```
 
-The bridge captures the real conversation ID and project-scoped URL.
+The bridge captures the real conversation ID and project-scoped URL. New sessions for the same logical project/account are opened as **new tabs inside the bound Ego Space**; they do not create a new Space per session.
+
+## Project, account, and Space binding
+
+A logical project can have multiple ChatGPT account bindings. Each binding has its own ChatGPT Project URL and stable Ego Space name. The numeric Ego `spaceId` is treated as a runtime cache and may change when Ego recreates a Space.
+
+```bash
+chat-bridge account add secondary --label "Secondary ChatGPT"
+chat-bridge account use secondary --project "My Project"
+chat-bridge bind --project "My Project" --account secondary \
+  --url "https://chatgpt.com/g/g-p-.../project" \
+  --space "my-project-secondary"
+chat-bridge space show --project "My Project" --account secondary
+```
+
+The bridge does not automate account credentials. The bound Ego Space must already have access to the intended ChatGPT account/project. Switching the logical active account changes routing; GitHub remains the durable cross-account handoff state.
+
+## Session lifecycle
+
+```bash
+chat-bridge archive research-agent --project "My Project"
+chat-bridge retire research-agent --project "My Project"
+chat-bridge forget research-agent --project "My Project"
+chat-bridge delete research-agent --project "My Project" --confirm
+```
+
+- `archive`: archive the ChatGPT conversation and mark the local session archived.
+- `retire`: archive the ChatGPT conversation and mark the role/session retired so a replacement session can take over later.
+- `forget`: remove only the local registry entry; the ChatGPT conversation is untouched.
+- `delete`: permanently delete the ChatGPT conversation and requires explicit `--confirm`.
+
+## Runtime task cache
+
+Operational task state is stored separately from the registry at `~/.local/state/chat-bridge/runtime.json`. It is a reconstructable cache, not the source of truth; GitHub Issues/PRs remain authoritative.
+
+```bash
+chat-bridge task set HZ-47-W4 --project "My Project" --role implementation \
+  --status RUNNING --github "https://github.com/OWNER/REPO/issues/47"
+chat-bridge task list --project "My Project"
+chat-bridge task clear HZ-47-W4 --project "My Project"
+```
 
 ## Model allocation
 

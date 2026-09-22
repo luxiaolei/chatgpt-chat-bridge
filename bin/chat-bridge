@@ -20,4 +20,11 @@ fi
 [[ -f "$MAIN" ]] || { echo "chat-bridge: runtime not found: $MAIN" >&2; exit 127; }
 
 ARGS_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:], ensure_ascii=False))' "$@")"
-{ printf 'globalThis.__CHAT_BRIDGE_ARGS__ = %s;\n' "$ARGS_JSON"; cat "$MAIN"; } | exec "$EGO_BROWSER" nodejs
+CONFIG_JSON="$(python3 -c 'import json,os; print(json.dumps(os.environ.get("CHAT_BRIDGE_CONFIG_DIR")))')"
+STATE_JSON="$(python3 -c 'import json,os; print(json.dumps(os.environ.get("CHAT_BRIDGE_STATE_DIR")))')"
+{
+  printf 'globalThis.__CHAT_BRIDGE_ARGS__ = %s;\n' "$ARGS_JSON"
+  printf 'globalThis.__CHAT_BRIDGE_CONFIG_DIR__ = %s;\n' "$CONFIG_JSON"
+  printf 'globalThis.__CHAT_BRIDGE_STATE_DIR__ = %s;\n' "$STATE_JSON"
+  cat "$MAIN"
+} | exec "$EGO_BROWSER" nodejs
