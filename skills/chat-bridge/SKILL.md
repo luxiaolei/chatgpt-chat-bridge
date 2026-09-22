@@ -35,7 +35,7 @@ chat-bridge projects
 Fire-and-forget:
 
 ```bash
-chat-bridge send AGENT_ALIAS "message" --project "PROJECT NAME"
+chat-bridge send AGENT_ALIAS "message" --project "PROJECT NAME" --task TASK_ID
 ```
 
 RPC-style call that waits for the assistant response:
@@ -50,11 +50,13 @@ Read the most recent assistant response:
 chat-bridge read AGENT_ALIAS --project "PROJECT NAME"
 ```
 
-Inspect generation state and configured resources:
+Inspect generation/liveness state and configured resources:
 
 ```bash
-chat-bridge status AGENT_ALIAS --project "PROJECT NAME"
+chat-bridge status AGENT_ALIAS --project "PROJECT NAME" --task TASK_ID
 ```
+
+`status` returns a state such as `RUNNING_ACTIVE`, `RUNNING_QUIET`, `SUSPECT_STALL`, `IDLE_COMPLETE`, `IDLE_INCOMPLETE`, `ERROR_RECOVERABLE`, or `BLOCKED`, plus heartbeat fields including `lastProgressAt`, `quietForSec`, message IDs, recovery controls, and a recommended action.
 
 ## Create and register sessions
 
@@ -132,7 +134,27 @@ chat-bridge model research-agent "GPT-6 Pro" --project "PROJECT NAME"
 
 The bridge maps this preset to ChatGPT's `Latest` model choice plus `Pro` effort, i.e. the rightmost thinking slider position.
 
-## Recovery
+## Watchdog and recovery
+
+Dispatch tracked work with `--task`; this records the pre-dispatch assistant baseline and lets the watchdog distinguish a new result from an idle/stopped turn.
+
+```bash
+chat-bridge send research-agent "TASK ENVELOPE" --project "PROJECT NAME" --task T-001
+chat-bridge watch --project "PROJECT NAME" --dry-run
+chat-bridge watch --project "PROJECT NAME"
+```
+
+The watchdog uses multiple signals: Stop/Send/composer controls, stable ChatGPT message IDs, assistant text/hash/length, a page-side MutationObserver, recovery/error UI, and elapsed time since real progress. Normal quiet thinking is not interrupted until the task's stall threshold is crossed.
+
+Install the macOS launchd watchdog (all projects, one-shot scan every 15 seconds):
+
+```bash
+~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 15
+```
+
+Remove it with `~/.local/share/chatgpt-chat-bridge/uninstall-watchdog.sh`.
+
+Recovery ladder is deliberately conservative: native Continue/Try again/Retry/Regenerate → `continue` → Stop + guarded continue. Re-sending the original task is only enabled with `--aggressive`. Repeated failures mark the task `BLOCKED` and wake the conductor for GitHub reconciliation.
 
 Stop an active generation:
 
@@ -152,7 +174,7 @@ Automatic recovery:
 chat-bridge recover AGENT_ALIAS --project "PROJECT NAME"
 ```
 
-`recover` stops a stuck generation if needed, tries Retry/Regenerate, and falls back to resending the last user message.
+`recover` uses the same conservative recovery policy. It does not re-send the original user task unless `--aggressive` is explicitly supplied.
 
 ## Routing rules
 

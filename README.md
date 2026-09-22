@@ -43,7 +43,7 @@ Conductor Chat ── chat-bridge ── Worker Chats
 - Inspect generation state
 - Select ChatGPT model and thinking effort
 - `GPT-6 Pro` preset: **Latest + Pro** (rightmost thinking slider)
-- Stop, Retry/Regenerate, resend, and automatic recovery
+- Multi-signal liveness state machine, heartbeat, watchdog, and graded recovery
 - Project/account/Space bindings with one Ego Space per project/account
 - Session lifecycle: archive, retire, delete (explicit confirmation), and local forget
 - Persistent registry under `~/.config/chat-bridge/` and runtime cache under `~/.local/state/chat-bridge/`
@@ -190,6 +190,33 @@ Observed effort levels:
 | High | 2 |
 | Extra High | 3 |
 | Pro | 4 |
+
+## Watchdog
+
+Tracked dispatch:
+
+```bash
+chat-bridge send research-agent "..." --project "My Project" --task T-001
+```
+
+Status now exposes `RUNNING_ACTIVE`, `RUNNING_QUIET`, `SUSPECT_STALL`, `IDLE_COMPLETE`, `IDLE_INCOMPLETE`, `ERROR_RECOVERABLE`, and `BLOCKED`, with message IDs, `lastProgressAt`, `quietForSec`, recovery controls, and a recommended action.
+
+Run a scan or a foreground loop:
+
+```bash
+chat-bridge watch --project "My Project" --dry-run
+chat-bridge watch --project "My Project"
+chat-bridge watch --loop --interval 15
+```
+
+Install the macOS watchdog for all projects:
+
+```bash
+./scripts/install.sh
+~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 15
+```
+
+launchd starts a fresh one-shot scan every 15 seconds. Recovery is conservative: native Continue/Retry first, then `continue`, then Stop + guarded continue. Original-task replay requires `--aggressive`. UI completion never marks the durable task COMPLETE; it becomes `AWAITING_DURABLE_UPDATE` until GitHub is reconciled.
 
 ## Recovery
 

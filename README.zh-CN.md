@@ -201,6 +201,30 @@ chat-bridge ...
 - `codex-chatgpt-web`：把 ChatGPT Web 模型接入 Codex 工作流；
 - `chatgpt-chat-bridge`：管理 ChatGPT Project 内的 Chat Session、消息路由、回调和总控编排。
 
+## Watchdog 与保活
+
+派发任务时把 task ID 绑定进去：
+
+```bash
+chat-bridge send research-agent "..." --project "My Project" --task T-001
+```
+
+`status` 会综合 Stop/Send/composer、ChatGPT `data-message-id`、回复内容变化、页面 MutationObserver、Retry/Continue/error UI 和最后进展时间，输出：`RUNNING_ACTIVE`、`RUNNING_QUIET`、`SUSPECT_STALL`、`IDLE_COMPLETE`、`IDLE_INCOMPLETE`、`ERROR_RECOVERABLE`、`BLOCKED`。
+
+```bash
+chat-bridge watch --project "My Project" --dry-run
+chat-bridge watch --project "My Project"
+```
+
+在 XL mini 上安装 macOS 常驻 Watchdog：
+
+```bash
+./scripts/install.sh
+~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 15
+```
+
+launchd 每 15 秒启动一次全新的 one-shot 扫描，所以每轮都会重新读取 registry/runtime。恢复顺序默认是：原生 Continue/Retry → 发 `continue` → 明确卡死后 Stop + guarded continue。只有 `--aggressive` 才允许重发原始任务。Chat UI 看起来完成时只标记 `AWAITING_DURABLE_UPDATE`，最终 COMPLETE 仍需 GitHub 证据。
+
 ## 恢复
 
 ```bash

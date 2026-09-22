@@ -100,6 +100,26 @@ Cross-account continuation should use GitHub durable state plus a handoff summar
 
 Sessions have lifecycle state (`active`, `archived`, `retired`, or `deleted`). `retire` archives the remote ChatGPT conversation and removes it from the active routing pool while preserving history in the registry. `forget` is registry-only. `delete` is destructive and requires explicit confirmation.
 
+## Liveness and watchdog
+
+A ChatGPT generation is not classified from one button alone. The bridge combines control state (Stop/Send/composer), stable `data-message-id` turn identity, assistant content fingerprints, a page-side MutationObserver scoped to message/generation UI, recovery/error controls, connectivity, and elapsed time since meaningful progress.
+
+The session state machine is:
+
+```text
+RUNNING_ACTIVE -> RUNNING_QUIET -> SUSPECT_STALL
+      |                 |               |
+      v                 v               v
+IDLE_COMPLETE   ERROR_RECOVERABLE   recovery ladder
+IDLE_INCOMPLETE                     or BLOCKED
+```
+
+`lastProgressAt` and per-task baselines are stored in runtime state. Per-task `stallThresholdSec` can override the effort-based defaults. A new result is identified primarily by ChatGPT's stable `data-message-id`, with count/hash/length as additional signals.
+
+The watchdog never marks a project task COMPLETE from UI state alone. `IDLE_COMPLETE` becomes `AWAITING_DURABLE_UPDATE`; the conductor must reconcile GitHub Issue/PR/callback evidence. Mechanical recovery is conservative: native recovery control, then `continue`, then Stop + guarded continue. Original-task replay requires explicit aggressive mode. Exhausted recovery becomes `BLOCKED` and wakes the conductor.
+
+For continuous local operation, macOS launchd runs a fresh one-shot `chat-bridge watch --quiet` periodically. A fresh process reloads registry/runtime each scan, so newly created sessions and account/Space rebindings are visible without restarting a daemon.
+
 ## Project sync
 
 `chat-bridge sync --project NAME` opens the actual ChatGPT Project page and enumerates project-scoped conversation links.

@@ -33,7 +33,7 @@ chat-bridge list --project "PROJECT"
 Dispatch:
 
 ```bash
-chat-bridge send AGENT "TASK ENVELOPE" --project "PROJECT"
+chat-bridge send AGENT "TASK ENVELOPE" --project "PROJECT" --task TASK_ID
 ```
 
 Use `ask` only when the conductor needs the result synchronously.
@@ -80,12 +80,28 @@ chat-bridge bind --project "PROJECT" --account secondary --url "PROJECT URL" --s
 Use the local runtime cache for reconstructable orchestration metadata, never as a substitute for GitHub:
 
 ```bash
-chat-bridge task set TASK_ID --project "PROJECT" --role ROLE --status RUNNING --github URL
+chat-bridge task set TASK_ID --project "PROJECT" --role ROLE --status RUNNING --github URL --stall-sec 480
 chat-bridge task list --project "PROJECT"
 chat-bridge task clear TASK_ID --project "PROJECT"
 ```
 
-### 6. Resource allocation
+### 6. Watchdog and liveness
+
+Every dispatched work item should be tracked with `--task TASK_ID`. The local watchdog owns mechanical liveness/recovery; the conductor owns project decisions.
+
+Use these states:
+
+- `RUNNING_ACTIVE`: generation has recent message/DOM progress.
+- `RUNNING_QUIET`: still generating, quiet but below the stall threshold; do not disturb it.
+- `SUSPECT_STALL`: Stop is still present but no meaningful progress beyond the threshold.
+- `ERROR_RECOVERABLE`: Retry/Continue/error UI is present.
+- `IDLE_INCOMPLETE`: the turn stopped without a new assistant result for the tracked task.
+- `IDLE_COMPLETE`: a new assistant message ID/result exists; reconcile GitHub before declaring task completion.
+- `BLOCKED`: page/login/connectivity is unhealthy or recovery attempts are exhausted.
+
+Run one scan with `chat-bridge watch --project "PROJECT"`; the installed macOS watchdog runs one scan every 15 seconds across all projects. Recovery is conservative and idempotency-aware. After repeated failure, the watchdog marks the task BLOCKED and sends a watchdog event to `conductor` rather than inventing a project decision.
+
+### 7. Resource allocation
 
 Assign model and thinking level according to task difficulty, risk, and ambiguity.
 
