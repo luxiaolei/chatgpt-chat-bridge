@@ -45,23 +45,48 @@ The bridge stores discovered and created sessions at:
 ~/.config/chat-bridge/registry.json
 ```
 
-A chat record contains fields such as:
+The v2 registry separates logical identity from browser attachment:
 
-```json
-{
-  "id": "conversation-id",
-  "url": "https://chatgpt.com/g/g-p-.../c/...",
-  "name": "research-agent",
-  "title": "Research",
-  "project": "My Project",
-  "model": "GPT-6 Pro",
-  "effort": "Pro",
-  "spaceId": 42,
-  "page": "p1"
-}
+```text
+Logical Project
+  └─ Account binding
+       ├─ ChatGPT Project URL / ID
+       ├─ preferred Ego Space name
+       └─ runtime spaceId cache
+            ├─ role/session A → tab/page
+            └─ role/session B → tab/page
 ```
 
-The registry is a routing cache, not the authoritative project state.
+A session record contains `project`, `account`, `role`, `status`, conversation ID/URL, model/effort, `spaceName`, the current `spaceId` cache, and page label. A v1 registry is migrated in place; old per-session Space IDs are kept as `legacySpaceId` evidence but attachments are rebuilt in the project-bound Space.
+
+The registry is a routing cache, not the authoritative project state. Space IDs are not treated as permanent identifiers because Ego Lite may rebuild a Space and assign a new ID.
+
+## Runtime state
+
+Ephemeral control-plane state is stored separately at:
+
+```text
+~/.local/state/chat-bridge/runtime.json
+```
+
+It records recent project/account/Space activity and is safe to reconstruct. GitHub remains durable state.
+
+## Project, account, and Space binding
+
+The bridge uses one preferred Ego Space for each logical Project + account binding. `chat-bridge new` calls `task.newPage()` inside that Space, so parallel worker sessions become tabs rather than new Spaces. Rebinding a project clears page attachments; sessions are lazily reattached to the new Space by conversation URL.
+
+Multiple ChatGPT accounts can represent the same logical project. Each account has an independent ChatGPT Project URL and Space binding. Switching the bridge's active account changes the endpoint selected for new/routed sessions; actual browser authentication remains an Ego Lite/browser responsibility.
+
+## Roles and session lifecycle
+
+A role name is stable while individual conversations can be replaced. Only active sessions participate in role routing. Lifecycle operations are:
+
+- `archive`: archive the remote conversation and mark the session inactive.
+- `retire`: archive, mark retired, and close its attached Ego tab.
+- `forget`: remove only the local routing record.
+- `delete`: delete the remote conversation after explicit `--confirm DELETE`.
+
+`space prune` closes tabs in the bound Project Space that are neither the control page nor referenced by an active session.
 
 ## Project sync
 

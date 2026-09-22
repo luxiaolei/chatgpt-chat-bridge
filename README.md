@@ -44,7 +44,12 @@ Conductor Chat ── chat-bridge ── Worker Chats
 - Select ChatGPT model and thinking effort
 - `GPT-6 Pro` preset: **Latest + Pro** (rightmost thinking slider)
 - Stop, Retry/Regenerate, resend, and automatic recovery
-- Persistent registry under `~/.config/chat-bridge/`
+- Project-scoped Ego Space binding: one logical Project/account endpoint uses one Space; new sessions open as tabs in that Space
+- Logical ChatGPT accounts and per-account Project bindings for account failover
+- Session lifecycle: archive, retire, delete, forget, and Space tab pruning
+- Persistent registry at `~/.config/chat-bridge/registry.json`
+- Runtime cache at `~/.local/state/chat-bridge/runtime.json`
+- Automatic v1 → v2 registry migration without losing conversation IDs
 - Conductor skill for GitHub-driven multi-chat orchestration
 
 ## Requirements
@@ -74,11 +79,13 @@ This installs:
 
 ## Quick start
 
-Initialize a default project:
+Initialize a logical project and bind its preferred Ego Space:
 
 ```bash
-chat-bridge init --project "My Project"
+chat-bridge init --project "My Project" --space "my-project"
 ```
+
+A Project/account binding owns one Ego Space. `chat-bridge new` creates a **new tab inside that Space**; it does not create a new Space per Chat.
 
 Discover/sync the actual ChatGPT Project:
 
@@ -120,7 +127,109 @@ chat-bridge new \
   --message "You own implementation for GitHub issue #12. Update the issue/PR, then callback conductor."
 ```
 
-The bridge captures the real conversation ID and project-scoped URL.
+The bridge captures the real conversation ID and project-scoped URL. The stable routing identity is the logical `role`; the concrete conversation can later be retired and replaced.
+
+## Local state and Space binding
+
+The bridge keeps two local files on the machine running Ego Lite:
+
+```text
+~/.config/chat-bridge/registry.json          # durable routing/config cache
+~/.local/state/chat-bridge/runtime.json      # ephemeral orchestration/runtime cache
+```
+
+GitHub Issues/PRs remain the authoritative project state. The local files only reconstruct routing and execution state.
+
+Each logical Project can have one binding per ChatGPT account:
+
+```text
+logical project → account → ChatGPT Project URL/ID → Ego Space
+```
+
+`spaceName` is the stable binding. Numeric `spaceId` is treated as a runtime cache because Ego Lite can recreate a Space with a different ID.
+
+Inspect or change the Space binding:
+
+```bash
+chat-bridge space show --project "My Project"
+chat-bridge space bind "my-project-space" --project "My Project"
+chat-bridge space prune --project "My Project"
+```
+
+`space prune` keeps the Project control tab and tabs referenced by active sessions, and closes stale untracked tabs.
+
+## Multiple ChatGPT accounts
+
+A logical Project is not tied permanently to one ChatGPT account. Register account labels and switch the active endpoint:
+
+```bash
+chat-bridge account add secondary --label "Secondary ChatGPT"
+chat-bridge account use secondary --project "My Project"
+chat-bridge bind --project "My Project" --account secondary \
+  --url "https://chatgpt.com/g/g-p-.../project" \
+  --space "my-project-secondary"
+```
+
+The account label records routing intent; the actual logged-in account/profile is still controlled by Ego Lite/ChatGPT. The bridge does not assume that an Ego Space by itself isolates cookies or login state.
+
+## Session lifecycle
+
+```bash
+chat-bridge archive implementation-agent --project "My Project"
+chat-bridge retire implementation-agent --project "My Project"
+chat-bridge delete implementation-agent --project "My Project" --confirm DELETE
+chat-bridge forget implementation-agent --project "My Project"
+```
+
+- `archive`: archive the ChatGPT conversation and mark it archived locally.
+- `retire`: archive the conversation and retire that concrete session so the same role can be replaced.
+- `delete`: destructively delete the ChatGPT conversation; requires `--confirm DELETE`.
+- `forget`: remove only the local registry record; the remote conversation is untouched.
+
+Archive/retire/delete also close the bound session tab.
+
+## Accounts, Spaces, and logical projects
+
+A logical project can be bound to more than one ChatGPT account. Each account gets its own ChatGPT Project binding and preferred Ego Space:
+
+```bash
+chat-bridge account add alternate
+chat-bridge account use alternate --project "My Project"
+chat-bridge bind --project "My Project" --account alternate \
+  --url "https://chatgpt.com/g/g-p-.../project" \
+  --space "my-project-alternate"
+```
+
+The account name is a bridge-side identity/binding. The bridge does not impersonate or silently log in to another ChatGPT account; the corresponding Ego Lite browser context must already be authenticated.
+
+Inspect the active binding:
+
+```bash
+chat-bridge account list
+chat-bridge space show --project "My Project"
+chat-bridge space prune --project "My Project"
+```
+
+`space prune` keeps the project control tab and registry-referenced active session tabs, and closes other tabs in that bound Space.
+
+## Session lifecycle
+
+Stable roles can outlive individual Chat sessions. Retire an old session before creating its replacement:
+
+```bash
+chat-bridge archive implementation-agent --project "My Project"
+chat-bridge retire implementation-agent --project "My Project"
+chat-bridge forget implementation-agent --project "My Project"
+chat-bridge delete implementation-agent --project "My Project" --confirm DELETE
+```
+
+`archive` archives the ChatGPT conversation. `retire` archives it, removes it from the active routing pool, and closes its attached Ego tab. `forget` removes only the local registry entry. `delete` is destructive and requires explicit confirmation.
+
+## Local control-plane state
+
+- `~/.config/chat-bridge/registry.json`: project/account/Space bindings and Chat session routing records.
+- `~/.local/state/chat-bridge/runtime.json`: ephemeral orchestration/runtime observations.
+- GitHub Issues/PRs remain the durable source of truth for project work.
 
 ## Model allocation
 

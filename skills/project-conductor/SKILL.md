@@ -49,6 +49,8 @@ Create a session when:
 
 Reuse an existing Chat when the new task is in the same workstream and its context remains useful.
 
+For one logical Project + ChatGPT account endpoint, keep one bound Ego Space. Worker sessions are tabs/pages inside that Space; do not create a new Space per Chat. When replacing a stale or context-heavy session, retire/archive the old session before activating the replacement role.
+
 Create:
 
 ```bash
@@ -160,6 +162,19 @@ If work requires local filesystem, GUI, browser state, builds, or machine-specif
 - use the Web Codex / codex-chatgpt-web environment when appropriate.
 
 If work does not require local state, keep it in Chat and GitHub rather than introducing local dependencies.
+
+## Account failover
+
+A logical project may have more than one ChatGPT account endpoint. If the active account is unavailable or quota-constrained:
+
+1. ensure the alternate browser context is already authenticated;
+2. switch the bridge binding with `chat-bridge account use ACCOUNT --project "PROJECT"`;
+3. bind that account to its ChatGPT Project URL and preferred Ego Space;
+4. reconstruct worker context from GitHub Issues/PRs plus the latest durable handoff;
+5. create replacement sessions under the same stable roles;
+6. retire old-account sessions when no longer needed.
+
+Do not assume conversation history is shared across ChatGPT accounts. GitHub remains the cross-account durable state.
 
 ## Failure handling
 

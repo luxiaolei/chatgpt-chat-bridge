@@ -22,7 +22,7 @@ chat-bridge sync --project "PROJECT NAME"
 chat-bridge list --project "PROJECT NAME"
 ```
 
-`sync` opens the real ChatGPT Project page, discovers its chats, and updates the local registry at `~/.config/chat-bridge/registry.json`.
+`sync` opens the real ChatGPT Project page, discovers its chats, and updates the local registry at `~/.config/chat-bridge/registry.json`. Runtime observations are kept separately at `~/.local/state/chat-bridge/runtime.json`.
 
 List visible ChatGPT Projects:
 
@@ -68,7 +68,7 @@ chat-bridge new --project "PROJECT NAME" \
   --message "Initial role and task"
 ```
 
-The command captures the conversation ID, project-scoped URL, Ego TaskSpace, model, and effort in the registry.
+The command captures the conversation ID, project-scoped URL, model, effort, and page attachment. New sessions reuse the Project+account bound Ego Space and open a new tab with `task.newPage()`; do not create one Space per Chat.
 
 ## Models and thinking
 
@@ -124,7 +124,10 @@ chat-bridge recover AGENT_ALIAS --project "PROJECT NAME"
 
 ## Routing rules
 
-- Prefer stable registry aliases over raw conversation IDs.
+- Prefer stable role/registry aliases over raw conversation IDs.
+- Keep one preferred Ego Space per logical Project + account; worker sessions are tabs inside it.
+- Treat `spaceId` as a runtime cache, not a durable identity.
+- Retire/archive stale sessions instead of accumulating active Chat tabs.
 - Sync before dispatching a multi-chat batch.
 - Use `ask` when the caller must synchronously consume the result.
 - Use `send` for callback/event delivery to another Chat.

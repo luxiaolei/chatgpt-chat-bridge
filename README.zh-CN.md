@@ -26,7 +26,13 @@ GitHub Issue / PR（项目真实状态）
 - 切换模型和 Thinking Level
 - `GPT-6 Pro` 预设：**Latest + Pro（滑块最右）**
 - Stop / Retry / Resend / Recover
-- 本地持久化 Session registry
+- Project 级 Ego Space 绑定：同一逻辑 Project/账号端点固定一个 Space，新 Session 只在该 Space 内开新 tab
+- 支持逻辑 ChatGPT 账号与每账号 Project binding，便于额度不足时切换账号
+- Session 生命周期：archive / retire / delete / forget
+- `space prune` 清理 Project Space 中未被 registry 引用的旧 tab
+- Registry：`~/.config/chat-bridge/registry.json`
+- Runtime state：`~/.local/state/chat-bridge/runtime.json`
+- v1 → v2 registry 自动迁移
 - 内置项目总控 Skill
 
 ## 安装
@@ -40,7 +46,7 @@ cd chatgpt-chat-bridge
 ## 快速开始
 
 ```bash
-chat-bridge init --project "My Project"
+chat-bridge init --project "My Project" --space "my-project"
 chat-bridge sync --project "My Project"
 chat-bridge list --project "My Project"
 ```
@@ -67,6 +73,52 @@ chat-bridge new \
   --effort High \
   --message "负责 Issue #12；完成后先更新 GitHub，再回调 conductor。"
 ```
+
+同一个 Project/账号端点只绑定一个 Ego Space。以后 `new` 只会在这个 Space 里 `newPage()` 开新 tab，不会为每个 Chat 新建 Space。
+
+## 本地状态
+
+```text
+~/.config/chat-bridge/registry.json
+~/.local/state/chat-bridge/runtime.json
+```
+
+- registry：Project、账号、Project binding、role、conversation、Space/tab 路由。
+- runtime：当前调度过程的运行时缓存。
+- GitHub Issue / PR：仍然是 durable source of truth。
+
+`spaceName` 是稳定绑定；数字 `spaceId` 只是运行时缓存，因为 Ego Lite 重建 Space 后 ID 可能变化。
+
+```bash
+chat-bridge space show --project "My Project"
+chat-bridge space bind "my-project" --project "My Project"
+chat-bridge space prune --project "My Project"
+```
+
+## 多 ChatGPT 账号
+
+同一个逻辑 Project 可以在不同 ChatGPT 账号下各有一个 Project/Space binding：
+
+```bash
+chat-bridge account add secondary --label "第二账号"
+chat-bridge account use secondary --project "My Project"
+chat-bridge bind --project "My Project" --account secondary \
+  --url "https://chatgpt.com/g/g-p-.../project" \
+  --space "my-project-secondary"
+```
+
+这里的 account 是 bridge 的逻辑路由标签；实际登录态由 Ego Lite / ChatGPT 决定，bridge 不假设 Space 本身就等于独立 cookie/profile。
+
+## Session 生命周期
+
+```bash
+chat-bridge archive implementation-agent --project "My Project"
+chat-bridge retire implementation-agent --project "My Project"
+chat-bridge delete implementation-agent --project "My Project" --confirm DELETE
+chat-bridge forget implementation-agent --project "My Project"
+```
+
+`retire` 会 Archive 远端 Chat、关闭对应 tab，并让同一 role 可以创建 replacement session。`delete` 是破坏性操作，必须显式确认；`forget` 只删除本地 registry 记录。
 
 ## GPT-6 Pro
 
