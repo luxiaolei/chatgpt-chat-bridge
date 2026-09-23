@@ -1,12 +1,12 @@
 {
   "name": "chatgpt-chat-bridge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": false,
   "description": "ChatGPT Project chat routing and orchestration over Ego Lite's native ego-browser runtime.",
   "license": "MIT",
   "scripts": {
     "check": "node --check src/main.js && zsh -n bin/chat-bridge scripts/install.sh scripts/uninstall.sh scripts/install-watchdog.sh scripts/uninstall-watchdog.sh",
-    "test": "zsh tests/static.sh"
+    "test": "node --test tests/*.test.mjs && zsh tests/static.sh"
   },
   "engines": {
     "node": ">=20"

@@ -30,5 +30,12 @@ grep -q 'gradedRecover' "$ROOT/src/main.js"
 grep -q 'cmd==="watch"' "$ROOT/src/main.js"
 grep -q 'AWAITING_DURABLE_UPDATE' "$ROOT/src/main.js"
 grep -q 'StartInterval' "$ROOT/scripts/install-watchdog.sh"
-grep -q '"version": "0.3.0"' "$ROOT/package.json"
+grep -q '"version": "0.4.0"' "$ROOT/package.json"
+grep -q 'notificationTargets' "$ROOT/src/main.js"
+grep -q 'rootController' "$ROOT/src/main.js"
+grep -q 'control-routing.js' "$ROOT/bin/chat-bridge"
+if grep -q 'notifyConductor' "$ROOT/src/main.js"; then
+  echo "watchdog must not hard-code conductor routing" >&2
+  exit 1
+fi
 echo "static checks passed"

@@ -1,120 +1,91 @@
 # Conductor operating model
 
-The conductor chat is the project-level coordinator.
+The bridge supports either one project conductor or a hierarchy of one root controller plus domain controllers.
 
 ## Source of truth
 
-Use GitHub as the durable source of truth.
+GitHub Issues and Pull Requests are durable project state. ChatGPT conversations are long-lived execution/control contexts. The bridge registry/runtime cache is reconstructable routing state and must not outrank GitHub.
 
-Recommended setup:
+Recommended project shape:
 
-- one umbrella Issue for the overall project;
-- child Issues for independent workstreams;
-- PRs for code/document changes;
-- a Discussion for broad design context or long-running architectural conversation.
+```text
+root controller
+  ├─ domain controller A → specialists / issue workers
+  ├─ domain controller B → specialists / issue workers
+  └─ verification controller → reviewers
+```
 
-The conductor should maintain the umbrella Issue with active sessions, current phase, blockers, completed milestones, and next dispatch batch.
+For a small project, the backward-compatible root role remains `conductor`.
+## Control routing
 
+Initialize a hierarchical project:
+
+```bash
+chat-bridge init --project "PROJECT" --root-controller 00-g
+```
+
+Each tracked task may carry:
+
+- `controller`: owning domain controller;
+- `replyTo`: first callback/watchdog destination, normally the owning controller;
+- `escalationTo`: fallback controller when the owning controller cannot be reached;
+- `rootController`: project-level fallback captured from project configuration.
+
+Notification order is:
+
+```text
+replyTo → controller → escalationTo → rootController
+```
+
+Duplicate targets are removed. A task must not be escalated merely because it belongs to the same project as the root controller.
 ## Dispatch contract
-
-Every task should include:
-
-- stable task ID;
-- GitHub Issue/PR reference;
-- goal;
-- acceptance criteria;
-- worker alias;
-- callback target;
-- required model/effort when relevant;
-- explicit instruction to update GitHub before callback.
-
-Example:
 
 ```text
 [TASK]
-task_id: CORE-12-IMPL-1
-issue: luxiaolei/repo#12
-from: conductor
-to: implementation-agent
-reply_to: conductor
-attempt: 1
-max_hops: 5
+task_id: SUP-48-IMPL-1
+issue: luxiaolei/repo#48
+from: 00-s
+to: supply-worker
+reply_to: 00-s
+escalation_to: 00-g
 
 Goal:
-Implement the accepted design.
+...
 
-Acceptance criteria:
-- tests pass;
-- PR opened;
-- Issue updated with evidence.
+Acceptance:
+...
 
 Required durable update:
-Update the Issue/PR first. Then callback conductor with the GitHub URL.
+Update the Issue/PR first, then callback the owning controller.
 ```
 
-## Callback contract
-
-```text
-[RESULT]
-task_id: CORE-12-IMPL-1
-from: implementation-agent
-to: conductor
-status: COMPLETE
-github: https://github.com/.../pull/34
-summary: Implementation complete; tests pass.
-next: Review PR #34.
-```
-
-The callback is delivered through:
+Equivalent tracked dispatch:
 
 ```bash
-chat-bridge send conductor "[RESULT] ..." --project "PROJECT"
+chat-bridge send supply-worker "..." --project "PROJECT" --task SUP-48-IMPL-1 \
+  --controller 00-s --reply-to 00-s --escalation-to 00-g
 ```
+## Responsibility split
 
-That user message wakes the conductor for its next turn.
+The root controller owns cross-domain priorities, controller health, shared write/resource conflicts, ownership transfers, and evidence-policy arbitration.
 
-## Resource policy
+A domain controller owns its Issue set and may autonomously dispatch/recover/replace sessions, request review, update ordinary task state, and progress PR work inside its domain.
 
-Suggested default allocation:
+Specialist and issue-worker chats execute work. They do not silently change ownership or create a second control plane.
 
-| Work type | Model | Effort |
-| --- | --- | --- |
-| Routing/status/basic lookup | Latest | Instant/Medium |
-| Normal implementation/research | GPT-5.6 Sol | High |
-| Architecture/difficult review | GPT-5.6 Sol | Extra High |
-| Highest-stakes synthesis/final review | GPT-6 Pro preset | Pro |
+The verification controller/reviewer must return PASS, CHANGES_REQUIRED, BLOCKED, or a bounded evidence result to the owning controller. A green author check is not independent acceptance.
 
-The highest tier should be reserved for work whose error cost or reasoning complexity justifies it.
+## Watchdog
 
+The local watchdog owns only mechanical liveness and conservative recovery. It never decides project completion. `IDLE_COMPLETE` becomes `AWAITING_DURABLE_UPDATE`; the owning controller reconciles GitHub evidence before marking COMPLETE.
+
+If recovery is exhausted, the watchdog notifies the task's control chain. If a domain controller is unreachable, the event falls back to its escalation/root controller.
 ## Session policy
 
-Create a new session when:
+Keep one active session per logical role/project/account unless duplicate-role operation is explicitly required. Create a new session when the context is materially different, a workstream is long-lived, or a session is unhealthy/context-saturated. Retire the old session before replacement when practical.
 
-- context is meaningfully different;
-- the workstream is expected to live for multiple rounds;
-- the existing session is corrupted/stuck/context-saturated;
-- separation of responsibilities reduces confusion.
-
-Reuse a session when its context directly benefits the new task.
-
-## Failure policy
-
-If a worker chat stalls:
-
-1. inspect `chat-bridge status`;
-2. run `chat-bridge recover`;
-3. if repeated recovery fails, preserve the Issue/PR state and create a replacement session;
-4. seed the new session from GitHub links and current decisions, not from an unbounded copy of old chat history.
+All sessions for one logical project/account live as tabs in one bound Ego Space. A new chat must not create a new Space.
 
 ## Completion
 
-A worker result is evidence, not authoritative completion.
-
-The conductor should validate:
-
-- Issue/PR state;
-- tests/review evidence;
-- acceptance criteria;
-- unresolved blockers.
-
-Only then should the workstream or project be declared complete.
+A worker result is evidence, not authoritative completion. Controllers validate current Issue/PR state, tests/review evidence, acceptance criteria, and blockers. The root controller declares project-level completion only when the durable GitHub graph supports it.
