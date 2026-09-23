@@ -1,6 +1,7 @@
 const fs = await import("node:fs/promises");
 const os = await import("node:os");
 const pathMod = await import("node:path");
+const crypto = await import("node:crypto");
 const args = globalThis.__CHAT_BRIDGE_ARGS__ || [];
 const HOME = os.homedir();
 const CONFIG_DIR = globalThis.__CHAT_BRIDGE_CONFIG_DIR__ || process.env.CHAT_BRIDGE_CONFIG_DIR || pathMod.join(HOME, ".config", "chat-bridge");
@@ -23,7 +24,28 @@ const { activeTaskStatus, assertTaskId, assertActiveTaskTarget, activeSessionCon
 const WEB_POLICY = globalThis.__CHAT_BRIDGE_WEB_POLICY__;
 if(!WEB_POLICY) throw new Error("chat-bridge web policy module was not loaded");
 const { findRateLimitText, nextCooldown } = WEB_POLICY;
+const MODEL_POLICY=globalThis.__CHAT_BRIDGE_MODEL_POLICY__;
+if(!MODEL_POLICY) throw new Error("chat-bridge model policy module was not loaded");
+const {modelPreset,observedModel,selectModelLabel}=MODEL_POLICY;
 const WEB_COOLDOWN_PATH = pathMod.join(STATE_DIR, "web-cooldown.json");
+const taskAccounts=new Map();
+
+function accountScope(reg, account) {
+  const identity=reg.accounts?.[account]?.identity;
+  return crypto.createHash("sha256").update(identity?`identity:${identity}`:`alias:${account}`).digest("hex");
+}
+function cooldownPath(reg, account) {
+  return pathMod.join(STATE_DIR,"web-cooldowns",accountScope(reg,account)+".json");
+}
+function cooldownError(value, account) {
+  const error=new Error(`WEB_RATE_LIMITED account=${account} until=${value.until}`);
+  error.code="WEB_RATE_LIMITED"; error.account=account;
+  return error;
+}
+async function assertWebAvailable(account) {
+  const value=await loadWebCooldown(account);
+  if(Date.parse(value.until)>Date.now()) throw cooldownError(value,account);
+}
 
 function slug(v="") {
   return String(v).trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"") || "project";
@@ -84,16 +106,27 @@ async function touchRuntime(project, patch={}) {
   await saveRuntime(rt); return rt;
 }
 
-async function loadWebCooldown() {
-  try { return JSON.parse(await fs.readFile(WEB_COOLDOWN_PATH,"utf8")); }
-  catch { return {}; }
+async function loadWebCooldown(account) {
+  const paths=[cooldownPath(reg,account)];
+  if(accountScope(reg,account)===accountScope(reg,reg.defaultAccount||DEFAULT_ACCOUNT)) paths.push(WEB_COOLDOWN_PATH);
+  const rows=[];
+  for(const file of paths){
+    try { rows.push(JSON.parse(await fs.readFile(file,"utf8"))); }
+    catch(error){ if(error.code!=="ENOENT") throw error; }
+  }
+  return rows.sort((a,b)=>String(b.until||"").localeCompare(String(a.until||"")))[0]||{};
 }
-async function saveWebCooldown(value) {
-  await fs.mkdir(pathMod.dirname(WEB_COOLDOWN_PATH),{recursive:true});
-  await fs.writeFile(WEB_COOLDOWN_PATH,JSON.stringify(value,null,2)+"\n");
+async function saveWebCooldown(value, account) {
+  const file=cooldownPath(reg,account), tmp=file+`.${process.pid}.tmp`;
+  await fs.mkdir(pathMod.dirname(file),{recursive:true});
+  await fs.writeFile(tmp,JSON.stringify({...value,account,scope:accountScope(reg,account)},null,2)+"\n");
+  await fs.rename(tmp,file);
   return value;
 }
 async function detectWebRateLimit(page, context="ui") {
+  const account=taskAccounts.get(Number(page.spaceId));
+  if(!account) throw new Error("Page has no bound ChatGPT account");
+  await assertWebAvailable(account);
   const candidates=await page.evaluate(() => {
     const nodes=[...document.querySelectorAll('[role="dialog"], [role="alert"]')];
     const texts=nodes.map(n=>(n.innerText||n.textContent||"").trim()).filter(Boolean);
@@ -104,11 +137,9 @@ async function detectWebRateLimit(page, context="ui") {
   }).catch(()=>[]);
   const detail=findRateLimitText(candidates);
   if(!detail) return null;
-  const next=nextCooldown(await loadWebCooldown(),Date.now(),context,detail.slice(0,500));
-  await saveWebCooldown(next);
-  const error=new Error(`WEB_RATE_LIMITED until=${next.until} strikes=${next.strikes} cooldownSec=${next.seconds}`);
-  error.code="WEB_RATE_LIMITED";
-  throw error;
+  const next=nextCooldown(await loadWebCooldown(account),Date.now(),context,detail.slice(0,500));
+  await saveWebCooldown(next,account);
+  throw cooldownError(next,account);
 }
 
 async function loadRegistry() {
@@ -154,7 +185,11 @@ function bindingFor(reg, project, account=null, create=true) {
 }
 function resolveChat(reg, key, project=null, account=null, includeInactive=false) {
   key=convId(key);
-  if(reg.chats[key] && reg.chats[key].status!=="deleted" && (includeInactive || reg.chats[key].status==="active")) return reg.chats[key];
+  if(reg.chats[key] && reg.chats[key].status!=="deleted" && (includeInactive || reg.chats[key].status==="active")) {
+    const chat=reg.chats[key];
+    if((project&&chat.project!==project)||(account&&chat.account!==account)) throw new Error("Session does not match requested project/account");
+    return chat;
+  }
   const a=project ? activeAccount(reg,project,account) : account;
   const matches=Object.values(reg.chats).filter(c =>
     (!project || c.project===project) && (!a || c.account===a) && c.status!=="deleted" &&
@@ -166,7 +201,12 @@ function resolveChat(reg, key, project=null, account=null, includeInactive=false
 }
 async function pagesOf(task) { try { return await task.pages(); } catch { return []; } }
 async function openBoundTask(reg, project, account=null) {
-  const b=bindingFor(reg,project,account,true), task=await taskSpace(b.spaceName);
+  const b=bindingFor(reg,project,account,true);
+  await assertWebAvailable(b.account);
+  const task=await taskSpace(b.spaceName);
+  const prior=taskAccounts.get(Number(task.spaceId));
+  if(prior&&accountScope(reg,prior)!==accountScope(reg,b.account)) throw new Error("Space is bound to conflicting ChatGPT accounts");
+  taskAccounts.set(Number(task.spaceId),b.account);
   if(Number(b.spaceId)!==Number(task.spaceId)){ b.spaceId=task.spaceId; await saveRegistry(reg); }
   return {binding:b,task};
 }
@@ -224,6 +264,17 @@ async function controlPage(reg, project, account=null) {
   }
   if(!page) page=await newManagedPage(reg,project,account,task,binding,null);
   binding.controlPage=page.label; await saveRegistry(reg); return {binding,task,page};
+}
+async function accountPage(reg, account, project=null) {
+  const names=(project?[project]:Object.keys(reg.projects)).filter(p=>reg.projects[p]?.bindings?.[account]);
+  if(!names.length) throw new Error("Bind an existing Space for this account first");
+  for(const name of names) {
+    const {task}=await openBoundTask(reg,name,account);
+    for(const page of await pagesOf(task)) {
+      if((await page.url()).startsWith("https://chatgpt.com/")) return page;
+    }
+  }
+  throw new Error("Open a managed ChatGPT page in the bound Space first");
 }
 async function waitForConversationReady(page, timeout=15000) {
   const deadline=Date.now()+timeout;
@@ -420,6 +471,9 @@ async function openModelMenu(page) {
 async function setModel(page, model) {
   await page.keyboard.press("Escape");
   await openModelMenu(page);
+  const labels=await page.evaluate(()=>[...document.querySelectorAll('[role="menuitemradio"]')].map(e=>(e.innerText||"").trim()));
+  try { model=selectModelLabel(labels,model); }
+  catch(error){ await page.keyboard.press("Escape"); throw error; }
   const result=await page.evaluate((model)=>{
     const items=[...document.querySelectorAll('[role="menuitemradio"]')];
     const x=items.find(e=>(e.innerText||"").trim().toLowerCase()===model.toLowerCase());
@@ -436,7 +490,7 @@ async function setModel(page, model) {
     .some(e=>(e.innerText||"").trim().toLowerCase()===model.toLowerCase() && e.getAttribute("aria-checked")==="true"), model);
   await page.keyboard.press("Escape");
   if(!checked) throw new Error("Model selection was not confirmed: "+model);
-  return true;
+  return model;
 }
 async function setEffort(page, effort) {
   const levels={"instant":0,"medium":1,"high":2,"extra high":3,"pro":4};
@@ -444,35 +498,33 @@ async function setEffort(page, effort) {
   if(!(key in levels)) throw new Error("Effort must be Instant, Medium, High, Extra High, or Pro");
   await page.keyboard.press("Escape");
   await openModelMenu(page);
-  const has=await page.evaluate(()=>!!document.querySelector('[role="slider"]'));
-  if(!has){
+  const bounds=await page.evaluate(()=>{
+    const s=document.querySelector('[role="slider"]');
+    return s?{min:Number(s.getAttribute('aria-valuemin')??0),max:Number(s.getAttribute('aria-valuemax'))}:null;
+  });
+  if(!bounds || !Number.isFinite(bounds.max) || bounds.max<=bounds.min){
     await page.keyboard.press("Escape");
     throw new Error("Thinking effort slider not available");
   }
+  const target=key==="pro"?bounds.max:bounds.min+levels[key];
+  if(target>bounds.max){ await page.keyboard.press("Escape"); throw new Error("Requested thinking level is unavailable"); }
   await page.focus('[role="slider"]');
-  await page.keyboard.press("Home");
-  for(let i=0;i<levels[key];i++) await page.keyboard.press("ArrowRight");
+  await page.keyboard.press(key==="pro"?"End":"Home");
+  if(key!=="pro") for(let i=0;i<levels[key];i++) await page.keyboard.press("ArrowRight");
   const now=await page.evaluate(()=>Number(document.querySelector('[role="slider"]')?.getAttribute("aria-valuenow")));
   await page.keyboard.press("Escape");
-  if(now!==levels[key]) throw new Error("Effort selection was not confirmed");
+  if(now!==target) throw new Error("Effort selection was not confirmed");
+  if(observedModel((await state(page)).mode).effort?.toLowerCase()!==key) throw new Error("Requested thinking level was not confirmed by the UI: "+effort);
   return true;
-}
-
-function modelPreset(spec) {
-  const raw=(spec||"").trim();
-  const key=raw.toLowerCase().replace(/[-_]/g," ").replace(/\s+/g," ");
-  if(["gpt 6 pro","gpt6 pro","latest pro","gpt 6"].includes(key)) {
-    return {radio:"Latest",effort:"Pro",label:"GPT-6 Pro"};
-  }
-  return {radio:raw,effort:null,label:raw};
 }
 
 async function applyModelSpec(page, spec, explicitEffort=null) {
   const preset=modelPreset(spec);
-  await setModel(page,preset.radio);
+  const selected=await setModel(page,preset.radio);
   const effort=explicitEffort || preset.effort;
   if(effort) await setEffort(page,effort);
-  return {model:preset.label,effort};
+  const observed=observedModel((await state(page)).mode);
+  return {model:selected,effort:observed.effort||effort,observed};
 }
 
 async function openProjectPage(page, projectName, knownUrl=null) {
@@ -578,8 +630,13 @@ async function notifyController(reg, task, message) {
       }
       const {page}=await ensurePage(reg,controller);
       await sendMessage(page,message);
+      delete task.watchdogPendingNotification;
       return {sent:true,target,role:controller.role||controller.name,targets};
     } catch(error) {
+      if(error?.code==="WEB_RATE_LIMITED") {
+        task.watchdogPendingNotification=message;
+        return {sent:false,reason:"WEB_COOLDOWN",account:error.account,targets};
+      }
       failures.push({target,reason:error.message});
     }
   }
@@ -598,7 +655,7 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
     let notification={sent:false,reason:"already notified"};
     if(!live.watchdogNotifiedAt) {
       notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: BLOCKED\nsession_state: ${observed.sessionState}\nrole: ${live.role||chat.role}\nsummary: ${live.blockedReason}; reconcile GitHub and replace/recover the session if needed.`);
-      live.watchdogNotifiedAt=now.toISOString();
+      if(notification.sent) live.watchdogNotifiedAt=now.toISOString();
     }
     rt.tasks[live.taskId]=live; await saveRuntime(rt);
     return {action:"BLOCKED",attempts,notification};
@@ -632,12 +689,26 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
 async function watchOnce(reg, project=null, account=null, options={}) {
   const rt=await loadRuntime(), results=[];
   const taskGapMs=Math.max(10000,Number(process.env.CHAT_BRIDGE_WATCH_TASK_GAP_MS||10000)||10000);
-  const tasks=Object.values(rt.tasks||{}).filter(t=>activeTaskStatus(t.status) && (!project||t.project===project) && (!account||t.account===account));
+  const tasks=Object.values(rt.tasks||{}).filter(t=>(activeTaskStatus(t.status)||(t.status==="BLOCKED"&&t.watchdogPendingNotification)) && (!project||t.project===project) &&
+    (!account||(reg.chats[t.sessionId]?.account||t.account||reg.projects[t.project]?.activeAccount||reg.defaultAccount)===account));
+  let lastVisitedAt=0;
   for(const task of tasks) {
-    if(results.length) await new Promise(resolve=>setTimeout(resolve,taskGapMs));
     let chat=null;
     try {
       chat=task.sessionId?resolveChat(reg,task.sessionId,task.project,task.account):resolveChat(reg,task.role,task.project,task.account);
+      await assertWebAvailable(chat.account);
+      const waitMs=Math.max(0,taskGapMs-(Date.now()-lastVisitedAt));
+      if(waitMs) await new Promise(resolve=>setTimeout(resolve,waitMs));
+      lastVisitedAt=Date.now();
+      if(task.status==="BLOCKED"&&task.watchdogPendingNotification) {
+        const latest=await loadRuntime(), live=latest.tasks[task.taskId];
+        if(!live || live.status!=="BLOCKED" || !live.watchdogPendingNotification) continue;
+        const notification=await notifyController(reg,live,live.watchdogPendingNotification);
+        if(notification.sent) live.watchdogNotifiedAt=new Date().toISOString();
+        latest.tasks[live.taskId]=live; await saveRuntime(latest);
+        results.push({taskId:live.taskId,state:"BLOCKED",notification});
+        continue;
+      }
       if(!task.sessionId) task.sessionId=chat.id;
       const {page}=await ensurePage(reg,chat);
       const observed=await observeSession(chat,page,task);
@@ -650,7 +721,8 @@ async function watchOnce(reg, project=null, account=null, options={}) {
         live.recoveryAttempts=0; live.watchErrorCount=0;
         if(options.autoRecover!==false && !live.watchdogResultNotifiedAt) {
           notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: AWAITING_DURABLE_UPDATE\nsession_state: IDLE_COMPLETE\nrole: ${live.role||chat.role}\nsummary: Worker is idle with a new assistant result. Reconcile GitHub/callback evidence before marking COMPLETE.`);
-          live.watchdogResultNotifiedAt=new Date().toISOString(); live.watchdogResultNotification=notification;
+          if(notification.sent) live.watchdogResultNotifiedAt=new Date().toISOString();
+          live.watchdogResultNotification=notification;
         }
         latest.tasks[live.taskId]=live; await saveRuntime(latest);
       } else if(observed.sessionState.startsWith("RUNNING")) {
@@ -663,14 +735,14 @@ async function watchOnce(reg, project=null, account=null, options={}) {
       results.push({taskId:task.taskId,role:task.role,sessionId:chat.id,state:observed.sessionState,recommendation:observed.recommendation,
         quietForSec:observed.quietForSec,runningForSec:observed.runningForSec,recovery,notification});
     } catch(error) {
-      if(error?.code==="WEB_RATE_LIMITED"){ results.push({taskId:task.taskId,role:task.role,sessionId:chat?.id||task.sessionId||null,state:"WEB_COOLDOWN",reason:"CHATGPT_RATE_LIMIT"}); break; }
+      if(error?.code==="WEB_RATE_LIMITED"){ results.push({taskId:task.taskId,account:error.account,role:task.role,state:"WEB_COOLDOWN",reason:"CHATGPT_RATE_LIMIT"}); continue; }
       const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
       live.watchErrorCount=Number(live.watchErrorCount||0)+1; live.lastWatchError=error.message; live.lastWatchErrorAt=new Date().toISOString();
       let notification=null;
       if(options.autoRecover!==false && live.watchErrorCount>=3 && live.status!=="BLOCKED") {
         live.status="BLOCKED"; live.blockedReason=`watch failed ${live.watchErrorCount} times: ${error.message}`;
         notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: BLOCKED\nrole: ${live.role||"unknown"}\nsummary: ${live.blockedReason}`);
-        live.watchdogNotifiedAt=new Date().toISOString();
+        if(notification.sent) live.watchdogNotifiedAt=new Date().toISOString();
       }
       latest.tasks[live.taskId]=live; await saveRuntime(latest);
       results.push({taskId:task.taskId,role:task.role,sessionId:chat?.id||task.sessionId||null,state:"WATCH_ERROR",error:error.message,watchErrorCount:live.watchErrorCount,notification});
@@ -750,7 +822,7 @@ async function pruneProjectSpace(reg, project, account=null) {
 
 const cmd=args[0] || "help";
 const reg=await loadRegistry();
-const project=opt("project",reg.defaultProject);
+const project=opt("project",cmd==="watch"?null:reg.defaultProject);
 const accountArg=opt("account",null);
 
 if(cmd==="help"){
@@ -793,7 +865,41 @@ else if(cmd==="account"){
     reg.accounts[a] ||= {name:a}; projectRecord(reg,p).activeAccount=a; bindingFor(reg,p,a,true);
     await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,lastCommand:"account use"});
     print({ok:true,project:p,activeAccount:a,binding:bindingFor(reg,p,a,true)});
-  } else throw new Error("account subcommand must be list, add, or use");
+  } else if(sub==="identify"){
+    if(!project) throw new Error("account identify requires --project");
+    const a=activeAccount(reg,project,accountArg), {task,binding}=await openBoundTask(reg,project,a);
+    let page=null;
+    for(const candidate of await pagesOf(task)){
+      if(new URL(await candidate.url()).origin==="https://chatgpt.com"){ page=candidate; break; }
+    }
+    if(!page) throw new Error("Open an existing ChatGPT page in the bound Space before identifying the account");
+    await detectWebRateLimit(page,"account-identify");
+    // Only the stable user ID leaves the page; never return or persist auth tokens.
+    const identified=await page.evaluate(async()=>{
+      if(location.origin!=="https://chatgpt.com") throw new Error("Account identity requires ChatGPT origin");
+      const response=await fetch("/api/auth/session",{credentials:"same-origin",signal:AbortSignal.timeout(5000)});
+      if(response.status===429) return {rateLimited:true};
+      if(!response.ok) throw new Error("Unable to identify logged-in ChatGPT account");
+      const session=await response.json();
+      const id=session?.user?.id;
+      if(typeof id!=="string"||!id.trim()) throw new Error("ChatGPT session has no stable user ID");
+      return {id};
+    });
+    if(identified.rateLimited){
+      const next=nextCooldown(await loadWebCooldown(a),Date.now(),"account-identify","HTTP 429");
+      await saveWebCooldown(next,a); throw cooldownError(next,a);
+    }
+    const identity=identified.id;
+    const oldIdentity=reg.accounts[a]?.identity;
+    if(oldIdentity&&oldIdentity!==identity) throw new Error("ACCOUNT_IDENTITY_MISMATCH: bind this login to a different account alias");
+    const previousCooldown=await loadWebCooldown(a);
+    reg.accounts[a]={...reg.accounts[a],identity,identifiedAt:new Date().toISOString()};
+    const shared=await loadWebCooldown(a);
+    if(Date.parse(previousCooldown.until)>Date.parse(shared.until||"1970-01-01")) await saveWebCooldown(previousCooldown,a);
+    binding.identityVerifiedAt=new Date().toISOString();
+    await saveRegistry(reg);
+    print({ok:true,account:a,scope:accountScope(reg,a),spaceName:binding.spaceName,identityVerified:true});
+  } else throw new Error("account subcommand must be list, add, use, or identify");
 }
 else if(cmd==="space"){
   const sub=args[1]||"show", p=project; if(!p) throw new Error("--project required");
@@ -827,22 +933,20 @@ else if(cmd==="list"){
   print(Object.values(reg.chats).filter(c=>(!project||c.project===project)&&(!a||c.account===a)&&(args.includes("--all")||c.status==="active")));
 }
 else if(cmd==="projects"){
-  const a=accountArg||reg.defaultAccount||DEFAULT_ACCOUNT, task=await taskSpace(`chat-bridge-account-${slug(a)}-global`);
-  const pages=await pagesOf(task), page=pages.find(p=>p.label==="p1")||pages[0]||await task.newPage();
-  await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000}); await page.waitForTimeout(500);
+  const a=accountArg||(opt("project",null)?activeAccount(reg,project):reg.defaultAccount)||DEFAULT_ACCOUNT;
+  const page=await accountPage(reg,a,opt("project",null));
   await detectWebRateLimit(page,"projects");
   const ps=await page.evaluate(()=>[...document.querySelectorAll('button[aria-label^="Open project options for "]')]
     .map(b=>(b.getAttribute("aria-label")||"").replace("Open project options for ","")));
-  print([...new Set([...ps,...Object.keys(reg.projects)])]);
+  print([...new Set([...ps,...Object.keys(reg.projects).filter(p=>reg.projects[p].bindings?.[a])])]);
 }
 else if(cmd==="sync" || cmd==="discover"){
   if(project){
     const a=activeAccount(reg,project,accountArg), {binding,page}=await controlPage(reg,project,a);
     print(await syncProject(reg,page,project,a,binding));
   } else {
-    const a=accountArg||reg.defaultAccount||DEFAULT_ACCOUNT, task=await taskSpace(`chat-bridge-account-${slug(a)}-global`);
-    const pages=await pagesOf(task), page=pages.find(p=>p.label==="p1")||pages[0]||await task.newPage();
-    await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000}); await page.waitForTimeout(500);
+    const a=accountArg||reg.defaultAccount||DEFAULT_ACCOUNT;
+    const page=await accountPage(reg,a);
     await detectWebRateLimit(page,"discover");
     const chats=await page.evaluate(()=>[...document.querySelectorAll('a[href*="/c/"]')].map(a=>({title:(a.innerText||a.getAttribute("aria-label")||"").trim(),url:a.href})).filter(x=>x.title&&!x.url.includes("#main")));
     const uniq=[], seen=new Set();
@@ -887,20 +991,12 @@ else if(cmd==="task"){
   } else throw new Error("task subcommand must be list, set, or clear");
 }
 else if(cmd==="watch"){
-  const loop=args.includes("--loop"), intervalSec=Math.max(30,Number(opt("interval","60"))||60),
-    maxAttempts=Math.max(1,Number(opt("max-recovery","3"))||3), maxTotalRecoveries=Math.max(1,Number(opt("max-total-recovery","8"))||8),
-    cooldownSec=Math.max(10,Number(opt("cooldown","45"))||45), aggressive=args.includes("--aggressive"), autoRecover=!args.includes("--dry-run"), maxIterations=Number(opt("iterations","0"))||0;
+  const maxAttempts=Math.max(1,Number(opt("max-recovery","3"))||3), maxTotalRecoveries=Math.max(1,Number(opt("max-total-recovery","8"))||8),
+    cooldownSec=Math.max(10,Number(opt("cooldown","45"))||45), aggressive=args.includes("--aggressive"), autoRecover=!args.includes("--dry-run");
   const quiet=args.includes("--quiet");
-  let iteration=0;
-  do {
-    const watchReg=iteration===0?reg:await loadRegistry();
-    const results=await watchOnce(watchReg,project,accountArg,{autoRecover,maxAttempts,maxTotalRecoveries,cooldownSec,aggressive});
-    const noteworthy=results.some(r=>r.state==="WATCH_ERROR" || r.notification?.sent || (r.recovery?.action&&!["NONE","COOLDOWN"].includes(r.recovery.action)));
-    if(!quiet || noteworthy) print({at:new Date().toISOString(),project:project||null,iteration:iteration+1,autoRecover,results});
-    iteration+=1;
-    if(!loop || (maxIterations>0 && iteration>=maxIterations)) break;
-    await new Promise(resolve=>setTimeout(resolve,intervalSec*1000));
-  } while(true);
+  const results=await watchOnce(reg,project,accountArg,{autoRecover,maxAttempts,maxTotalRecoveries,cooldownSec,aggressive});
+  const noteworthy=results.some(r=>r.state==="WATCH_ERROR" || r.notification?.sent || (r.recovery?.action&&!["NONE","COOLDOWN"].includes(r.recovery.action)));
+  if(!quiet || noteworthy) print({at:new Date().toISOString(),project:project||null,iteration:1,autoRecover,results});
 }
 else if(["archive","retire","delete","forget"].includes(cmd)){
   const key=args[1]; if(!key) throw new Error("chat key required");
@@ -926,7 +1022,7 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
     const taskId=opt("task",null);
     const linked=taskId?rt.tasks[taskId]:Object.values(rt.tasks||{}).filter(t=>activeTaskStatus(t.status) && t.project===chat.project && (t.sessionId===chat.id || (!t.sessionId&&t.role===chat.role))).sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")))[0];
     const observed=await observeSession(chat,page,linked||null);
-    print({...observed,configuredModel:chat.model||null,configuredEffort:chat.effort||null,project:chat.project||null,account:chat.account,status:chat.status,
+    print({...observed,modelSelection:observedModel(observed.mode),configuredModel:chat.model||null,configuredEffort:chat.effort||null,project:chat.project||null,account:chat.account,status:chat.status,
       spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page,task:linked?{taskId:linked.taskId,status:linked.status,controller:linked.controller||null,replyTo:linked.replyTo||null,escalationTo:linked.escalationTo||null,recoveryAttempts:linked.recoveryAttempts||0}:null});
   }
   if(cmd==="send"){
@@ -954,14 +1050,14 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
     await sendMessage(page,msg); await page.waitForTimeout(400);
     const observed=await observeSession(chat,page,tracked);
     if(tracked){ const rt=await loadRuntime(), live=rt.tasks[taskId]; live.status=observed.generating?"RUNNING":"DISPATCHED"; live.updatedAt=new Date().toISOString(); rt.tasks[taskId]=live; await saveRuntime(rt); }
-    print({ok:true,chat:chat.name,taskId:taskId||null,state:observed.sessionState});
+    print({ok:true,chat:chat.name,taskId:taskId||null,state:observed.sessionState,modelSelection:observedModel(observed.mode)});
   }
-  if(cmd==="ask"){const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");const st=await askMessage(page,msg,Number(opt("timeout","180000")));print({chat:chat.name,response:st.lastAssistant});}
+  if(cmd==="ask"){const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");const st=await askMessage(page,msg,Number(opt("timeout","180000")));print({chat:chat.name,response:st.lastAssistant,modelSelection:observedModel(st.mode)});}
   if(cmd==="model"){
-    const m=positionals(2).join(" "); if(!m) throw new Error("model required"); const applied=await applyModelSpec(page,m,null);
-    chat.model=applied.model;if(applied.effort)chat.effort=applied.effort;await saveRegistry(reg);print({ok:true,chat:chat.name,model:chat.model,effort:chat.effort||null});
+    const m=positionals(2).join(" "); if(!m) throw new Error("model required"); const applied=await applyModelSpec(page,m,opt("effort",null));
+    chat.model=applied.model;chat.effort=applied.effort;await saveRegistry(reg);print({ok:true,chat:chat.name,model:chat.model,effort:chat.effort||null,modelSelection:applied.observed});
   }
-  if(cmd==="effort"){const e=positionals(2).join(" ");if(!e)throw new Error("effort required");await setEffort(page,e);chat.effort=e;await saveRegistry(reg);print({ok:true,chat:chat.name,effort:e});}
+  if(cmd==="effort"){const e=positionals(2).join(" ");if(!e)throw new Error("effort required");await setEffort(page,e);chat.effort=e;await saveRegistry(reg);print({ok:true,chat:chat.name,effort:e,modelSelection:observedModel((await state(page)).mode)});}
   if(cmd==="stop") print(await stopGeneration(page));
   if(cmd==="retry") print(await nativeRetry(page));
   if(cmd==="recover"){
@@ -986,15 +1082,15 @@ else if(cmd==="new"){
     await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000});
     await openProjectPage(page,p,binding.projectUrl||null);
     await page.waitForSelector('div#prompt-textarea[contenteditable="true"]',{state:"visible",timeout:15000});
-    const model=opt("model",null), requestedEffort=opt("effort",null); let applied={model:null,effort:requestedEffort};
-    if(model) applied=await applyModelSpec(page,model,requestedEffort); else if(requestedEffort) await setEffort(page,requestedEffort);
+    const model=opt("model","Latest"), requestedEffort=opt("effort",null);
+    const applied=await applyModelSpec(page,model,requestedEffort);
     await sendMessage(page,first); await page.waitForURL(/\/c\/[0-9a-f-]+/i,{timeout:30000});
     const url=await page.url(), id=convId(url), projectBase=url.includes("/g/g-p-")?url.replace(/\/c\/[^/]+.*$/,''):binding.projectBase;
     if(projectBase){binding.projectBase=projectBase;binding.projectUrl=projectBase+"/project";binding.projectId=projectIdFromUrl(projectBase);}
     reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model:applied.model||model,effort:applied.effort||requestedEffort,
       spaceName:binding.spaceName,spaceId:task.spaceId,page:page.label,createdAt:new Date().toISOString()};
     await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:binding.spaceName,lastCommand:"new",lastSession:id});
-    print(reg.chats[id]);
+    print({...reg.chats[id],modelSelection:applied.observed});
   } catch (error) {
     await page.close().catch(()=>{}); throw error;
   }
