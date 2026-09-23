@@ -366,7 +366,13 @@ async function openModelMenu(page) {
     return true;
   });
   if(!ok) throw new Error("Model/effort button not found");
-  await page.click('button[data-chat-bridge-model-button="1"]');
+  const opened=await page.evaluate(() => {
+    const b=document.querySelector('button[data-chat-bridge-model-button="1"]');
+    if(!b) return false;
+    b.click();
+    return true;
+  });
+  if(!opened) throw new Error("Model/effort button disappeared before menu open");
   await page.waitForTimeout(200);
 }
 async function setModel(page, model) {
