@@ -188,12 +188,19 @@ async function controlPage(reg, project, account=null) {
   if(!page) page=await newManagedPage(reg,project,account,task,binding,null);
   binding.controlPage=page.label; await saveRegistry(reg); return {binding,task,page};
 }
+async function waitForConversationReady(page, timeout=15000) {
+  const ok=await page.waitForSelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"]',{state:"visible",timeout})
+    .then(()=>true).catch(()=>false);
+  if(!ok) throw new Error("Conversation UI did not become ready before timeout");
+}
+
 async function ensurePage(reg, chat) {
   const {binding,task}=await openBoundTask(reg,chat.project,chat.account), pages=await pagesOf(task);
   let page=pages.find(p=>p.label===chat.page) || null;
   if(!page) page=await newManagedPage(reg,chat.project,chat.account,task,binding,chat.id);
   chat.spaceName=binding.spaceName; chat.spaceId=task.spaceId; chat.page=page.label; chat.lastUsedAt=new Date().toISOString();
   if((await page.url())!==chat.url) await page.goto(chat.url,{waitUntil:"load",timeout:20000});
+  await waitForConversationReady(page);
   await saveRegistry(reg); return {task,page,binding};
 }
 
