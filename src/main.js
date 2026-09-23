@@ -14,6 +14,9 @@ const { controlRoute, notificationTargets } = CONTROL;
 const PAGE_POOL = globalThis.__CHAT_BRIDGE_PAGE_POOL__;
 if(!PAGE_POOL) throw new Error("chat-bridge page pool module was not loaded");
 const { pageDetachCandidates } = PAGE_POOL;
+const LIVENESS = globalThis.__CHAT_BRIDGE_LIVENESS__;
+if(!LIVENESS) throw new Error("chat-bridge liveness policy module was not loaded");
+const { stallThresholdSec } = LIVENESS;
 
 function slug(v="") {
   return String(v).trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"") || "project";
@@ -208,14 +211,6 @@ function hashText(v="") {
   let h=2166136261;
   for(const ch of String(v)) { h^=ch.charCodeAt(0); h=Math.imul(h,16777619); }
   return (h>>>0).toString(16).padStart(8,"0");
-}
-function stallThresholdSec(effort=null) {
-  const key=String(effort||"").toLowerCase();
-  if(key==="pro") return 900;
-  if(key==="extra high") return 720;
-  if(key==="high") return 480;
-  if(key==="medium") return 300;
-  return 240;
 }
 function activeTaskStatus(v="") {
   return !["COMPLETE","FAILED","CANCELLED","BLOCKED"].includes(String(v).toUpperCase());
