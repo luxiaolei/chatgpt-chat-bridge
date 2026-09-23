@@ -10,6 +10,10 @@
       text.includes("please wait a few minutes before trying again");
   }
 
+  function findRateLimitText(values = []) {
+    return (values || []).map(value => String(value || "")).find(isRateLimitText) || null;
+  }
+
   function cooldownSeconds(strikes = 1) {
     const n = Math.max(1, Number(strikes) || 1);
     if (n <= 1) return 180;
@@ -25,12 +29,13 @@
     const seconds = cooldownSeconds(strikes);
     const detectedAt = new Date(nowMs).toISOString();
     const until = new Date(nowMs + seconds * 1000).toISOString();
-    return { strikes, seconds, detectedAt, until, context: context || null, detail: detail || null };
+    return { active: true, reason: "CHATGPT_RATE_LIMIT", strikes, seconds, detectedAt, until, context: context || null, detail: detail || null };
   }
 
   globalObject.__CHAT_BRIDGE_WEB_POLICY__ = {
     normalizeText,
     isRateLimitText,
+    findRateLimitText,
     cooldownSeconds,
     nextCooldown,
   };

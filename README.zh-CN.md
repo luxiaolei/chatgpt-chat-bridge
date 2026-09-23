@@ -221,9 +221,9 @@ chat-bridge watch --project "My Project"
 
 launchd 每 60 秒启动一次全新的 one-shot 扫描；如果本地 runtime 没有 active task，watchdog 会在本地直接退出，不启动 Ego Lite/ChatGPT Web。恢复顺序默认是：原生 Continue/Retry → 发 `continue` → 明确卡死后 Stop + guarded continue。只有 `--aggressive` 才允许重发原始任务。Chat UI 看起来完成时只标记 `AWAITING_DURABLE_UPDATE`，最终 COMPLETE 仍需 GitHub 证据。
 
-所有会触碰 ChatGPT Web 的 bridge 命令共享跨进程节流锁：普通网页操作默认间隔 10 秒；`new` / `archive` / `retire` / `delete` 这类重型会话操作默认 30 秒。单个 CLI 调用默认最多内联等待 5 秒；如果剩余 pacing/锁等待更长，就快速返回 `PACING_DEFERRED`（exit 75），让调用方去做本地/GitHub 工作，而不是把当前 Chat 卡在长 tool wait。单次 watchdog 扫描多个 active task 时，task 之间至少间隔 10 秒；本地 registry/runtime 读取不节流。
+所有会触碰 ChatGPT Web 的 bridge 命令共享跨进程节流锁：普通网页操作默认间隔 10 秒且不可配置得更快；`new` / `archive` / `retire` / `delete` 这类重型会话操作默认 30 秒且不可配置得更快。单个 CLI 调用默认最多内联等待 5 秒；如果剩余 pacing/锁等待更长，就快速返回机器可读的 `PACING_DEFERRED`（exit 75），让调用方去做本地/GitHub 工作，而不是把当前 Chat 卡在长 tool wait。单次 watchdog 扫描多个 active task 时，task 之间至少间隔 10 秒；本地 registry/runtime 读取不节流。
 
-如果 ChatGPT 出现 `Too many requests` / “temporarily limited access to your conversations”，runtime 会写共享 `web-cooldown.json` 并立即熔断 Web 操作。冷却从 3 分钟起步，连续触发升级为 5、10、15 分钟；人工 UI 命令快速返回 `WEB_COOLDOWN_ACTIVE`，watchdog 在冷却期间静默跳过。可用 `chat-bridge cooldown show|clear` 查看或明确清理本地冷却状态。
+如果 ChatGPT 出现 `Too many requests` / “temporarily limited access to your conversations”，runtime 会写共享 `web-cooldown.json` 并立即熔断 Web 操作。冷却从 3 分钟起步，连续触发升级为 5、10、15 分钟；人工 UI 命令快速返回机器可读的 `WEB_COOLDOWN_ACTIVE`，watchdog 在冷却期间静默跳过。可用 `chat-bridge cooldown status`（或 `show`）查看状态；只有 `chat-bridge cooldown clear --confirm` 才会明确清理本地冷却。
 
 ## 恢复
 

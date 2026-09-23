@@ -22,15 +22,26 @@ LOCK_WAIT_SEC="${CHAT_BRIDGE_LOCK_WAIT_SEC:-5}"
 python3 - "$UI_MIN_INTERVAL_SEC" "$UI_HEAVY_INTERVAL_SEC" "$MAX_INLINE_WAIT_SEC" "$LOCK_WAIT_SEC" <<'PY' >/dev/null
 import sys
 normal,heavy,max_wait,lock_wait=map(float,sys.argv[1:])
-if normal < 5:
-    raise SystemExit("CHAT_BRIDGE_UI_MIN_INTERVAL_SEC must be >= 5")
-if heavy < normal:
-    raise SystemExit("CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC must be >= UI minimum")
+if normal < 10:
+    raise SystemExit("CHAT_BRIDGE_UI_MIN_INTERVAL_SEC must be >= 10")
+if heavy < 30:
+    raise SystemExit("CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC must be >= 30")
 if max_wait < 0 or max_wait > 5:
     raise SystemExit("CHAT_BRIDGE_MAX_INLINE_WAIT_SEC must be between 0 and 5")
 if lock_wait < 0 or lock_wait > 5:
     raise SystemExit("CHAT_BRIDGE_LOCK_WAIT_SEC must be between 0 and 5")
 PY
+
+emit_tempfail() {
+  python3 - "$@" <<'PY'
+import json,math,sys
+code,status,reason,retry_after,until=sys.argv[1:]
+payload={"ok":False,"status":status,"reason":reason,"code":code,
+         "retryAfterSec":max(1,math.ceil(float(retry_after)))}
+if until: payload["until"]=until
+print(json.dumps(payload,ensure_ascii=False))
+PY
+}
 
 CMD="${1:-help}"
 SUB="${2:-}"
@@ -38,7 +49,7 @@ SUB="${2:-}"
 if [[ "$CMD" == "cooldown" ]]; then
   mkdir -p "$STATE_DIR"
   case "$SUB" in
-    ""|show)
+    ""|show|status)
       python3 - "$COOLDOWN_FILE" <<'PY'
 import json,pathlib,sys,time
 p=pathlib.Path(sys.argv[1])
@@ -60,12 +71,16 @@ PY
       exit 0
       ;;
     clear)
+      if [[ " ${*} " != *" --confirm "* ]]; then
+        echo '{"ok":false,"status":"CONFIRMATION_REQUIRED","reason":"COOLDOWN_CLEAR_REQUIRES_CONFIRM"}' >&2
+        exit 2
+      fi
       rm -f "$COOLDOWN_FILE"
       echo '{"ok":true,"cleared":true}'
       exit 0
       ;;
     *)
-      echo "cooldown subcommand must be show or clear" >&2
+      echo "cooldown subcommand must be status, show, or clear --confirm" >&2
       exit 2
       ;;
   esac
@@ -141,7 +156,9 @@ PY
     if [[ "$CMD" == "watch" ]]; then
       exit 0
     fi
-    echo "chat-bridge: WEB_COOLDOWN_ACTIVE ${COOLDOWN_STATE}" >&2
+    COOLDOWN_REST="${COOLDOWN_STATE#*|}"
+    COOLDOWN_UNTIL="${COOLDOWN_REST%%|*}"
+    emit_tempfail WEB_COOLDOWN_ACTIVE COOLDOWN CHATGPT_RATE_LIMIT "$REMAINING" "$COOLDOWN_UNTIL" >&2
     exit 75
   fi
 fi
@@ -193,7 +210,7 @@ raise SystemExit(0 if float(sys.argv[1])>=float(sys.argv[2]) else 1)
 PY
     then
       [[ "$CMD" == "watch" ]] && exit 0
-      echo "chat-bridge: PACING_DEFERRED lock busy" >&2
+      emit_tempfail PACING_DEFERRED DEFERRED UI_LOCK_BUSY "$LOCK_WAIT_SEC" "" >&2
       exit 75
     fi
     sleep 0.25
@@ -218,7 +235,7 @@ PY
   then
     cleanup_lock
     [[ "$CMD" == "watch" ]] && exit 0
-    echo "chat-bridge: PACING_DEFERRED wait=${WAIT_SEC}s" >&2
+    emit_tempfail PACING_DEFERRED DEFERRED UI_PACING "$WAIT_SEC" "" >&2
     exit 75
   fi
   if python3 - "$WAIT_SEC" <<'PY'

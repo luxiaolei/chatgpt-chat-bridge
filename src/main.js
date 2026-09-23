@@ -22,7 +22,7 @@ if(!TASK_POLICY) throw new Error("chat-bridge task policy module was not loaded"
 const { activeTaskStatus, assertTaskId, assertActiveTaskTarget, activeSessionConflict } = TASK_POLICY;
 const WEB_POLICY = globalThis.__CHAT_BRIDGE_WEB_POLICY__;
 if(!WEB_POLICY) throw new Error("chat-bridge web policy module was not loaded");
-const { isRateLimitText, nextCooldown } = WEB_POLICY;
+const { findRateLimitText, nextCooldown } = WEB_POLICY;
 const WEB_COOLDOWN_PATH = pathMod.join(STATE_DIR, "web-cooldown.json");
 
 function slug(v="") {
@@ -94,16 +94,16 @@ async function saveWebCooldown(value) {
   return value;
 }
 async function detectWebRateLimit(page, context="ui") {
-  const detail=await page.evaluate(() => {
+  const candidates=await page.evaluate(() => {
     const nodes=[...document.querySelectorAll('[role="dialog"], [role="alert"]')];
     const texts=nodes.map(n=>(n.innerText||n.textContent||"").trim()).filter(Boolean);
-    return texts.find(t =>
-      /too many requests/i.test(t) ||
-      /temporarily limited access to your conversations/i.test(t) ||
-      /please wait a few minutes before trying again/i.test(t)
-    ) || null;
-  }).catch(()=>null);
-  if(!detail || !isRateLimitText(detail)) return null;
+    const body=document.body ? document.body.cloneNode(true) : null;
+    body?.querySelectorAll('[data-message-author-role], script, style, template').forEach(node=>node.remove());
+    const bodyText=(body?.textContent||"").trim();
+    return bodyText ? [...texts,bodyText] : texts;
+  }).catch(()=>[]);
+  const detail=findRateLimitText(candidates);
+  if(!detail) return null;
   const next=nextCooldown(await loadWebCooldown(),Date.now(),context,detail.slice(0,500));
   await saveWebCooldown(next);
   const error=new Error(`WEB_RATE_LIMITED until=${next.until} strikes=${next.strikes} cooldownSec=${next.seconds}`);
