@@ -146,15 +146,17 @@ chat-bridge watch --project "PROJECT NAME"
 
 The watchdog uses multiple signals: Stop/Send/composer controls, stable ChatGPT message IDs, assistant text/hash/length, a page-side MutationObserver, recovery/error UI, and elapsed time since real progress. Normal quiet thinking is not interrupted until the task's stall threshold is crossed.
 
-Install the macOS launchd watchdog (all projects, one-shot scan every 15 seconds):
+Install the macOS launchd watchdog (all projects, one-shot scan every 30 seconds):
 
 ```bash
-~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 15
+~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 30
 ```
 
 Remove it with `~/.local/share/chatgpt-chat-bridge/uninstall-watchdog.sh`.
 
-Recovery ladder is deliberately conservative: native Continue/Try again/Retry/Regenerate → `continue` → Stop + guarded continue. Re-sending the original task is only enabled with `--aggressive`. Repeated failures mark the task `BLOCKED` and wake the conductor for GitHub reconciliation.
+Recovery ladder is deliberately conservative: native Continue/Try again/Retry/Regenerate → `continue` → Stop + guarded continue. Re-sending the original task is only enabled with `--aggressive`. Repeated failures mark the task `BLOCKED` and wake the owning controller/root escalation chain for GitHub reconciliation.
+
+All ChatGPT-Web-touching commands are serialized through a cross-process pacing gate. The default minimum is 5 seconds, while `new`, `archive`, `retire`, and `delete` default to 15 seconds. Do not lower these values; only raise them when the service is rate-limiting. Watchdog scans also separate active tasks by at least 5 seconds.
 
 Stop an active generation:
 

@@ -403,8 +403,9 @@ async function openProjectPage(page, projectName, knownUrl=null) {
 
 async function syncProject(reg, page, projectName, account, binding) {
   const projectUrl=await openProjectPage(page,projectName,binding?.projectUrl||null);
+  await page.reload({waitUntil:"load",timeout:20000}).catch(()=>{});
   await page.waitForSelector('[role="tabpanel"]',{state:"visible",timeout:15000});
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(1200);
   const chats=await page.evaluate(()=>[...document.querySelectorAll('a[href*="/g/g-p-"][href*="/c/"]')].map(a=>({
     title:(a.innerText||"").trim().split("\n")[0],url:a.href
   })).filter(x=>x.title));
@@ -525,8 +526,10 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
 
 async function watchOnce(reg, project=null, account=null, options={}) {
   const rt=await loadRuntime(), results=[];
+  const taskGapMs=Math.max(5000,Number(process.env.CHAT_BRIDGE_WATCH_TASK_GAP_MS||5000)||5000);
   const tasks=Object.values(rt.tasks||{}).filter(t=>activeTaskStatus(t.status) && (!project||t.project===project) && (!account||t.account===account));
   for(const task of tasks) {
+    if(results.length) await new Promise(resolve=>setTimeout(resolve,taskGapMs));
     let chat=null;
     try {
       chat=task.sessionId?resolveChat(reg,task.sessionId,task.project,task.account):resolveChat(reg,task.role,task.project,task.account);
