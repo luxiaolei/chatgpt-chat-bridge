@@ -663,6 +663,7 @@ async function watchOnce(reg, project=null, account=null, options={}) {
       results.push({taskId:task.taskId,role:task.role,sessionId:chat.id,state:observed.sessionState,recommendation:observed.recommendation,
         quietForSec:observed.quietForSec,runningForSec:observed.runningForSec,recovery,notification});
     } catch(error) {
+      if(error?.code==="WEB_RATE_LIMITED"){ results.push({taskId:task.taskId,role:task.role,sessionId:chat?.id||task.sessionId||null,state:"WEB_COOLDOWN",reason:"CHATGPT_RATE_LIMIT"}); break; }
       const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
       live.watchErrorCount=Number(live.watchErrorCount||0)+1; live.lastWatchError=error.message; live.lastWatchErrorAt=new Date().toISOString();
       let notification=null;
