@@ -135,9 +135,12 @@ chat-bridge bind --project "My Project" --account secondary \
   --url "https://chatgpt.com/g/g-p-.../project" \
   --space "my-project-secondary"
 chat-bridge space show --project "My Project" --account secondary
+chat-bridge account identify --project "My Project" --account secondary
 ```
 
 The bridge does not automate account credentials. The bound Ego Space must already have access to the intended ChatGPT account/project. Switching the logical active account changes routing; GitHub remains the durable cross-account handoff state.
+
+Run `account identify` for each binding using an existing managed ChatGPT page. It reads only the logged-in user's stable ID, never exports session tokens, and rejects a different login under an already identified alias. Identical IDs share cooldown across aliases, projects and Spaces; different IDs are independent. Before identification, cooldown uses the configured alias (`identityVerified: false`), so use the same alias for the same login. Re-identify after changing login/profile/Space; a different login needs a different alias. `projects` and account-wide discovery read an existing bound page instead of creating a global Space with an unrelated default profile.
 
 ## Session lifecycle
 
@@ -180,7 +183,9 @@ Highest preset:
 chat-bridge model implementation-agent "GPT-6 Pro" --project "My Project"
 ```
 
-`GPT-6 Pro` is a bridge preset that selects **Latest** in ChatGPT and sets thinking effort to **Pro**, the rightmost slider position.
+New chats default to `Latest`; this does not implicitly request Pro or change the UI's default thinking level. `GPT-6` is a current alias for Latest. `GPT-6 Pro` selects Latest plus Pro; `5.6 Pro` and `5.5 Pro` select those older versions plus Pro instead. You can also use `model AGENT Latest --effort High`. Unavailable or ambiguous versions fail explicitly. There is no automatic quota fallback: callers can explicitly choose `5.6 Pro` when Latest's model quota is exhausted. Model quota exhaustion is distinct from conversation-access rate limiting.
+
+`status`, `send`, `ask`, `new`, `model` and `effort` include `modelSelection` with the UI-observed model, effort and raw text; unknown fields remain null. `status` reports configured values separately. Pro uses the slider's actual rightmost endpoint and confirms the displayed effort.
 
 Observed effort levels:
 
@@ -190,7 +195,7 @@ Observed effort levels:
 | Medium | 1 |
 | High | 2 |
 | Extra High | 3 |
-| Pro | 4 |
+| Pro | Current maximum (rightmost) |
 
 ## Watchdog
 
@@ -221,7 +226,7 @@ launchd starts a fresh one-shot scan every 60 seconds. A one-shot watchdog exits
 
 All bridge commands that touch ChatGPT Web share a cross-process pacing lock. Normal UI operations default to and cannot be configured below a 10-second interval; heavy conversation lifecycle operations (`new`, `archive`, `retire`, `delete`) default to and cannot be configured below 30 seconds. A command never waits more than 5 seconds inline by default: if the remaining pacing/lock wait is longer, it returns machine-readable `PACING_DEFERRED` (exit 75) so the caller can do other work instead of holding a long tool turn. Within one watchdog scan, active tasks are separated by at least 10 seconds. Local registry/runtime reads are not throttled.
 
-If ChatGPT shows `Too many requests` / temporary conversation-access limiting, the runtime records a shared `web-cooldown.json` and stops further Web work. The cooldown starts at 3 minutes and escalates on repeated hits to 5, 10, then 15 minutes. Manual UI commands fail fast with machine-readable `WEB_COOLDOWN_ACTIVE`; watchdog scans skip cleanly during cooldown. Inspect local state with `chat-bridge cooldown status` (or `show`) and clear it only with `chat-bridge cooldown clear --confirm`.
+If ChatGPT shows `Too many requests` / temporary conversation-access limiting, the runtime records `web-cooldowns/<account-scope-hash>.json` and stops Web work for that account. Cooldown escalates from 3 to 5, 10 and 15 minutes. Manual commands fail fast with `WEB_COOLDOWN_ACTIVE`; watchdog skips cooling identities but continues other accounts. With no eligible tasks it never starts Ego. Use `chat-bridge cooldown status --account secondary` (or `--project`) and `cooldown clear --account secondary --confirm`. The old `web-cooldown.json` protects only the default account during migration. Cross-process browser pacing remains shared; it is not an account quota.
 
 ## Recovery
 

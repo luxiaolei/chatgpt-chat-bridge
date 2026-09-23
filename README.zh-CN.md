@@ -82,9 +82,12 @@ chat-bridge bind --project "My Project" --account secondary \
   --url "https://chatgpt.com/g/g-p-.../project" \
   --space "my-project-secondary"
 chat-bridge space show --project "My Project" --account secondary
+chat-bridge account identify --project "My Project" --account secondary
 ```
 
 账号是路由身份；Bridge 不负责自动输入账号密码。对应 Ego Space 必须已经拥有该 ChatGPT 账号/Project 的访问权限。`spaceName` 是稳定绑定，数值 `spaceId` 只作为运行时缓存。
+
+每个绑定需通过已有的 managed ChatGPT 页面执行 `account identify`：只提取登录用户的稳定 ID，不导出登录令牌。同一 ID 在不同别名、Project、Space 共享冷却，不同 ID 独立；未识别前按配置别名隔离，并返回 `identityVerified: false`，因此相同登录应复用同一个别名。更换登录/profile/Space 后需重新识别；已识别别名发现不同登录会明确报错，需改用不同别名。账号级项目/会话发现复用已绑定页面，不再创建使用不明默认 profile 的全局 Space。
 
 ## Session 生命周期
 
@@ -124,7 +127,11 @@ chat-bridge task clear HZ-47-W4 --project "My Project"
 
 Runtime state 可重建，**GitHub Issue / PR 仍然是最终事实源**。
 
-## GPT-6 Pro
+## 模型版本与 Thinking Level
+
+新 Chat 默认 `Latest`（`GPT-6` 是当前别名），不会默认强制 Pro；未指定 Thinking Level 时保留页面默认档位。`5.6 Pro` / `5.5 Pro` 会选择对应旧版本并调到 Pro。也可用 `model AGENT Latest --effort High` 分别指定。模型不可用或匹配有歧义时明确报错，不静默替换。Latest 模型额度耗尽后，调用方可显式选择 `5.6 Pro`；模型额度与账号的网页访问限流分开处理。
+
+`status`、`send`、`ask`、`new`、`model`、`effort` 返回 `modelSelection`：页面实际模型、思考等级和原始文案；识别不出的字段为 null，不把配置冒充实际值。`status` 另外返回配置值。Pro 按滑块当前最右端选择，并核对页面显示。
 
 ```bash
 chat-bridge model implementation-agent "GPT-6 Pro" --project "My Project"
@@ -144,7 +151,7 @@ Bridge 会把它解释成：
 | Medium | 1 |
 | High | 2 |
 | Extra High | 3 |
-| Pro | 4 |
+| Pro | 当前最右端，不固定下标 |
 
 ## 总控工作机制
 
@@ -223,7 +230,7 @@ launchd 每 60 秒启动一次全新的 one-shot 扫描；如果本地 runtime �
 
 所有会触碰 ChatGPT Web 的 bridge 命令共享跨进程节流锁：普通网页操作默认间隔 10 秒且不可配置得更快；`new` / `archive` / `retire` / `delete` 这类重型会话操作默认 30 秒且不可配置得更快。单个 CLI 调用默认最多内联等待 5 秒；如果剩余 pacing/锁等待更长，就快速返回机器可读的 `PACING_DEFERRED`（exit 75），让调用方去做本地/GitHub 工作，而不是把当前 Chat 卡在长 tool wait。单次 watchdog 扫描多个 active task 时，task 之间至少间隔 10 秒；本地 registry/runtime 读取不节流。
 
-如果 ChatGPT 出现 `Too many requests` / “temporarily limited access to your conversations”，runtime 会写共享 `web-cooldown.json` 并立即熔断 Web 操作。冷却从 3 分钟起步，连续触发升级为 5、10、15 分钟；人工 UI 命令快速返回机器可读的 `WEB_COOLDOWN_ACTIVE`，watchdog 在冷却期间静默跳过。可用 `chat-bridge cooldown status`（或 `show`）查看状态；只有 `chat-bridge cooldown clear --confirm` 才会明确清理本地冷却。
+如果 ChatGPT 出现 `Too many requests` / “temporarily limited access to your conversations”，runtime 会写 `web-cooldowns/<账号身份哈希>.json` 并停止该账号的 Web 操作。冷却从 3 分钟起步，连续触发升级为 5、10、15 分钟；人工命令快速返回 `WEB_COOLDOWN_ACTIVE`，watchdog 跳过冷却账号但继续其他账号；没有可巡检任务时不启动 Ego。用 `chat-bridge cooldown status --account secondary`（或 `--project`）查看；清理需 `cooldown clear --account secondary --confirm`。升级保留的旧 `web-cooldown.json` 只保护默认账号。浏览器操作的跨进程节奏锁仍共享，不等于账号额度共享。
 
 ## 恢复
 

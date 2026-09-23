@@ -79,9 +79,12 @@ chat-bridge account add secondary --label "Secondary ChatGPT"
 chat-bridge account use secondary --project "PROJECT NAME"
 chat-bridge bind --project "PROJECT NAME" --account secondary --url "PROJECT URL" --space "SPACE NAME"
 chat-bridge space show --project "PROJECT NAME" --account secondary
+chat-bridge account identify --project "PROJECT NAME" --account secondary
 ```
 
 Treat `spaceName` as the stable binding and numeric `spaceId` as a runtime cache. Account bindings do not perform credential login; the bound Ego Space must already have access to the intended ChatGPT account/project.
+
+Identify each binding from an existing managed ChatGPT page. The stable logged-in user ID (never tokens) shares cooldown across aliases/projects/Spaces; different users remain independent. Until identified, cooldown follows the configured alias and is explicitly unverified: reuse the alias for the same login. Re-identify after changing login/profile/Space; a different login requires another alias. Account-wide discovery uses a bound page, never an arbitrary default-profile global Space.
 
 ## Session lifecycle
 
@@ -134,6 +137,8 @@ chat-bridge model research-agent "GPT-6 Pro" --project "PROJECT NAME"
 
 The bridge maps this preset to ChatGPT's `Latest` model choice plus `Pro` effort, i.e. the rightmost thinking slider position.
 
+New sessions default to Latest without forcing Pro. `5.6 Pro` and `5.5 Pro` select those versions plus the current rightmost slider endpoint; `model AGENT Latest --effort High` configures the two separately. Unavailable/ambiguous choices fail explicitly. Model quota exhaustion is not conversation-access cooldown: choose an older version explicitly, never silently fall back. `status`, `send`, `ask`, `new`, `model`, and `effort` expose UI-observed `modelSelection` (model, effort, raw); null means unrecognized. `status` separates configured values from observations.
+
 ## Watchdog and recovery
 
 Dispatch tracked work with `--task`; this records the pre-dispatch assistant baseline and lets the watchdog distinguish a new result from an idle/stopped turn.
@@ -156,7 +161,7 @@ Remove it with `~/.local/share/chatgpt-chat-bridge/uninstall-watchdog.sh`.
 
 Recovery ladder is deliberately conservative: native Continue/Try again/Retry/Regenerate → `continue` → Stop + guarded continue. Re-sending the original task is only enabled with `--aggressive`. Repeated failures mark the task `BLOCKED` and wake the owning controller/root escalation chain for GitHub reconciliation.
 
-All ChatGPT-Web-touching commands are serialized through a cross-process pacing gate. Normal UI work defaults to and cannot be configured below 10 seconds; `new`, `archive`, `retire`, and `delete` default to and cannot be configured below 30 seconds. A bridge call waits at most 5 seconds inline by default; longer pacing/lock waits return machine-readable `PACING_DEFERRED` (exit 75) instead of blocking the caller. Watchdog scans separate active tasks by at least 10 seconds and skip browser startup entirely when there are no active tasks. If ChatGPT shows `Too many requests`, the bridge records an adaptive 3–15 minute shared cooldown; manual UI commands return `WEB_COOLDOWN_ACTIVE` and watchdog skips cleanly. Use `chat-bridge cooldown status` (or `show`) and `chat-bridge cooldown clear --confirm` for local cooldown state.
+All ChatGPT-Web-touching commands are serialized through a shared browser pacing gate. Normal UI work cannot run faster than 10 seconds; `new`, `archive`, `retire`, and `delete` cannot run faster than 30 seconds. Calls wait at most 5 seconds inline; longer pacing/lock waits return `PACING_DEFERRED` (exit 75). Watchdog separates tasks by at least 10 seconds. `Too many requests` creates an adaptive 3–15 minute account-scoped cooldown; manual commands return `WEB_COOLDOWN_ACTIVE`. Watchdog skips that identity but continues others, and never starts Ego when no eligible tasks remain. Use `cooldown status --account ALIAS` (or `--project NAME`) and `cooldown clear --account ALIAS --confirm`. Legacy global cooldown protects only the default account. The shared pacing lock is not an account quota.
 
 Stop an active generation:
 

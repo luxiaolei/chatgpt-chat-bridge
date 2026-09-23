@@ -94,7 +94,11 @@ A ChatGPT conversation ID is independent of its Ego Space attachment. Rebinding 
 
 Account records are routing identities. Each logical project may bind to a different ChatGPT Project and Ego Space for each account. The bridge does not automate credentials; the selected Space must already have authorized access to that ChatGPT account/project.
 
+`account identify --project NAME --account ALIAS` verifies each binding against an existing managed ChatGPT page's session user ID. Only that ID leaves the page, never credentials/tokens. The SHA-256 of `identity:<ID>` scopes cooldown across aliases/projects/Spaces. Unidentified aliases use `alias:<ALIAS>` and are explicitly unverified; login/profile changes require re-identification, and identity mismatch is an error. Cooldown preflight is local-only; watchdog admits any eligible account then checks each task before browser access, skipping cooling identities without task failure. Legacy global cooldown is retained for the default identity only. The browser pacing lock stays shared for serialization, not quota accounting.
+
 Cross-account continuation should use GitHub durable state plus a handoff summary, then create or register a replacement session under the alternate account binding.
+
+A blocked task's controller notification interrupted by Web cooldown stays pending. Watchdog may retry that notification after cooldown, but the task remains blocked and recovery does not resume. Persistent `watch --loop` schedules fresh one-shot processes locally, so idle/cooling scans do not keep a browser controller alive.
 
 ### Session lifecycle
 
@@ -155,6 +159,8 @@ Latest + Pro
 ```
 
 because the current ChatGPT UI exposes the highest path through the `Latest` model choice plus the rightmost `Pro` thinking level.
+
+New sessions default to Latest without forcing an effort. 5.5/5.6 Pro retain the requested older radio version. Pro uses the slider's current maximum and checks displayed effort. No unavailable-model or quota fallback is silent. Callers receive `modelSelection` with observed model/effort/raw UI text; configured preferences are not evidence of the live model.
 
 ## Message lifecycle
 

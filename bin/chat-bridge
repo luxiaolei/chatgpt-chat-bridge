@@ -13,7 +13,8 @@ else
 fi
 
 STATE_DIR="${CHAT_BRIDGE_STATE_DIR:-$HOME/.local/state/chat-bridge}"
-COOLDOWN_FILE="$STATE_DIR/web-cooldown.json"
+CONFIG_DIR="${CHAT_BRIDGE_CONFIG_DIR:-$HOME/.config/chat-bridge}"
+PREFLIGHT="${MAIN:h}/web-preflight.py"
 UI_MIN_INTERVAL_SEC="${CHAT_BRIDGE_UI_MIN_INTERVAL_SEC:-10}"
 UI_HEAVY_INTERVAL_SEC="${CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC:-30}"
 MAX_INLINE_WAIT_SEC="${CHAT_BRIDGE_MAX_INLINE_WAIT_SEC:-5}"
@@ -47,27 +48,9 @@ CMD="${1:-help}"
 SUB="${2:-}"
 
 if [[ "$CMD" == "cooldown" ]]; then
-  mkdir -p "$STATE_DIR"
   case "$SUB" in
     ""|show|status)
-      python3 - "$COOLDOWN_FILE" <<'PY'
-import json,pathlib,sys,time
-p=pathlib.Path(sys.argv[1])
-if not p.exists():
-    print(json.dumps({"active":False,"cooldown":None},ensure_ascii=False,indent=2)); raise SystemExit
-try: data=json.loads(p.read_text())
-except Exception: data={}
-until=data.get("until")
-try: remaining=max(0.0,(time.mktime(time.strptime(until,"%Y-%m-%dT%H:%M:%S.%fZ")) if False else 0))
-except Exception: remaining=0.0
-from datetime import datetime,timezone
-try:
-    dt=datetime.fromisoformat(str(until).replace("Z","+00:00"))
-    remaining=max(0.0,(dt-datetime.now(timezone.utc)).total_seconds())
-except Exception:
-    remaining=0.0
-print(json.dumps({"active":remaining>0,"remainingSec":round(remaining,1),"cooldown":data},ensure_ascii=False,indent=2))
-PY
+      python3 "$PREFLIGHT" status "$CONFIG_DIR" "$STATE_DIR" "$@"
       exit 0
       ;;
     clear)
@@ -75,8 +58,7 @@ PY
         echo '{"ok":false,"status":"CONFIRMATION_REQUIRED","reason":"COOLDOWN_CLEAR_REQUIRES_CONFIRM"}' >&2
         exit 2
       fi
-      rm -f "$COOLDOWN_FILE"
-      echo '{"ok":true,"cleared":true}'
+      python3 "$PREFLIGHT" clear "$CONFIG_DIR" "$STATE_DIR" "$@"
       exit 0
       ;;
     *)
@@ -95,6 +77,9 @@ case "$CMD" in
   space)
     [[ "$SUB" == "prune" ]] && TOUCH_UI=1
     ;;
+  account)
+    [[ "$SUB" == "identify" ]] && TOUCH_UI=1
+    ;;
 esac
 case "$CMD" in
   new|archive|retire|delete)
@@ -102,60 +87,26 @@ case "$CMD" in
     ;;
 esac
 
-# A one-shot watchdog with no active tasks should never start Ego/browser work.
-if [[ "$CMD" == "watch" && " ${*} " != *" --loop "* ]]; then
-  PROJECT_ARG=""
-  for ((i=1;i<=$#;i++)); do
-    if [[ "${@[i]}" == "--project" && $((i+1)) -le $# ]]; then
-      PROJECT_ARG="${@[$((i+1))]}"
-      break
-    fi
-  done
-  HAS_ACTIVE="$(python3 - "$STATE_DIR/runtime.json" "$PROJECT_ARG" <<'PY'
-import json,pathlib,sys
-p=pathlib.Path(sys.argv[1]); project=sys.argv[2] or None
-try: data=json.loads(p.read_text())
-except Exception: data={}
-terminal={"COMPLETE","FAILED","CANCELLED","BLOCKED"}
-active=False
-for task in (data.get("tasks") or {}).values():
-    if project and task.get("project")!=project: continue
-    if str(task.get("status") or "").upper() not in terminal:
-        active=True; break
-print("1" if active else "0")
-PY
-)"
+# Watch all requested accounts locally; one cooling account must not mask another.
+if [[ "$CMD" == "watch" ]]; then
+  if (( ${@[(Ie)--loop]} )); then
+    exec python3 "$PREFLIGHT" loop "$CONFIG_DIR" "$STATE_DIR" "$0" "$@"
+  fi
+  HAS_ACTIVE="$(python3 "$PREFLIGHT" watch "$CONFIG_DIR" "$STATE_DIR" "$@")"
   if [[ "$HAS_ACTIVE" != "1" ]]; then
     exit 0
   fi
 fi
 
-if (( TOUCH_UI )); then
+if (( TOUCH_UI )) && [[ "$CMD" != "watch" ]]; then
   mkdir -p "$STATE_DIR"
-
-  COOLDOWN_STATE="$(python3 - "$COOLDOWN_FILE" <<'PY'
-import json,pathlib,sys
-from datetime import datetime,timezone
-p=pathlib.Path(sys.argv[1])
-try: data=json.loads(p.read_text())
-except Exception: data={}
-try:
-    until=datetime.fromisoformat(str(data.get("until") or "").replace("Z","+00:00"))
-    remaining=max(0.0,(until-datetime.now(timezone.utc)).total_seconds())
-except Exception:
-    remaining=0.0
-print(f"{remaining:.3f}|{data.get('until') or ''}|{data.get('strikes') or 0}")
-PY
-)"
+  COOLDOWN_STATE="$(python3 "$PREFLIGHT" gate "$CONFIG_DIR" "$STATE_DIR" "$@")"
   REMAINING="${COOLDOWN_STATE%%|*}"
   if python3 - "$REMAINING" <<'PY'
 import sys
 raise SystemExit(0 if float(sys.argv[1])>0.01 else 1)
 PY
   then
-    if [[ "$CMD" == "watch" ]]; then
-      exit 0
-    fi
     COOLDOWN_REST="${COOLDOWN_STATE#*|}"
     COOLDOWN_UNTIL="${COOLDOWN_REST%%|*}"
     emit_tempfail WEB_COOLDOWN_ACTIVE COOLDOWN CHATGPT_RATE_LIMIT "$REMAINING" "$COOLDOWN_UNTIL" >&2
@@ -174,10 +125,12 @@ PAGE_POOL="${CHAT_BRIDGE_PAGE_POOL:-${MAIN:h}/page-pool.js}"
 LIVENESS="${CHAT_BRIDGE_LIVENESS_POLICY:-${MAIN:h}/liveness-policy.js}"
 TASK_POLICY="${CHAT_BRIDGE_TASK_POLICY:-${MAIN:h}/task-policy.js}"
 WEB_POLICY="${CHAT_BRIDGE_WEB_POLICY:-${MAIN:h}/web-policy.js}"
-for f in "$CONTROL" "$PAGE_POOL" "$LIVENESS" "$TASK_POLICY" "$WEB_POLICY"; do
+MODEL_POLICY="${MAIN:h}/model-policy.js"
+for f in "$CONTROL" "$PAGE_POOL" "$LIVENESS" "$TASK_POLICY" "$WEB_POLICY" "$MODEL_POLICY"; do
   [[ -f "$f" ]] || { echo "chat-bridge: runtime module not found: $f" >&2; exit 127; }
 done
 
+# ponytail: shared browser serialization; split locks only if independent-account throughput needs it.
 LOCK_DIR="$STATE_DIR/ui-pacing.lock"
 STAMP_FILE="$STATE_DIR/ui-pacing.last"
 LOCK_HELD=0
@@ -190,6 +143,7 @@ cleanup_lock() {
 trap cleanup_lock EXIT INT TERM
 
 if (( TOUCH_UI )); then
+  mkdir -p "$STATE_DIR"
   START_TS="$(python3 - <<'PY'
 import time; print(time.time())
 PY
@@ -261,6 +215,7 @@ set +e
   cat "$LIVENESS"
   cat "$TASK_POLICY"
   cat "$WEB_POLICY"
+  cat "$MODEL_POLICY"
   cat "$MAIN"
 } | "$EGO_BROWSER" nodejs
 RC=$?
