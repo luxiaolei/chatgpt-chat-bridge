@@ -1,6 +1,6 @@
 #!/bin/zsh
 set -euo pipefail
-INTERVAL="${1:-30}"
+INTERVAL="${1:-60}"
 [[ "$INTERVAL" == <-> ]] || { echo "interval must be integer seconds" >&2; exit 2; }
 (( INTERVAL >= 10 )) || { echo "interval must be >= 10 seconds" >&2; exit 2; }
 BIN="${CHAT_BRIDGE_BIN:-$HOME/.local/bin/chat-bridge}"

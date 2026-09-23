@@ -146,17 +146,17 @@ chat-bridge watch --project "PROJECT NAME"
 
 The watchdog uses multiple signals: Stop/Send/composer controls, stable ChatGPT message IDs, assistant text/hash/length, a page-side MutationObserver, recovery/error UI, and elapsed time since real progress. Normal quiet thinking is not interrupted until the task's stall threshold is crossed.
 
-Install the macOS launchd watchdog (all projects, one-shot scan every 30 seconds):
+Install the macOS launchd watchdog (all projects, one-shot scan every 60 seconds):
 
 ```bash
-~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 30
+~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 60
 ```
 
 Remove it with `~/.local/share/chatgpt-chat-bridge/uninstall-watchdog.sh`.
 
 Recovery ladder is deliberately conservative: native Continue/Try again/Retry/Regenerate → `continue` → Stop + guarded continue. Re-sending the original task is only enabled with `--aggressive`. Repeated failures mark the task `BLOCKED` and wake the owning controller/root escalation chain for GitHub reconciliation.
 
-All ChatGPT-Web-touching commands are serialized through a cross-process pacing gate. The default minimum is 5 seconds, while `new`, `archive`, `retire`, and `delete` default to 15 seconds. Do not lower these values; only raise them when the service is rate-limiting. Watchdog scans also separate active tasks by at least 5 seconds.
+All ChatGPT-Web-touching commands are serialized through a cross-process pacing gate. Normal UI work defaults to and cannot be configured below 10 seconds; `new`, `archive`, `retire`, and `delete` default to and cannot be configured below 30 seconds. A bridge call waits at most 5 seconds inline by default; longer pacing/lock waits return machine-readable `PACING_DEFERRED` (exit 75) instead of blocking the caller. Watchdog scans separate active tasks by at least 10 seconds and skip browser startup entirely when there are no active tasks. If ChatGPT shows `Too many requests`, the bridge records an adaptive 3–15 minute shared cooldown; manual UI commands return `WEB_COOLDOWN_ACTIVE` and watchdog skips cleanly. Use `chat-bridge cooldown status` (or `show`) and `chat-bridge cooldown clear --confirm` for local cooldown state.
 
 Stop an active generation:
 
