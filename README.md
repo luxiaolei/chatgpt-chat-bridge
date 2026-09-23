@@ -47,7 +47,7 @@ Conductor Chat ── chat-bridge ── Worker Chats
 - Project/account/Space bindings with one Ego Space per project/account
 - Session lifecycle: archive, retire, delete (explicit confirmation), and local forget
 - Persistent registry under `~/.config/chat-bridge/` and runtime cache under `~/.local/state/chat-bridge/`
-- Conductor skill for GitHub-driven multi-chat orchestration
+- Conductor skill for GitHub-driven orchestration, including optional root/domain controller hierarchies
 
 ## Requirements
 
@@ -119,7 +119,7 @@ chat-bridge new \
   --name implementation-agent \
   --model "GPT-5.6 Sol" \
   --effort High \
-  --message "You own implementation for GitHub issue #12. Update the issue/PR, then callback conductor."
+  --message "You own implementation for GitHub issue #12. Update the issue/PR, then callback the owning controller."
 ```
 
 The bridge captures the real conversation ID and project-scoped URL. New sessions for the same logical project/account are opened as **new tabs inside the bound Ego Space**; they do not create a new Space per session.
@@ -159,6 +159,7 @@ Operational task state is stored separately from the registry at `~/.local/state
 
 ```bash
 chat-bridge task set HZ-47-W4 --project "My Project" --role implementation \
+  --controller 00-s --reply-to 00-s --escalation-to 00-g \
   --status RUNNING --github "https://github.com/OWNER/REPO/issues/47"
 chat-bridge task list --project "My Project"
 chat-bridge task clear HZ-47-W4 --project "My Project"
@@ -231,17 +232,22 @@ chat-bridge recover implementation-agent --project "My Project"
 
 ## Conductor workflow
 
-The recommended architecture is **GitHub-first, Chat-event-driven**:
+The bridge supports both a single conductor and a hierarchical controller tree. Small projects can keep the backward-compatible `conductor` root. Larger projects may initialize an explicit root controller:
 
-1. Create an umbrella GitHub Issue for project plan/status.
-2. Create workstream Issues and PRs.
-3. Give the conductor chat the repository, project name, and umbrella Issue.
-4. The conductor syncs project chats and creates/reuses worker sessions.
-5. The conductor allocates model + thinking level by task difficulty.
-6. Workers update the GitHub Issue/PR **before** reporting completion.
-7. Workers callback the conductor through `chat-bridge send conductor ...`.
-8. That callback creates a new conductor turn, which reconciles GitHub state and dispatches the next batch.
-9. Repeat until project acceptance criteria are satisfied.
+```bash
+chat-bridge init --project "My Project" --root-controller 00-g
+```
+
+A tracked task may then carry `controller`, `replyTo`, and `escalationTo`:
+
+```bash
+chat-bridge send supply-worker "..." --project "My Project" --task T-001 \
+  --controller 00-s --reply-to 00-s --escalation-to 00-g
+```
+
+Watchdog notifications are tried in this order: `replyTo → controller → escalationTo → rootController`, with duplicates removed. Normal worker callbacks should also go to the owning domain controller. The root controller handles cross-domain ownership, shared-resource conflicts, evidence-policy disputes, and priority arbitration rather than every worker event.
+
+The overall architecture remains **GitHub-first, Chat-event-driven**: workers update the GitHub Issue/PR before callback; controllers reconcile durable state before dispatching the next batch.
 
 See [skills/project-conductor/SKILL.md](skills/project-conductor/SKILL.md) and [docs/architecture.md](docs/architecture.md).
 

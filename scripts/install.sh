@@ -8,6 +8,7 @@ SKILLS_DIR="${CHAT_BRIDGE_SKILLS_DIR:-$HOME/.agents/skills}"
 
 mkdir -p "$BIN_DIR" "$SHARE_DIR" "$SKILLS_DIR/chat-bridge" "$SKILLS_DIR/project-conductor"
 cp "$ROOT/src/main.js" "$SHARE_DIR/main.js"
+cp "$ROOT/src/control-routing.js" "$SHARE_DIR/control-routing.js"
 cp "$ROOT/scripts/install-watchdog.sh" "$SHARE_DIR/install-watchdog.sh"
 cp "$ROOT/scripts/uninstall-watchdog.sh" "$SHARE_DIR/uninstall-watchdog.sh"
 cp "$ROOT/bin/chat-bridge" "$BIN_DIR/chat-bridge"

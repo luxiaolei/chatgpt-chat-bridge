@@ -18,6 +18,8 @@ if [[ ! -x "$EGO_BROWSER" ]]; then
 fi
 [[ -x "$EGO_BROWSER" ]] || { echo "chat-bridge: ego-browser not found" >&2; exit 127; }
 [[ -f "$MAIN" ]] || { echo "chat-bridge: runtime not found: $MAIN" >&2; exit 127; }
+CONTROL="${CHAT_BRIDGE_CONTROL:-${MAIN:h}/control-routing.js}"
+[[ -f "$CONTROL" ]] || { echo "chat-bridge: control routing module not found: $CONTROL" >&2; exit 127; }
 
 ARGS_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:], ensure_ascii=False))' "$@")"
 CONFIG_JSON="$(python3 -c 'import json,os; print(json.dumps(os.environ.get("CHAT_BRIDGE_CONFIG_DIR")))')"
@@ -26,5 +28,6 @@ STATE_JSON="$(python3 -c 'import json,os; print(json.dumps(os.environ.get("CHAT_
   printf 'globalThis.__CHAT_BRIDGE_ARGS__ = %s;\n' "$ARGS_JSON"
   printf 'globalThis.__CHAT_BRIDGE_CONFIG_DIR__ = %s;\n' "$CONFIG_JSON"
   printf 'globalThis.__CHAT_BRIDGE_STATE_DIR__ = %s;\n' "$STATE_JSON"
+  cat "$CONTROL"
   cat "$MAIN"
 } | exec "$EGO_BROWSER" nodejs

@@ -8,6 +8,9 @@ const STATE_DIR = globalThis.__CHAT_BRIDGE_STATE_DIR__ || process.env.CHAT_BRIDG
 const REG_PATH = pathMod.join(CONFIG_DIR, "registry.json");
 const RUNTIME_PATH = pathMod.join(STATE_DIR, "runtime.json");
 const DEFAULT_ACCOUNT = "default";
+const CONTROL = globalThis.__CHAT_BRIDGE_CONTROL__;
+if(!CONTROL) throw new Error("chat-bridge control routing module was not loaded");
+const { controlRoute, notificationTargets } = CONTROL;
 
 function slug(v="") {
   return String(v).trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"") || "project";
@@ -27,7 +30,7 @@ function normalizeRegistry(raw) {
   reg.defaultAccount ||= DEFAULT_ACCOUNT;
   reg.accounts[reg.defaultAccount] ||= {name:reg.defaultAccount};
   for (const [name,p0] of Object.entries(reg.projects)) {
-    const p=p0||{}; p.name ||= name; p.activeAccount ||= reg.defaultAccount; p.bindings ||= {};
+    const p=p0||{}; p.name ||= name; p.activeAccount ||= reg.defaultAccount; p.rootController ||= "conductor"; p.bindings ||= {};
     const oldUrl=p.url||null, oldBase=p.projectBase||null;
     if (!p.bindings[p.activeAccount] && (oldUrl||oldBase)) {
       p.bindings[p.activeAccount]={account:p.activeAccount,projectUrl:oldUrl,projectBase:oldBase,
@@ -96,8 +99,8 @@ function print(v){ console.log(typeof v==="string" ? v : JSON.stringify(v,null,2
 
 function projectRecord(reg, project) {
   if(!project) throw new Error("project required");
-  reg.projects[project] ||= {name:project,activeAccount:reg.defaultAccount||DEFAULT_ACCOUNT,bindings:{}};
-  const p=reg.projects[project]; p.activeAccount ||= reg.defaultAccount||DEFAULT_ACCOUNT; p.bindings ||= {}; return p;
+  reg.projects[project] ||= {name:project,activeAccount:reg.defaultAccount||DEFAULT_ACCOUNT,rootController:"conductor",bindings:{}};
+  const p=reg.projects[project]; p.activeAccount ||= reg.defaultAccount||DEFAULT_ACCOUNT; p.rootController ||= "conductor"; p.bindings ||= {}; return p;
 }
 function activeAccount(reg, project, explicit=null) {
   return explicit || projectRecord(reg,project).activeAccount || reg.defaultAccount || DEFAULT_ACCOUNT;
@@ -456,14 +459,25 @@ async function waitForGenerationStop(page, timeout=7000) {
   },undefined,{timeout}).then(()=>true).catch(()=>false);
 }
 
-async function notifyConductor(reg, task, message) {
-  try {
-    const conductor=resolveChat(reg,"conductor",task.project,task.account||null);
-    if(conductor.id===task.sessionId) return {sent:false,reason:"task session is conductor"};
-    const {page}=await ensurePage(reg,conductor);
-    await sendMessage(page,message);
-    return {sent:true,conductor:conductor.name};
-  } catch(error) { return {sent:false,reason:error.message}; }
+async function notifyController(reg, task, message) {
+  const rootController=reg.projects?.[task.project]?.rootController || "conductor";
+  const targets=notificationTargets(task,rootController);
+  const failures=[];
+  for(const target of targets) {
+    try {
+      const controller=resolveChat(reg,target,task.project,task.account||null);
+      if(controller.id===task.sessionId) {
+        failures.push({target,reason:"target is task session"});
+        continue;
+      }
+      const {page}=await ensurePage(reg,controller);
+      await sendMessage(page,message);
+      return {sent:true,target,role:controller.role||controller.name,targets};
+    } catch(error) {
+      failures.push({target,reason:error.message});
+    }
+  }
+  return {sent:false,targets,failures};
 }
 
 async function gradedRecover(reg, chat, page, task, observed, options={}) {
@@ -477,7 +491,7 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
     live.stateUpdatedAt=now.toISOString();
     let notification={sent:false,reason:"already notified"};
     if(!live.watchdogNotifiedAt) {
-      notification=await notifyConductor(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: BLOCKED\nsession_state: ${observed.sessionState}\nrole: ${live.role||chat.role}\nsummary: ${live.blockedReason}; reconcile GitHub and replace/recover the session if needed.`);
+      notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: BLOCKED\nsession_state: ${observed.sessionState}\nrole: ${live.role||chat.role}\nsummary: ${live.blockedReason}; reconcile GitHub and replace/recover the session if needed.`);
       live.watchdogNotifiedAt=now.toISOString();
     }
     rt.tasks[live.taskId]=live; await saveRuntime(rt);
@@ -527,7 +541,7 @@ async function watchOnce(reg, project=null, account=null, options={}) {
         if(!["COMPLETE","FAILED","CANCELLED"].includes(String(live.status).toUpperCase())) live.status="AWAITING_DURABLE_UPDATE";
         live.recoveryAttempts=0; live.watchErrorCount=0;
         if(options.autoRecover!==false && !live.watchdogResultNotifiedAt) {
-          notification=await notifyConductor(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: AWAITING_DURABLE_UPDATE\nsession_state: IDLE_COMPLETE\nrole: ${live.role||chat.role}\nsummary: Worker is idle with a new assistant result. Reconcile GitHub/callback evidence before marking COMPLETE.`);
+          notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: AWAITING_DURABLE_UPDATE\nsession_state: IDLE_COMPLETE\nrole: ${live.role||chat.role}\nsummary: Worker is idle with a new assistant result. Reconcile GitHub/callback evidence before marking COMPLETE.`);
           live.watchdogResultNotifiedAt=new Date().toISOString(); live.watchdogResultNotification=notification;
         }
         latest.tasks[live.taskId]=live; await saveRuntime(latest);
@@ -546,7 +560,7 @@ async function watchOnce(reg, project=null, account=null, options={}) {
       let notification=null;
       if(options.autoRecover!==false && live.watchErrorCount>=3 && live.status!=="BLOCKED") {
         live.status="BLOCKED"; live.blockedReason=`watch failed ${live.watchErrorCount} times: ${error.message}`;
-        notification=await notifyConductor(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: BLOCKED\nrole: ${live.role||"unknown"}\nsummary: ${live.blockedReason}`);
+        notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: BLOCKED\nrole: ${live.role||"unknown"}\nsummary: ${live.blockedReason}`);
         live.watchdogNotifiedAt=new Date().toISOString();
       }
       latest.tasks[live.taskId]=live; await saveRuntime(latest);
@@ -631,18 +645,19 @@ const project=opt("project",reg.defaultProject);
 const accountArg=opt("account",null);
 
 if(cmd==="help"){
-  print("chat-bridge commands: init, bind, account, space, register, list, sync, discover, projects, runtime, task, watch, read, status, send, ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune");
+  print("chat-bridge commands: init [--root-controller ROLE], bind, account, space, register, list, sync, discover, projects, runtime, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE], watch, read, status, send [--task ID --controller ROLE], ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune");
 }
 else if(cmd==="init"){
   const p=project||args[1]; if(!p) throw new Error("project required");
   const a=accountArg||reg.defaultAccount||DEFAULT_ACCOUNT;
   reg.defaultProject=p; reg.defaultAccount ||= a; reg.accounts[a] ||= {name:a};
   const pr=projectRecord(reg,p); pr.activeAccount=a;
+  pr.rootController=opt("root-controller",pr.rootController||"conductor") || "conductor";
   const b=bindingFor(reg,p,a,true), u=opt("url",null), sp=opt("space",null);
   if(u){ b.projectUrl=u; b.projectBase=u.replace(/\/project$/,''); b.projectId=projectIdFromUrl(u); }
   if(sp){ b.spaceName=sp; b.spaceId=null; b.controlPage=null; }
-  await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:b.spaceName,lastCommand:"init"});
-  print({ok:true,project:p,account:a,spaceName:b.spaceName,projectUrl:b.projectUrl});
+  await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:b.spaceName,rootController:pr.rootController,lastCommand:"init"});
+  print({ok:true,project:p,account:a,rootController:pr.rootController,spaceName:b.spaceName,projectUrl:b.projectUrl});
 }
 else if(cmd==="bind"){
   const p=project||args[1]; if(!p) throw new Error("project required");
@@ -733,10 +748,18 @@ else if(cmd==="task"){
   } else if(sub==="set"){
     const taskId=args[2]; if(!taskId) throw new Error("task id required");
     const old=rt.tasks[taskId]||{}, role=opt("role",old.role||null);
-    const taskAccount=project?activeAccount(reg,project,accountArg):(accountArg||old.account||null);
+    const taskProject=project||old.project||null;
+    const taskAccount=taskProject?activeAccount(reg,taskProject,accountArg):(accountArg||old.account||null);
     let sessionId=opt("session",old.sessionId||null);
-    if(!sessionId && project && role){ try { sessionId=resolveChat(reg,role,project,taskAccount).id; } catch {} }
-    rt.tasks[taskId]={...old,taskId,project:project||old.project||null,role,
+    if(!sessionId && taskProject && role){ try { sessionId=resolveChat(reg,role,taskProject,taskAccount).id; } catch {} }
+    const rootController=taskProject?projectRecord(reg,taskProject).rootController:"conductor";
+    const route=controlRoute({
+      ...old,
+      controller:opt("controller",old.controller||null),
+      replyTo:opt("reply-to",old.replyTo||null),
+      escalationTo:opt("escalation-to",old.escalationTo||null),
+    },rootController);
+    rt.tasks[taskId]={...old,...route,taskId,project:taskProject,role,
       account:opt("account",old.account||taskAccount||null),sessionId,
       issue:opt("issue",old.issue||null),github:opt("github",old.github||null),status:opt("status",old.status||"RUNNING"),
       stallThresholdSec:opt("stall-sec",old.stallThresholdSec||null)?Number(opt("stall-sec",old.stallThresholdSec||null)):null,
@@ -789,14 +812,21 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
     const linked=taskId?rt.tasks[taskId]:Object.values(rt.tasks||{}).filter(t=>activeTaskStatus(t.status) && t.project===chat.project && (t.sessionId===chat.id || (!t.sessionId&&t.role===chat.role))).sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")))[0];
     const observed=await observeSession(chat,page,linked||null);
     print({...observed,configuredModel:chat.model||null,configuredEffort:chat.effort||null,project:chat.project||null,account:chat.account,status:chat.status,
-      spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page,task:linked?{taskId:linked.taskId,status:linked.status,recoveryAttempts:linked.recoveryAttempts||0}:null});
+      spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page,task:linked?{taskId:linked.taskId,status:linked.status,controller:linked.controller||null,replyTo:linked.replyTo||null,escalationTo:linked.escalationTo||null,recoveryAttempts:linked.recoveryAttempts||0}:null});
   }
   if(cmd==="send"){
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
     const taskId=opt("task",null); let tracked=null;
     if(taskId){
       const before=await state(page), rt=await loadRuntime(), old=rt.tasks[taskId]||{};
-      tracked={...old,taskId,project:chat.project,role:chat.role,account:chat.account,sessionId:chat.id,status:"DISPATCHED",
+      const rootController=projectRecord(reg,chat.project).rootController;
+      const route=controlRoute({
+        ...old,
+        controller:opt("controller",old.controller||null),
+        replyTo:opt("reply-to",old.replyTo||null),
+        escalationTo:opt("escalation-to",old.escalationTo||null),
+      },rootController);
+      tracked={...old,...route,taskId,project:chat.project,role:chat.role,account:chat.account,sessionId:chat.id,status:"DISPATCHED",
         originalMessage:msg,baselineAssistantCount:before.assistantCount,baselineAssistantHash:hashText(before.lastAssistant||""),baselineAssistantId:before.lastAssistantId||null,
         dispatchedAt:new Date().toISOString(),recoveryAttempts:0,totalRecoveryAttempts:0,lastRecoveryAt:null,lastRecoveryMethod:null,watchErrorCount:0,watchdogNotifiedAt:null,watchdogResultNotifiedAt:null,
         updatedAt:new Date().toISOString()};

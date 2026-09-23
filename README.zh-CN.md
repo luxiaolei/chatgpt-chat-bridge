@@ -30,7 +30,7 @@ GitHub Issue / PR（项目真实状态）
 - 同一 Project/账号的新 Chat 只在指定 Space 里新开 tab，不再一 Chat 一 Space
 - Session Archive / Retire / Delete / Forget 生命周期
 - 本地持久化 registry 与独立 runtime task cache
-- 内置项目总控 Skill
+- 内置项目总控 Skill，支持单总控和 `rootController → domain controller → worker` 分层路由
 
 ## 安装
 
@@ -116,6 +116,7 @@ Registry 位于：
 
 ```bash
 chat-bridge task set HZ-47-W4 --project "My Project" --role implementation \
+  --controller 00-s --reply-to 00-s --escalation-to 00-g \
   --status RUNNING --github "https://github.com/OWNER/REPO/issues/47"
 chat-bridge task list --project "My Project"
 chat-bridge task clear HZ-47-W4 --project "My Project"
@@ -147,42 +148,37 @@ Bridge 会把它解释成：
 
 ## 总控工作机制
 
-建议一个 Project 只设一个总控 Chat。
+v0.4 同时支持两种模式：小项目继续使用单个 `conductor`；复杂项目可以设置一个 root controller，并为任务指定 domain controller。
 
-总控职责：
+```text
+rootController
+    ├─ domain-controller-a → workers
+    ├─ domain-controller-b → workers
+    └─ verification-controller → reviewers
+```
 
-1. **项目把控**：以 GitHub Issue / PR 为主线维护真实项目状态。
-2. **消息路由**：把任务分发到不同 Chat。
-3. **Session 管理**：创建、复用、替换项目 Chat Session。
-4. **资源分配**：根据任务难度决定模型与 Thinking Level。
-5. **持续推进**：Worker 完成后先更新 GitHub，再通过 Bridge 回调总控，从而触发总控下一轮。
+初始化分层项目：
+
+```bash
+chat-bridge init --project "My Project" --root-controller 00-g
+```
+
+派发或登记任务时写清控制链：
+
+```bash
+chat-bridge send supply-worker "..." --project "My Project" --task T-001 \
+  --controller 00-s --reply-to 00-s --escalation-to 00-g
+```
+
+Watchdog 的通知顺序是 `replyTo → controller → escalationTo → rootController`，并自动去重。如果 00-s 可用，供应任务不会直接惊动 00-g；只有目标 controller 不可达时才升级。
+
+Worker 正常回调也应先回 owning controller。Controller 处理域内调度、Session 替换和普通 review；跨域 ownership、公共写域、证据口径或优先级冲突再升级 root controller。GitHub Issue/PR 始终是 durable state，Chat 只承载控制与执行上下文。
 
 总控 Skill 在：
 
 ```text
 skills/project-conductor/SKILL.md
 ```
-
-Worker 回调格式建议：
-
-```text
-[RESULT]
-task_id: T-001
-from: implementation-agent
-to: conductor
-status: COMPLETE
-github: https://github.com/.../issues/12
-summary: ...
-next: ...
-```
-
-然后：
-
-```bash
-chat-bridge send conductor "[RESULT] ..." --project "My Project"
-```
-
-这条消息会成为总控 Chat 的新一轮输入，从而继续整个项目循环。
 
 ## Chat 端连接本地
 
