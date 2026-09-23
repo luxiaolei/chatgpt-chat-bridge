@@ -12,36 +12,65 @@ else
   MAIN="$HOME/.local/share/chatgpt-chat-bridge/main.js"
 fi
 
-EGO_BROWSER="${EGO_BROWSER_BIN:-$HOME/.local/bin/ego-browser}"
-if [[ ! -x "$EGO_BROWSER" ]]; then
-  EGO_BROWSER="$(command -v ego-browser || true)"
-fi
-[[ -x "$EGO_BROWSER" ]] || { echo "chat-bridge: ego-browser not found" >&2; exit 127; }
-[[ -f "$MAIN" ]] || { echo "chat-bridge: runtime not found: $MAIN" >&2; exit 127; }
-CONTROL="${CHAT_BRIDGE_CONTROL:-${MAIN:h}/control-routing.js}"
-PAGE_POOL="${CHAT_BRIDGE_PAGE_POOL:-${MAIN:h}/page-pool.js}"
-LIVENESS="${CHAT_BRIDGE_LIVENESS_POLICY:-${MAIN:h}/liveness-policy.js}"
-TASK_POLICY="${CHAT_BRIDGE_TASK_POLICY:-${MAIN:h}/task-policy.js}"
-[[ -f "$CONTROL" ]] || { echo "chat-bridge: control routing module not found: $CONTROL" >&2; exit 127; }
-[[ -f "$PAGE_POOL" ]] || { echo "chat-bridge: page pool module not found: $PAGE_POOL" >&2; exit 127; }
-[[ -f "$LIVENESS" ]] || { echo "chat-bridge: liveness policy module not found: $LIVENESS" >&2; exit 127; }
-[[ -f "$TASK_POLICY" ]] || { echo "chat-bridge: task policy module not found: $TASK_POLICY" >&2; exit 127; }
-
 STATE_DIR="${CHAT_BRIDGE_STATE_DIR:-$HOME/.local/state/chat-bridge}"
-UI_MIN_INTERVAL_SEC="${CHAT_BRIDGE_UI_MIN_INTERVAL_SEC:-5}"
-UI_HEAVY_INTERVAL_SEC="${CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC:-15}"
+COOLDOWN_FILE="$STATE_DIR/web-cooldown.json"
+UI_MIN_INTERVAL_SEC="${CHAT_BRIDGE_UI_MIN_INTERVAL_SEC:-10}"
+UI_HEAVY_INTERVAL_SEC="${CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC:-30}"
+MAX_INLINE_WAIT_SEC="${CHAT_BRIDGE_MAX_INLINE_WAIT_SEC:-5}"
+LOCK_WAIT_SEC="${CHAT_BRIDGE_LOCK_WAIT_SEC:-5}"
 
-python3 - "$UI_MIN_INTERVAL_SEC" "$UI_HEAVY_INTERVAL_SEC" <<'PY' >/dev/null
+python3 - "$UI_MIN_INTERVAL_SEC" "$UI_HEAVY_INTERVAL_SEC" "$MAX_INLINE_WAIT_SEC" "$LOCK_WAIT_SEC" <<'PY' >/dev/null
 import sys
-normal=float(sys.argv[1]); heavy=float(sys.argv[2])
+normal,heavy,max_wait,lock_wait=map(float,sys.argv[1:])
 if normal < 5:
     raise SystemExit("CHAT_BRIDGE_UI_MIN_INTERVAL_SEC must be >= 5")
 if heavy < normal:
     raise SystemExit("CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC must be >= UI minimum")
+if max_wait < 0 or max_wait > 5:
+    raise SystemExit("CHAT_BRIDGE_MAX_INLINE_WAIT_SEC must be between 0 and 5")
+if lock_wait < 0 or lock_wait > 5:
+    raise SystemExit("CHAT_BRIDGE_LOCK_WAIT_SEC must be between 0 and 5")
 PY
 
 CMD="${1:-help}"
 SUB="${2:-}"
+
+if [[ "$CMD" == "cooldown" ]]; then
+  mkdir -p "$STATE_DIR"
+  case "$SUB" in
+    ""|show)
+      python3 - "$COOLDOWN_FILE" <<'PY'
+import json,pathlib,sys,time
+p=pathlib.Path(sys.argv[1])
+if not p.exists():
+    print(json.dumps({"active":False,"cooldown":None},ensure_ascii=False,indent=2)); raise SystemExit
+try: data=json.loads(p.read_text())
+except Exception: data={}
+until=data.get("until")
+try: remaining=max(0.0,(time.mktime(time.strptime(until,"%Y-%m-%dT%H:%M:%S.%fZ")) if False else 0))
+except Exception: remaining=0.0
+from datetime import datetime,timezone
+try:
+    dt=datetime.fromisoformat(str(until).replace("Z","+00:00"))
+    remaining=max(0.0,(dt-datetime.now(timezone.utc)).total_seconds())
+except Exception:
+    remaining=0.0
+print(json.dumps({"active":remaining>0,"remainingSec":round(remaining,1),"cooldown":data},ensure_ascii=False,indent=2))
+PY
+      exit 0
+      ;;
+    clear)
+      rm -f "$COOLDOWN_FILE"
+      echo '{"ok":true,"cleared":true}'
+      exit 0
+      ;;
+    *)
+      echo "cooldown subcommand must be show or clear" >&2
+      exit 2
+      ;;
+  esac
+fi
+
 TOUCH_UI=0
 HEAVY_UI=0
 case "$CMD" in
@@ -58,10 +87,83 @@ case "$CMD" in
     ;;
 esac
 
+# A one-shot watchdog with no active tasks should never start Ego/browser work.
+if [[ "$CMD" == "watch" && " ${*} " != *" --loop "* ]]; then
+  PROJECT_ARG=""
+  for ((i=1;i<=$#;i++)); do
+    if [[ "${@[i]}" == "--project" && $((i+1)) -le $# ]]; then
+      PROJECT_ARG="${@[$((i+1))]}"
+      break
+    fi
+  done
+  HAS_ACTIVE="$(python3 - "$STATE_DIR/runtime.json" "$PROJECT_ARG" <<'PY'
+import json,pathlib,sys
+p=pathlib.Path(sys.argv[1]); project=sys.argv[2] or None
+try: data=json.loads(p.read_text())
+except Exception: data={}
+terminal={"COMPLETE","FAILED","CANCELLED","BLOCKED"}
+active=False
+for task in (data.get("tasks") or {}).values():
+    if project and task.get("project")!=project: continue
+    if str(task.get("status") or "").upper() not in terminal:
+        active=True; break
+print("1" if active else "0")
+PY
+)"
+  if [[ "$HAS_ACTIVE" != "1" ]]; then
+    exit 0
+  fi
+fi
+
+if (( TOUCH_UI )); then
+  mkdir -p "$STATE_DIR"
+
+  COOLDOWN_STATE="$(python3 - "$COOLDOWN_FILE" <<'PY'
+import json,pathlib,sys
+from datetime import datetime,timezone
+p=pathlib.Path(sys.argv[1])
+try: data=json.loads(p.read_text())
+except Exception: data={}
+try:
+    until=datetime.fromisoformat(str(data.get("until") or "").replace("Z","+00:00"))
+    remaining=max(0.0,(until-datetime.now(timezone.utc)).total_seconds())
+except Exception:
+    remaining=0.0
+print(f"{remaining:.3f}|{data.get('until') or ''}|{data.get('strikes') or 0}")
+PY
+)"
+  REMAINING="${COOLDOWN_STATE%%|*}"
+  if python3 - "$REMAINING" <<'PY'
+import sys
+raise SystemExit(0 if float(sys.argv[1])>0.01 else 1)
+PY
+  then
+    if [[ "$CMD" == "watch" ]]; then
+      exit 0
+    fi
+    echo "chat-bridge: WEB_COOLDOWN_ACTIVE ${COOLDOWN_STATE}" >&2
+    exit 75
+  fi
+fi
+
+EGO_BROWSER="${EGO_BROWSER_BIN:-$HOME/.local/bin/ego-browser}"
+if [[ ! -x "$EGO_BROWSER" ]]; then
+  EGO_BROWSER="$(command -v ego-browser || true)"
+fi
+[[ -x "$EGO_BROWSER" ]] || { echo "chat-bridge: ego-browser not found" >&2; exit 127; }
+[[ -f "$MAIN" ]] || { echo "chat-bridge: runtime not found: $MAIN" >&2; exit 127; }
+CONTROL="${CHAT_BRIDGE_CONTROL:-${MAIN:h}/control-routing.js}"
+PAGE_POOL="${CHAT_BRIDGE_PAGE_POOL:-${MAIN:h}/page-pool.js}"
+LIVENESS="${CHAT_BRIDGE_LIVENESS_POLICY:-${MAIN:h}/liveness-policy.js}"
+TASK_POLICY="${CHAT_BRIDGE_TASK_POLICY:-${MAIN:h}/task-policy.js}"
+WEB_POLICY="${CHAT_BRIDGE_WEB_POLICY:-${MAIN:h}/web-policy.js}"
+for f in "$CONTROL" "$PAGE_POOL" "$LIVENESS" "$TASK_POLICY" "$WEB_POLICY"; do
+  [[ -f "$f" ]] || { echo "chat-bridge: runtime module not found: $f" >&2; exit 127; }
+done
+
 LOCK_DIR="$STATE_DIR/ui-pacing.lock"
 STAMP_FILE="$STATE_DIR/ui-pacing.last"
 LOCK_HELD=0
-
 cleanup_lock() {
   if (( LOCK_HELD )); then
     rm -rf "$LOCK_DIR" 2>/dev/null || true
@@ -71,12 +173,28 @@ cleanup_lock() {
 trap cleanup_lock EXIT INT TERM
 
 if (( TOUCH_UI )); then
-  mkdir -p "$STATE_DIR"
+  START_TS="$(python3 - <<'PY'
+import time; print(time.time())
+PY
+)"
   while ! mkdir "$LOCK_DIR" 2>/dev/null; do
     OLD_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
     if [[ -n "$OLD_PID" ]] && ! kill -0 "$OLD_PID" 2>/dev/null; then
       rm -rf "$LOCK_DIR" 2>/dev/null || true
       continue
+    fi
+    ELAPSED="$(python3 - "$START_TS" <<'PY'
+import sys,time; print(time.time()-float(sys.argv[1]))
+PY
+)"
+    if python3 - "$ELAPSED" "$LOCK_WAIT_SEC" <<'PY'
+import sys
+raise SystemExit(0 if float(sys.argv[1])>=float(sys.argv[2]) else 1)
+PY
+    then
+      [[ "$CMD" == "watch" ]] && exit 0
+      echo "chat-bridge: PACING_DEFERRED lock busy" >&2
+      exit 75
     fi
     sleep 0.25
   done
@@ -86,18 +204,26 @@ if (( TOUCH_UI )); then
   INTERVAL="$UI_MIN_INTERVAL_SEC"
   (( HEAVY_UI )) && INTERVAL="$UI_HEAVY_INTERVAL_SEC"
   WAIT_SEC="$(python3 - "$STAMP_FILE" "$INTERVAL" <<'PY'
-import pathlib, sys, time
-path=pathlib.Path(sys.argv[1]); interval=float(sys.argv[2])
-try:
-    last=float(path.read_text().strip())
-except Exception:
-    last=0.0
-print(max(0.0, interval-(time.time()-last)))
+import pathlib,sys,time
+p=pathlib.Path(sys.argv[1]); interval=float(sys.argv[2])
+try: last=float(p.read_text().strip())
+except Exception: last=0.0
+print(max(0.0,interval-(time.time()-last)))
 PY
 )"
+  if python3 - "$WAIT_SEC" "$MAX_INLINE_WAIT_SEC" <<'PY'
+import sys
+raise SystemExit(0 if float(sys.argv[1])>float(sys.argv[2])+0.01 else 1)
+PY
+  then
+    cleanup_lock
+    [[ "$CMD" == "watch" ]] && exit 0
+    echo "chat-bridge: PACING_DEFERRED wait=${WAIT_SEC}s" >&2
+    exit 75
+  fi
   if python3 - "$WAIT_SEC" <<'PY'
 import sys
-raise SystemExit(0 if float(sys.argv[1]) > 0.01 else 1)
+raise SystemExit(0 if float(sys.argv[1])>0.01 else 1)
 PY
   then
     sleep "$WAIT_SEC"
@@ -117,6 +243,7 @@ set +e
   cat "$PAGE_POOL"
   cat "$LIVENESS"
   cat "$TASK_POLICY"
+  cat "$WEB_POLICY"
   cat "$MAIN"
 } | "$EGO_BROWSER" nodejs
 RC=$?
@@ -124,7 +251,7 @@ set -e
 
 if (( TOUCH_UI )); then
   python3 - "$STAMP_FILE" <<'PY'
-import pathlib, sys, time
+import pathlib,sys,time
 p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True)
 p.write_text(str(time.time())+"\n")
 PY

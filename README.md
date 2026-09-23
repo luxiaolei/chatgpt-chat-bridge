@@ -207,19 +207,21 @@ Run a scan or a foreground loop:
 ```bash
 chat-bridge watch --project "My Project" --dry-run
 chat-bridge watch --project "My Project"
-chat-bridge watch --loop --interval 30
+chat-bridge watch --loop --interval 60
 ```
 
 Install the macOS watchdog for all projects:
 
 ```bash
 ./scripts/install.sh
-~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 30
+~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 60
 ```
 
-launchd starts a fresh one-shot scan every 30 seconds. Recovery is conservative: native Continue/Retry first, then `continue`, then Stop + guarded continue. Original-task replay requires `--aggressive`. UI completion never marks the durable task COMPLETE; it becomes `AWAITING_DURABLE_UPDATE` until GitHub is reconciled.
+launchd starts a fresh one-shot scan every 60 seconds. A one-shot watchdog exits locally without starting Ego Lite when there are no active tasks. Recovery is conservative: native Continue/Retry first, then `continue`, then Stop + guarded continue. Original-task replay requires `--aggressive`. UI completion never marks the durable task COMPLETE; it becomes `AWAITING_DURABLE_UPDATE` until GitHub is reconciled.
 
-All bridge commands that touch ChatGPT Web share a cross-process pacing lock. Normal UI operations have a hard minimum interval of 5 seconds; heavy conversation lifecycle operations (`new`, `archive`, `retire`, `delete`) default to 15 seconds. These values can only be raised with `CHAT_BRIDGE_UI_MIN_INTERVAL_SEC` and `CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC`. Within one watchdog scan, active tasks are also separated by at least 5 seconds. Local registry/runtime reads are not throttled.
+All bridge commands that touch ChatGPT Web share a cross-process pacing lock. Normal UI operations default to a 10-second interval; heavy conversation lifecycle operations (`new`, `archive`, `retire`, `delete`) default to 30 seconds. A command never waits more than 5 seconds inline by default: if the remaining pacing/lock wait is longer, it returns `PACING_DEFERRED` (exit 75) so the caller can do other work instead of holding a long tool turn. Within one watchdog scan, active tasks are separated by at least 10 seconds. Local registry/runtime reads are not throttled.
+
+If ChatGPT shows `Too many requests` / temporary conversation-access limiting, the runtime records a shared `web-cooldown.json` and stops further Web work. The cooldown starts at 3 minutes and escalates on repeated hits to 5, 10, then 15 minutes. Manual UI commands fail fast with `WEB_COOLDOWN_ACTIVE`; watchdog scans skip cleanly during cooldown. Inspect or explicitly clear local cooldown state with `chat-bridge cooldown show|clear`.
 
 ## Recovery
 

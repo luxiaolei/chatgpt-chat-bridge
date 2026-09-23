@@ -102,7 +102,7 @@ Use these states:
 - `IDLE_COMPLETE`: a new assistant message ID/result exists; reconcile GitHub before declaring task completion.
 - `BLOCKED`: page/login/connectivity is unhealthy or recovery attempts are exhausted.
 
-Run one scan with `chat-bridge watch --project "PROJECT"`; the installed macOS watchdog runs one scan every 30 seconds across all projects. Active tasks inside one scan are separated by at least 5 seconds. Recovery is conservative and idempotency-aware. After repeated failure, the watchdog marks the task BLOCKED and routes the event through `replyTo → controller → escalationTo → rootController` rather than inventing a project decision.
+Run one scan with `chat-bridge watch --project "PROJECT"`; the installed macOS watchdog runs one scan every 60 seconds across all projects. If there are no active tasks it exits locally without starting Ego Lite. Active tasks inside one scan are separated by at least 10 seconds. UI pacing/lock waits longer than 5 seconds return `PACING_DEFERRED` rather than holding a long tool call. A ChatGPT `Too many requests` event creates an adaptive shared 3–15 minute Web cooldown; during it, controllers should continue local/GitHub work and let watchdog skip Web access. Recovery remains conservative and idempotency-aware. After repeated failure, the watchdog marks the task BLOCKED and routes the event through `replyTo → controller → escalationTo → rootController` rather than inventing a project decision.
 
 ### 7. Resource allocation
 

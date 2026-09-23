@@ -20,6 +20,10 @@ const { stallThresholdSec } = LIVENESS;
 const TASK_POLICY = globalThis.__CHAT_BRIDGE_TASK_POLICY__;
 if(!TASK_POLICY) throw new Error("chat-bridge task policy module was not loaded");
 const { activeTaskStatus, assertTaskId, assertActiveTaskTarget, activeSessionConflict } = TASK_POLICY;
+const WEB_POLICY = globalThis.__CHAT_BRIDGE_WEB_POLICY__;
+if(!WEB_POLICY) throw new Error("chat-bridge web policy module was not loaded");
+const { isRateLimitText, nextCooldown } = WEB_POLICY;
+const WEB_COOLDOWN_PATH = pathMod.join(STATE_DIR, "web-cooldown.json");
 
 function slug(v="") {
   return String(v).trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"") || "project";
@@ -78,6 +82,33 @@ async function touchRuntime(project, patch={}) {
   const rt=await loadRuntime();
   if(project) rt.projects[project]={...(rt.projects[project]||{}),...patch,updatedAt:new Date().toISOString()};
   await saveRuntime(rt); return rt;
+}
+
+async function loadWebCooldown() {
+  try { return JSON.parse(await fs.readFile(WEB_COOLDOWN_PATH,"utf8")); }
+  catch { return {}; }
+}
+async function saveWebCooldown(value) {
+  await fs.mkdir(pathMod.dirname(WEB_COOLDOWN_PATH),{recursive:true});
+  await fs.writeFile(WEB_COOLDOWN_PATH,JSON.stringify(value,null,2)+"\n");
+  return value;
+}
+async function detectWebRateLimit(page, context="ui") {
+  const detail=await page.evaluate(() => {
+    const nodes=[...document.querySelectorAll('[role="dialog"], [role="alert"]')];
+    const texts=nodes.map(n=>(n.innerText||n.textContent||"").trim()).filter(Boolean);
+    return texts.find(t =>
+      /too many requests/i.test(t) ||
+      /temporarily limited access to your conversations/i.test(t) ||
+      /please wait a few minutes before trying again/i.test(t)
+    ) || null;
+  }).catch(()=>null);
+  if(!detail || !isRateLimitText(detail)) return null;
+  const next=nextCooldown(await loadWebCooldown(),Date.now(),context,detail.slice(0,500));
+  await saveWebCooldown(next);
+  const error=new Error(`WEB_RATE_LIMITED until=${next.until} strikes=${next.strikes} cooldownSec=${next.seconds}`);
+  error.code="WEB_RATE_LIMITED";
+  throw error;
 }
 
 async function loadRegistry() {
@@ -195,9 +226,15 @@ async function controlPage(reg, project, account=null) {
   binding.controlPage=page.label; await saveRegistry(reg); return {binding,task,page};
 }
 async function waitForConversationReady(page, timeout=15000) {
-  const ok=await page.waitForSelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"]',{state:"visible",timeout})
-    .then(()=>true).catch(()=>false);
-  if(!ok) throw new Error("Conversation UI did not become ready before timeout");
+  const deadline=Date.now()+timeout;
+  while(Date.now()<deadline) {
+    await detectWebRateLimit(page,"conversation-ready");
+    const ok=await page.waitForSelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"]',{state:"visible",timeout:1000})
+      .then(()=>true).catch(()=>false);
+    if(ok) return true;
+  }
+  await detectWebRateLimit(page,"conversation-ready-timeout");
+  throw new Error("Conversation UI did not become ready before timeout");
 }
 
 async function ensurePage(reg, chat) {
@@ -298,6 +335,7 @@ function classifySnapshot(raw, heartbeat, task=null, effort=null) {
 }
 
 async function observeSession(chat,page,task=null) {
+  await detectWebRateLimit(page,"observe-session");
   const raw=await state(page), rt=await loadRuntime(), now=new Date(), nowMs=now.getTime();
   const prev=rt.sessions[chat.id]||{};
   const assistantHash=hashText(raw.lastAssistant||"");
@@ -331,6 +369,7 @@ async function observeSession(chat,page,task=null) {
 }
 
 async function sendMessage(page, msg) {
+  await detectWebRateLimit(page,"send-before");
   await page.focus('div#prompt-textarea[contenteditable="true"]');
   await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
@@ -339,6 +378,8 @@ async function sendMessage(page, msg) {
   const hasSend=await page.evaluate(()=>!!document.querySelector('button[data-testid="send-button"]'));
   if(hasSend) await page.click('button[data-testid="send-button"]');
   else await page.keyboard.press("Enter");
+  await page.waitForTimeout(250);
+  await detectWebRateLimit(page,"send-after");
 }
 
 async function askMessage(page, msg, timeout=180000) {
@@ -355,6 +396,7 @@ async function askMessage(page, msg, timeout=180000) {
 }
 
 async function openModelMenu(page) {
+  await detectWebRateLimit(page,"model-menu");
   await page.waitForFunction(() => [...document.querySelectorAll("form button")]
     .some(x=>/\b(Instant|Medium|High|Extra High|Pro)\b/i.test((x.innerText||"").trim())), undefined, {timeout:15000});
   const ok=await page.evaluate(() => {
@@ -441,11 +483,13 @@ async function openProjectPage(page, projectName, knownUrl=null) {
   }
   if(knownUrl) {
     await page.goto(knownUrl, {waitUntil:"load",timeout:20000});
-    await page.waitForSelector('div#prompt-textarea[contenteditable="true"]',{state:"visible",timeout:15000});
+    await detectWebRateLimit(page,"open-project-known");
+    await waitForConversationReady(page,15000);
     return await page.url();
   }
   await page.goto("https://chatgpt.com/", {waitUntil:"load",timeout:20000});
   await page.waitForTimeout(500);
+  await detectWebRateLimit(page,"open-project-home");
   await page.waitForSelector('button[aria-label="Open project options for ' + projectName.replace(/"/g,"") + '"]', {state:"visible",timeout:10000});
   const ok=await page.evaluate((projectName)=>{
     document.querySelectorAll("[data-chat-bridge-open-project]").forEach(e=>e.removeAttribute("data-chat-bridge-open-project"));
@@ -464,6 +508,7 @@ async function openProjectPage(page, projectName, knownUrl=null) {
 async function syncProject(reg, page, projectName, account, binding) {
   const projectUrl=await openProjectPage(page,projectName,binding?.projectUrl||null);
   await page.reload({waitUntil:"load",timeout:20000}).catch(()=>{});
+  await detectWebRateLimit(page,"sync");
   await page.waitForSelector('[role="tabpanel"]',{state:"visible",timeout:15000});
   await page.waitForTimeout(1200);
   const chats=await page.evaluate(()=>[...document.querySelectorAll('a[href*="/g/g-p-"][href*="/c/"]')].map(a=>({
@@ -586,7 +631,7 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
 
 async function watchOnce(reg, project=null, account=null, options={}) {
   const rt=await loadRuntime(), results=[];
-  const taskGapMs=Math.max(5000,Number(process.env.CHAT_BRIDGE_WATCH_TASK_GAP_MS||5000)||5000);
+  const taskGapMs=Math.max(10000,Number(process.env.CHAT_BRIDGE_WATCH_TASK_GAP_MS||10000)||10000);
   const tasks=Object.values(rt.tasks||{}).filter(t=>activeTaskStatus(t.status) && (!project||t.project===project) && (!account||t.account===account));
   for(const task of tasks) {
     if(results.length) await new Promise(resolve=>setTimeout(resolve,taskGapMs));
@@ -784,6 +829,7 @@ else if(cmd==="projects"){
   const a=accountArg||reg.defaultAccount||DEFAULT_ACCOUNT, task=await taskSpace(`chat-bridge-account-${slug(a)}-global`);
   const pages=await pagesOf(task), page=pages.find(p=>p.label==="p1")||pages[0]||await task.newPage();
   await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000}); await page.waitForTimeout(500);
+  await detectWebRateLimit(page,"projects");
   const ps=await page.evaluate(()=>[...document.querySelectorAll('button[aria-label^="Open project options for "]')]
     .map(b=>(b.getAttribute("aria-label")||"").replace("Open project options for ","")));
   print([...new Set([...ps,...Object.keys(reg.projects)])]);
@@ -796,6 +842,7 @@ else if(cmd==="sync" || cmd==="discover"){
     const a=accountArg||reg.defaultAccount||DEFAULT_ACCOUNT, task=await taskSpace(`chat-bridge-account-${slug(a)}-global`);
     const pages=await pagesOf(task), page=pages.find(p=>p.label==="p1")||pages[0]||await task.newPage();
     await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000}); await page.waitForTimeout(500);
+    await detectWebRateLimit(page,"discover");
     const chats=await page.evaluate(()=>[...document.querySelectorAll('a[href*="/c/"]')].map(a=>({title:(a.innerText||a.getAttribute("aria-label")||"").trim(),url:a.href})).filter(x=>x.title&&!x.url.includes("#main")));
     const uniq=[], seen=new Set();
     for(const x of chats){const m=x.url.match(/\/c\/([0-9a-f-]+)/i);if(m&&!seen.has(m[1])){seen.add(m[1]);uniq.push({id:m[1],...x});}}
@@ -839,7 +886,7 @@ else if(cmd==="task"){
   } else throw new Error("task subcommand must be list, set, or clear");
 }
 else if(cmd==="watch"){
-  const loop=args.includes("--loop"), intervalSec=Math.max(10,Number(opt("interval","30"))||30),
+  const loop=args.includes("--loop"), intervalSec=Math.max(30,Number(opt("interval","60"))||60),
     maxAttempts=Math.max(1,Number(opt("max-recovery","3"))||3), maxTotalRecoveries=Math.max(1,Number(opt("max-total-recovery","8"))||8),
     cooldownSec=Math.max(10,Number(opt("cooldown","45"))||45), aggressive=args.includes("--aggressive"), autoRecover=!args.includes("--dry-run"), maxIterations=Number(opt("iterations","0"))||0;
   const quiet=args.includes("--quiet");
