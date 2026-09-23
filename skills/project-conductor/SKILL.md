@@ -102,7 +102,7 @@ Use these states:
 - `IDLE_COMPLETE`: a new assistant message ID/result exists; reconcile GitHub before declaring task completion.
 - `BLOCKED`: page/login/connectivity is unhealthy or recovery attempts are exhausted.
 
-Run one scan with `chat-bridge watch --project "PROJECT"`; the installed macOS watchdog runs one scan every 15 seconds across all projects. Recovery is conservative and idempotency-aware. After repeated failure, the watchdog marks the task BLOCKED and routes the event through `replyTo → controller → escalationTo → rootController` rather than inventing a project decision.
+Run one scan with `chat-bridge watch --project "PROJECT"`; the installed macOS watchdog runs one scan every 30 seconds across all projects. Active tasks inside one scan are separated by at least 5 seconds. Recovery is conservative and idempotency-aware. After repeated failure, the watchdog marks the task BLOCKED and routes the event through `replyTo → controller → escalationTo → rootController` rather than inventing a project decision.
 
 ### 7. Resource allocation
 

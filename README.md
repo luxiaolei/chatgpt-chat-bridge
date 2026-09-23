@@ -207,17 +207,19 @@ Run a scan or a foreground loop:
 ```bash
 chat-bridge watch --project "My Project" --dry-run
 chat-bridge watch --project "My Project"
-chat-bridge watch --loop --interval 15
+chat-bridge watch --loop --interval 30
 ```
 
 Install the macOS watchdog for all projects:
 
 ```bash
 ./scripts/install.sh
-~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 15
+~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 30
 ```
 
-launchd starts a fresh one-shot scan every 15 seconds. Recovery is conservative: native Continue/Retry first, then `continue`, then Stop + guarded continue. Original-task replay requires `--aggressive`. UI completion never marks the durable task COMPLETE; it becomes `AWAITING_DURABLE_UPDATE` until GitHub is reconciled.
+launchd starts a fresh one-shot scan every 30 seconds. Recovery is conservative: native Continue/Retry first, then `continue`, then Stop + guarded continue. Original-task replay requires `--aggressive`. UI completion never marks the durable task COMPLETE; it becomes `AWAITING_DURABLE_UPDATE` until GitHub is reconciled.
+
+All bridge commands that touch ChatGPT Web share a cross-process pacing lock. Normal UI operations have a hard minimum interval of 5 seconds; heavy conversation lifecycle operations (`new`, `archive`, `retire`, `delete`) default to 15 seconds. These values can only be raised with `CHAT_BRIDGE_UI_MIN_INTERVAL_SEC` and `CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC`. Within one watchdog scan, active tasks are also separated by at least 5 seconds. Local registry/runtime reads are not throttled.
 
 ## Recovery
 

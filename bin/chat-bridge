@@ -21,13 +21,103 @@ fi
 CONTROL="${CHAT_BRIDGE_CONTROL:-${MAIN:h}/control-routing.js}"
 [[ -f "$CONTROL" ]] || { echo "chat-bridge: control routing module not found: $CONTROL" >&2; exit 127; }
 
+STATE_DIR="${CHAT_BRIDGE_STATE_DIR:-$HOME/.local/state/chat-bridge}"
+UI_MIN_INTERVAL_SEC="${CHAT_BRIDGE_UI_MIN_INTERVAL_SEC:-5}"
+UI_HEAVY_INTERVAL_SEC="${CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC:-15}"
+
+python3 - "$UI_MIN_INTERVAL_SEC" "$UI_HEAVY_INTERVAL_SEC" <<'PY' >/dev/null
+import sys
+normal=float(sys.argv[1]); heavy=float(sys.argv[2])
+if normal < 5:
+    raise SystemExit("CHAT_BRIDGE_UI_MIN_INTERVAL_SEC must be >= 5")
+if heavy < normal:
+    raise SystemExit("CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC must be >= UI minimum")
+PY
+
+CMD="${1:-help}"
+SUB="${2:-}"
+TOUCH_UI=0
+HEAVY_UI=0
+case "$CMD" in
+  projects|sync|discover|read|status|send|ask|model|effort|stop|retry|recover|resend|new|archive|retire|delete|watch)
+    TOUCH_UI=1
+    ;;
+  space)
+    [[ "$SUB" == "prune" ]] && TOUCH_UI=1
+    ;;
+esac
+case "$CMD" in
+  new|archive|retire|delete)
+    HEAVY_UI=1
+    ;;
+esac
+
+LOCK_DIR="$STATE_DIR/ui-pacing.lock"
+STAMP_FILE="$STATE_DIR/ui-pacing.last"
+LOCK_HELD=0
+
+cleanup_lock() {
+  if (( LOCK_HELD )); then
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
+    LOCK_HELD=0
+  fi
+}
+trap cleanup_lock EXIT INT TERM
+
+if (( TOUCH_UI )); then
+  mkdir -p "$STATE_DIR"
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    OLD_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [[ -n "$OLD_PID" ]] && ! kill -0 "$OLD_PID" 2>/dev/null; then
+      rm -rf "$LOCK_DIR" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.25
+  done
+  LOCK_HELD=1
+  print -r -- "$$" > "$LOCK_DIR/pid"
+
+  INTERVAL="$UI_MIN_INTERVAL_SEC"
+  (( HEAVY_UI )) && INTERVAL="$UI_HEAVY_INTERVAL_SEC"
+  WAIT_SEC="$(python3 - "$STAMP_FILE" "$INTERVAL" <<'PY'
+import pathlib, sys, time
+path=pathlib.Path(sys.argv[1]); interval=float(sys.argv[2])
+try:
+    last=float(path.read_text().strip())
+except Exception:
+    last=0.0
+print(max(0.0, interval-(time.time()-last)))
+PY
+)"
+  if python3 - "$WAIT_SEC" <<'PY'
+import sys
+raise SystemExit(0 if float(sys.argv[1]) > 0.01 else 1)
+PY
+  then
+    sleep "$WAIT_SEC"
+  fi
+fi
+
 ARGS_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:], ensure_ascii=False))' "$@")"
-CONFIG_JSON="$(python3 -c 'import json,os; print(json.dumps(os.environ.get("CHAT_BRIDGE_CONFIG_DIR")))')"
-STATE_JSON="$(python3 -c 'import json,os; print(json.dumps(os.environ.get("CHAT_BRIDGE_STATE_DIR")))')"
+CONFIG_JSON="$(python3 -c 'import json,os; print(json.dumps(os.environ.get("CHAT_BRIDGE_CONFIG_DIR")))' )"
+STATE_JSON="$(python3 -c 'import json,os; print(json.dumps(os.environ.get("CHAT_BRIDGE_STATE_DIR")))' )"
+
+set +e
 {
   printf 'globalThis.__CHAT_BRIDGE_ARGS__ = %s;\n' "$ARGS_JSON"
   printf 'globalThis.__CHAT_BRIDGE_CONFIG_DIR__ = %s;\n' "$CONFIG_JSON"
   printf 'globalThis.__CHAT_BRIDGE_STATE_DIR__ = %s;\n' "$STATE_JSON"
   cat "$CONTROL"
   cat "$MAIN"
-} | exec "$EGO_BROWSER" nodejs
+} | "$EGO_BROWSER" nodejs
+RC=$?
+set -e
+
+if (( TOUCH_UI )); then
+  python3 - "$STAMP_FILE" <<'PY'
+import pathlib, sys, time
+p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True)
+p.write_text(str(time.time())+"\n")
+PY
+fi
+exit "$RC"

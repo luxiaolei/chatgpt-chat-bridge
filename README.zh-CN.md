@@ -216,10 +216,12 @@ chat-bridge watch --project "My Project"
 
 ```bash
 ./scripts/install.sh
-~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 15
+~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 30
 ```
 
-launchd 每 15 秒启动一次全新的 one-shot 扫描，所以每轮都会重新读取 registry/runtime。恢复顺序默认是：原生 Continue/Retry → 发 `continue` → 明确卡死后 Stop + guarded continue。只有 `--aggressive` 才允许重发原始任务。Chat UI 看起来完成时只标记 `AWAITING_DURABLE_UPDATE`，最终 COMPLETE 仍需 GitHub 证据。
+launchd 每 30 秒启动一次全新的 one-shot 扫描，所以每轮都会重新读取 registry/runtime。恢复顺序默认是：原生 Continue/Retry → 发 `continue` → 明确卡死后 Stop + guarded continue。只有 `--aggressive` 才允许重发原始任务。Chat UI 看起来完成时只标记 `AWAITING_DURABLE_UPDATE`，最终 COMPLETE 仍需 GitHub 证据。
+
+所有会触碰 ChatGPT Web 的 bridge 命令共享跨进程节流锁：普通网页操作硬下限 5 秒；`new` / `archive` / `retire` / `delete` 这类重型会话操作默认 15 秒。只允许通过 `CHAT_BRIDGE_UI_MIN_INTERVAL_SEC` 和 `CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC` 向上调慢，不允许低于 5 秒。单次 watchdog 扫描多个 active task 时，task 之间也至少间隔 5 秒；本地 registry/runtime 读取不节流。
 
 ## 恢复
 
