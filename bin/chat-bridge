@@ -20,8 +20,10 @@ fi
 [[ -f "$MAIN" ]] || { echo "chat-bridge: runtime not found: $MAIN" >&2; exit 127; }
 CONTROL="${CHAT_BRIDGE_CONTROL:-${MAIN:h}/control-routing.js}"
 PAGE_POOL="${CHAT_BRIDGE_PAGE_POOL:-${MAIN:h}/page-pool.js}"
+LIVENESS="${CHAT_BRIDGE_LIVENESS_POLICY:-${MAIN:h}/liveness-policy.js}"
 [[ -f "$CONTROL" ]] || { echo "chat-bridge: control routing module not found: $CONTROL" >&2; exit 127; }
 [[ -f "$PAGE_POOL" ]] || { echo "chat-bridge: page pool module not found: $PAGE_POOL" >&2; exit 127; }
+[[ -f "$LIVENESS" ]] || { echo "chat-bridge: liveness policy module not found: $LIVENESS" >&2; exit 127; }
 
 STATE_DIR="${CHAT_BRIDGE_STATE_DIR:-$HOME/.local/state/chat-bridge}"
 UI_MIN_INTERVAL_SEC="${CHAT_BRIDGE_UI_MIN_INTERVAL_SEC:-5}"
@@ -111,6 +113,7 @@ set +e
   printf 'globalThis.__CHAT_BRIDGE_STATE_DIR__ = %s;\n' "$STATE_JSON"
   cat "$CONTROL"
   cat "$PAGE_POOL"
+  cat "$LIVENESS"
   cat "$MAIN"
 } | "$EGO_BROWSER" nodejs
 RC=$?
