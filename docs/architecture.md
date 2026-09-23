@@ -88,7 +88,7 @@ Logical Project
 
 All new sessions for the same project/account are created with `task.newPage()` inside the bound Space. A normal session creation must not create a new Space. A separate Space should be created only for explicit Space tests, account isolation, or a deliberate rebind. `chat-bridge space prune --project NAME` closes stale tabs that are not the control tab or an active registered session.
 
-A ChatGPT conversation ID is independent of its Ego Space attachment. Rebinding a project/account to another Space preserves conversation identity and causes sessions to reattach in tabs in the new Space.
+A ChatGPT conversation ID is independent of its Ego Space attachment. Rebinding a project/account to another Space preserves conversation identity and causes sessions to reattach in tabs in the new Space. Page labels are a bounded runtime pool, not durable session identity: if `task.newPage()` hits the Ego page budget, the bridge may reclaim an idle managed session page and set that session's registry `page` to null. The next use reattaches the same conversation by URL. The control page, active/generating pages, active-task sessions, active tab, and non-empty composer drafts are protected from reclamation.
 
 ### Account failover
 

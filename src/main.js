@@ -11,6 +11,9 @@ const DEFAULT_ACCOUNT = "default";
 const CONTROL = globalThis.__CHAT_BRIDGE_CONTROL__;
 if(!CONTROL) throw new Error("chat-bridge control routing module was not loaded");
 const { controlRoute, notificationTargets } = CONTROL;
+const PAGE_POOL = globalThis.__CHAT_BRIDGE_PAGE_POOL__;
+if(!PAGE_POOL) throw new Error("chat-bridge page pool module was not loaded");
+const { pageDetachCandidates } = PAGE_POOL;
 
 function slug(v="") {
   return String(v).trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"") || "project";
@@ -130,19 +133,66 @@ async function openBoundTask(reg, project, account=null) {
   if(Number(b.spaceId)!==Number(task.spaceId)){ b.spaceId=task.spaceId; await saveRegistry(reg); }
   return {binding:b,task};
 }
+async function reclaimIdlePageSlot(reg, project, account, task, binding, excludeChatId=null) {
+  const rt=await loadRuntime();
+  const tabs=await task.tabs().catch(()=>[]);
+  const activeLabels=tabs.filter(t=>t.active&&t.label).map(t=>t.label);
+  const candidates=pageDetachCandidates(
+    Object.values(reg.chats||{}),
+    Object.values(rt.tasks||{}),
+    {
+      project,
+      account,
+      controlPage:binding.controlPage||null,
+      excludeChatIds:excludeChatId?[excludeChatId]:[],
+      excludePageLabels:activeLabels,
+    }
+  );
+  for(const candidate of candidates) {
+    let page=null;
+    try { page=task.page(candidate.page); }
+    catch {
+      candidate.page=null;
+      candidate.detachedAt=new Date().toISOString();
+      await saveRegistry(reg);
+      continue;
+    }
+    const snapshot=await state(page).catch(()=>null);
+    if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
+    await page.close().catch(()=>{});
+    const oldPage=candidate.page;
+    candidate.page=null;
+    candidate.detachedAt=new Date().toISOString();
+    await saveRegistry(reg);
+    return {chatId:candidate.id,role:candidate.role,page:oldPage};
+  }
+  return null;
+}
+
+async function newManagedPage(reg, project, account, task, binding, excludeChatId=null) {
+  try { return await task.newPage(); }
+  catch(error) {
+    if(!/page budget reached/i.test(String(error?.message||error))) throw error;
+    const reclaimed=await reclaimIdlePageSlot(reg,project,account,task,binding,excludeChatId);
+    if(!reclaimed) throw new Error(`Page budget reached in space "${binding.spaceName}" and no idle session page is safely reclaimable`);
+    return await task.newPage();
+  }
+}
+
 async function controlPage(reg, project, account=null) {
   const {binding,task}=await openBoundTask(reg,project,account), pages=await pagesOf(task);
   let page=pages.find(p=>p.label===binding.controlPage) || null;
   if(!page){
     for(const p of pages){ const u=await p.url().catch(()=>""); if(u==="about:blank" || u==="chrome://newtab/"){ page=p; break; } }
   }
-  if(!page) page=await task.newPage();
+  if(!page) page=await newManagedPage(reg,project,account,task,binding,null);
   binding.controlPage=page.label; await saveRegistry(reg); return {binding,task,page};
 }
 async function ensurePage(reg, chat) {
   const {binding,task}=await openBoundTask(reg,chat.project,chat.account), pages=await pagesOf(task);
-  let page=pages.find(p=>p.label===chat.page) || null; if(!page) page=await task.newPage();
-  chat.spaceName=binding.spaceName; chat.spaceId=task.spaceId; chat.page=page.label;
+  let page=pages.find(p=>p.label===chat.page) || null;
+  if(!page) page=await newManagedPage(reg,chat.project,chat.account,task,binding,chat.id);
+  chat.spaceName=binding.spaceName; chat.spaceId=task.spaceId; chat.page=page.label; chat.lastUsedAt=new Date().toISOString();
   if((await page.url())!==chat.url) await page.goto(chat.url,{waitUntil:"load",timeout:20000});
   await saveRegistry(reg); return {task,page,binding};
 }
@@ -199,7 +249,9 @@ async function state(page) {
       .filter(x=>!x.closest('[data-message-author-role]')).map(x=>(x.innerText||'').trim()).filter(v=>v && v.length<300)
       .filter(v=>errorWords.some(k=>v.toLowerCase().includes(k))).filter((v,i,a)=>a.indexOf(v)===i).slice(-5);
     const form=document.querySelector('form');
-    const composer=!!document.querySelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [contenteditable="true"]');
+    const composerEl=document.querySelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [contenteditable="true"]');
+    const composer=!!composerEl;
+    const composerText=(composerEl?.innerText||composerEl?.textContent||"").trim();
     const mode=[...(form?.querySelectorAll('button')||[])].map(b=>(b.innerText||'').trim())
       .find(t=>/\b(Instant|Medium|High|Extra High|Pro)\b/i.test(t)) || null;
     const lastAssistantMsg=[...ms].reverse().find(x=>x.role==='assistant')||null;
@@ -209,7 +261,7 @@ async function state(page) {
       url:location.href,title:document.title,mode,
       generating:!!stop,stopAvailable:!!stop,
       sendAvailable:!!send && !send.disabled && send.getAttribute('aria-disabled')!=='true',
-      inputReady:composer && !stop,composerPresent:composer,recoveryControls,
+      inputReady:composer && !stop,composerPresent:composer,composerText,recoveryControls,
       errorTexts:[...alerts,...knownErrors].filter((v,i,a)=>a.indexOf(v)===i),
       online:navigator.onLine,visibility:document.visibilityState,
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,
@@ -865,7 +917,7 @@ else if(cmd==="new"){
   if(!first) throw new Error("--message required");
   const conflict=Object.values(reg.chats).find(c=>c.project===p&&c.account===a&&c.role===role&&c.status==="active");
   if(conflict&&!args.includes("--allow-duplicate-role")) throw new Error(`Active role already exists: ${role} (${conflict.id})`);
-  const {task,binding}=await openBoundTask(reg,p,a), page=await task.newPage();
+  const {task,binding}=await openBoundTask(reg,p,a), page=await newManagedPage(reg,p,a,task,binding,null);
   try {
     await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000});
     await openProjectPage(page,p,binding.projectUrl||null);

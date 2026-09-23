@@ -71,7 +71,7 @@ chat-bridge new \
   --message "负责 Issue #12；完成后先更新 GitHub，再回调 conductor。"
 ```
 
-同一个逻辑 Project + ChatGPT 账号只绑定一个 Ego Space；新 Session 会在这个 Space 里 `newPage()` 新开 tab。
+同一个逻辑 Project + ChatGPT 账号只绑定一个 Ego Space；新 Session 会在这个 Space 里 `newPage()` 新开 tab。Conversation ID/role 是长期身份，Ego page/tab 只是可回收的运行 attachment：当 managed page budget 已满时，bridge 可以自动 detach 最旧的安全空闲 Session，后续再按 conversation URL 重新 attach。controlPage、正在生成、绑定 active task、当前 active tab 或 composer 有草稿的 Session 都不会被回收。
 
 ## 账号与 Space 绑定
 
