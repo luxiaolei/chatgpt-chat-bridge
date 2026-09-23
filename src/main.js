@@ -29,6 +29,7 @@ if(!MODEL_POLICY) throw new Error("chat-bridge model policy module was not loade
 const {modelPreset,observedModel,selectModelLabel}=MODEL_POLICY;
 const WEB_COOLDOWN_PATH = pathMod.join(STATE_DIR, "web-cooldown.json");
 const taskAccounts=new Map();
+const COMPOSER_SELECTOR = 'div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]';
 
 function accountScope(reg, account) {
   const identity=reg.accounts?.[account]?.identity;
@@ -280,7 +281,7 @@ async function waitForConversationReady(page, timeout=15000) {
   const deadline=Date.now()+timeout;
   while(Date.now()<deadline) {
     await detectWebRateLimit(page,"conversation-ready");
-    const ok=await page.waitForSelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"]',{state:"visible",timeout:1000})
+    const ok=await page.waitForSelector(COMPOSER_SELECTOR,{state:"visible",timeout:1000})
       .then(()=>true).catch(()=>false);
     if(ok) return true;
   }
@@ -339,7 +340,7 @@ async function state(page) {
       .filter(x=>!x.closest('[data-message-author-role]')).map(x=>(x.innerText||'').trim()).filter(v=>v && v.length<300)
       .filter(v=>errorWords.some(k=>v.toLowerCase().includes(k))).filter((v,i,a)=>a.indexOf(v)===i).slice(-5);
     const form=document.querySelector('form');
-    const composerEl=document.querySelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [contenteditable="true"]');
+    const composerEl=document.querySelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]');
     const composer=!!composerEl;
     const composerText=(composerEl?.innerText||composerEl?.textContent||"").trim();
     const mode=[...(form?.querySelectorAll('button')||[])].map(b=>(b.innerText||'').trim())
@@ -421,7 +422,7 @@ async function observeSession(chat,page,task=null) {
 
 async function sendMessage(page, msg) {
   await detectWebRateLimit(page,"send-before");
-  await page.focus('div#prompt-textarea[contenteditable="true"]');
+  await page.focus(COMPOSER_SELECTOR);
   await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   await page.keyboard.insertText(msg);
@@ -466,7 +467,8 @@ async function openModelMenu(page) {
     return true;
   });
   if(!opened) throw new Error("Model/effort button disappeared before menu open");
-  await page.waitForTimeout(200);
+  await page.waitForFunction(()=>document.querySelectorAll('[role="menuitemradio"]').length>0,undefined,{timeout:3000});
+  await page.waitForTimeout(100);
 }
 async function setModel(page, model) {
   await page.keyboard.press("Escape");
@@ -1081,7 +1083,7 @@ else if(cmd==="new"){
   try {
     await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000});
     await openProjectPage(page,p,binding.projectUrl||null);
-    await page.waitForSelector('div#prompt-textarea[contenteditable="true"]',{state:"visible",timeout:15000});
+    await page.waitForSelector(COMPOSER_SELECTOR,{state:"visible",timeout:15000});
     const model=opt("model","Latest"), requestedEffort=opt("effort",null);
     const applied=await applyModelSpec(page,model,requestedEffort);
     await sendMessage(page,first); await page.waitForURL(/\/c\/[0-9a-f-]+/i,{timeout:30000});
