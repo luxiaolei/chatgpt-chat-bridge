@@ -27,6 +27,9 @@ const { findRateLimitText, nextCooldown } = WEB_POLICY;
 const MODEL_POLICY=globalThis.__CHAT_BRIDGE_MODEL_POLICY__;
 if(!MODEL_POLICY) throw new Error("chat-bridge model policy module was not loaded");
 const {modelPreset,observedModel,selectModelLabel}=MODEL_POLICY;
+const SESSION_POLICY=globalThis.__CHAT_BRIDGE_SESSION_POLICY__;
+if(!SESSION_POLICY) throw new Error("chat-bridge session policy module was not loaded");
+const {recoveryRequired}=SESSION_POLICY;
 const WEB_COOLDOWN_PATH = pathMod.join(STATE_DIR, "web-cooldown.json");
 const taskAccounts=new Map();
 const COMPOSER_SELECTOR = 'div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]';
@@ -370,7 +373,7 @@ function classifySnapshot(raw, heartbeat, task=null, effort=null) {
   const threshold=Number(task?.stallThresholdSec)||stallThresholdSec(effort||raw.mode);
   let sessionState="IDLE", recommendation="NONE";
   if(!raw.online || !raw.composerPresent) { sessionState="BLOCKED"; recommendation="ESCALATE"; }
-  else if(raw.recoveryControls?.length || raw.errorTexts?.length) { sessionState="ERROR_RECOVERABLE"; recommendation="RECOVER_NATIVE"; }
+  else if(recoveryRequired(raw)) { sessionState="ERROR_RECOVERABLE"; recommendation="RECOVER_NATIVE"; }
   else if(raw.generating) {
     if(quietForSec>=threshold) { sessionState="SUSPECT_STALL"; recommendation="STOP_AND_CONTINUE"; }
     else if(quietForSec<=45) { sessionState="RUNNING_ACTIVE"; recommendation="WAIT"; }
@@ -527,6 +530,16 @@ async function applyModelSpec(page, spec, explicitEffort=null) {
   if(effort) await setEffort(page,effort);
   const observed=observedModel((await state(page)).mode);
   return {model:selected,effort:observed.effort||effort,observed};
+}
+
+async function applyConfiguredSessionModel(page, chat) {
+  if(chat.model) return await applyModelSpec(page,chat.model,chat.effort||null);
+  if(chat.effort) {
+    await setEffort(page,chat.effort);
+    const observed=observedModel((await state(page)).mode);
+    return {model:null,effort:observed.effort||chat.effort,observed};
+  }
+  return null;
 }
 
 async function openProjectPage(page, projectName, knownUrl=null) {
@@ -810,6 +823,12 @@ async function conversationLifecycle(reg, chat, action) {
 
 async function pruneProjectSpace(reg, project, account=null) {
   const a=activeAccount(reg,project,account), {binding,task}=await openBoundTask(reg,project,a);
+  const detached=[];
+  while(true) {
+    const item=await reclaimIdlePageSlot(reg,project,a,task,binding,null);
+    if(!item) break;
+    detached.push(item);
+  }
   const pages=await pagesOf(task), keep=new Set([binding.controlPage].filter(Boolean));
   for(const c of Object.values(reg.chats)) {
     if(c.project===project && c.account===a && c.status==="active" && c.page) keep.add(c.page);
@@ -819,7 +838,8 @@ async function pruneProjectSpace(reg, project, account=null) {
     if(keep.has(page.label)) continue;
     await page.close().catch(()=>{}); closed.push(page.label);
   }
-  return {ok:true,project,account:a,spaceName:binding.spaceName,spaceId:task.spaceId,kept:[...keep],closed};
+  return {ok:true,project,account:a,spaceName:binding.spaceName,spaceId:task.spaceId,
+    kept:[...keep],detached,closed};
 }
 
 const cmd=args[0] || "help";
@@ -1029,6 +1049,7 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
   }
   if(cmd==="send"){
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
+    const dispatchModel=await applyConfiguredSessionModel(page,chat);
     const taskOpt=opt("task",null), taskId=taskOpt?assertTaskId(taskOpt):null; let tracked=null;
     if(taskId){
       const before=await state(page), rt=await loadRuntime(), old=rt.tasks[taskId]||{};
@@ -1052,9 +1073,14 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
     await sendMessage(page,msg); await page.waitForTimeout(400);
     const observed=await observeSession(chat,page,tracked);
     if(tracked){ const rt=await loadRuntime(), live=rt.tasks[taskId]; live.status=observed.generating?"RUNNING":"DISPATCHED"; live.updatedAt=new Date().toISOString(); rt.tasks[taskId]=live; await saveRuntime(rt); }
-    print({ok:true,chat:chat.name,taskId:taskId||null,state:observed.sessionState,modelSelection:observedModel(observed.mode)});
+    print({ok:true,chat:chat.name,taskId:taskId||null,state:observed.sessionState,modelSelection:observedModel(observed.mode),dispatchModel});
   }
-  if(cmd==="ask"){const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");const st=await askMessage(page,msg,Number(opt("timeout","180000")));print({chat:chat.name,response:st.lastAssistant,modelSelection:observedModel(st.mode)});}
+  if(cmd==="ask"){
+    const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
+    const dispatchModel=await applyConfiguredSessionModel(page,chat);
+    const st=await askMessage(page,msg,Number(opt("timeout","180000")));
+    print({chat:chat.name,response:st.lastAssistant,modelSelection:observedModel(st.mode),dispatchModel});
+  }
   if(cmd==="model"){
     const m=positionals(2).join(" "); if(!m) throw new Error("model required"); const applied=await applyModelSpec(page,m,opt("effort",null));
     chat.model=applied.model;chat.effort=applied.effort;await saveRegistry(reg);print({ok:true,chat:chat.name,model:chat.model,effort:chat.effort||null,modelSelection:applied.observed});

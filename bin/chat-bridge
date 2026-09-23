@@ -126,7 +126,8 @@ LIVENESS="${CHAT_BRIDGE_LIVENESS_POLICY:-${MAIN:h}/liveness-policy.js}"
 TASK_POLICY="${CHAT_BRIDGE_TASK_POLICY:-${MAIN:h}/task-policy.js}"
 WEB_POLICY="${CHAT_BRIDGE_WEB_POLICY:-${MAIN:h}/web-policy.js}"
 MODEL_POLICY="${MAIN:h}/model-policy.js"
-for f in "$CONTROL" "$PAGE_POOL" "$LIVENESS" "$TASK_POLICY" "$WEB_POLICY" "$MODEL_POLICY"; do
+SESSION_POLICY="${MAIN:h}/session-policy.js"
+for f in "$CONTROL" "$PAGE_POOL" "$LIVENESS" "$TASK_POLICY" "$WEB_POLICY" "$MODEL_POLICY" "$SESSION_POLICY"; do
   [[ -f "$f" ]] || { echo "chat-bridge: runtime module not found: $f" >&2; exit 127; }
 done
 
@@ -216,6 +217,7 @@ set +e
   cat "$TASK_POLICY"
   cat "$WEB_POLICY"
   cat "$MODEL_POLICY"
+  cat "$SESSION_POLICY"
   cat "$MAIN"
 } | "$EGO_BROWSER" nodejs
 RC=$?

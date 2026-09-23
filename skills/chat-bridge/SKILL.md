@@ -137,6 +137,8 @@ chat-bridge model research-agent "GPT-6 Pro" --project "PROJECT NAME"
 
 The bridge maps this preset to ChatGPT's `Latest` model choice plus `Pro` effort, i.e. the rightmost thinking slider position.
 
+Before every `send` or `ask`, the bridge re-applies the session's configured model and effort and confirms the UI selection. A reattached conversation therefore cannot silently inherit a lower default thinking level.
+
 New sessions default to Latest without forcing Pro. `5.6 Pro` and `5.5 Pro` select those versions plus the current rightmost slider endpoint; `model AGENT Latest --effort High` configures the two separately. Unavailable/ambiguous choices fail explicitly. Model quota exhaustion is not conversation-access cooldown: choose an older version explicitly, never silently fall back. `status`, `send`, `ask`, `new`, `model`, and `effort` expose UI-observed `modelSelection` (model, effort, raw); null means unrecognized. `status` separates configured values from observations.
 
 ## Watchdog and recovery
