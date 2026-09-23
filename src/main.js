@@ -17,6 +17,9 @@ const { pageDetachCandidates } = PAGE_POOL;
 const LIVENESS = globalThis.__CHAT_BRIDGE_LIVENESS__;
 if(!LIVENESS) throw new Error("chat-bridge liveness policy module was not loaded");
 const { stallThresholdSec } = LIVENESS;
+const TASK_POLICY = globalThis.__CHAT_BRIDGE_TASK_POLICY__;
+if(!TASK_POLICY) throw new Error("chat-bridge task policy module was not loaded");
+const { activeTaskStatus, assertTaskId, assertActiveTaskTarget, activeSessionConflict } = TASK_POLICY;
 
 function slug(v="") {
   return String(v).trim().toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"") || "project";
@@ -211,9 +214,6 @@ function hashText(v="") {
   let h=2166136261;
   for(const ch of String(v)) { h^=ch.charCodeAt(0); h=Math.imul(h,16777619); }
   return (h>>>0).toString(16).padStart(8,"0");
-}
-function activeTaskStatus(v="") {
-  return !["COMPLETE","FAILED","CANCELLED","BLOCKED"].includes(String(v).toUpperCase());
 }
 
 async function state(page) {
@@ -803,7 +803,7 @@ else if(cmd==="task"){
     const rows=Object.values(rt.tasks||{}).filter(t=>!project||t.project===project);
     print(rows);
   } else if(sub==="set"){
-    const taskId=args[2]; if(!taskId) throw new Error("task id required");
+    const taskId=assertTaskId(args[2]);
     const old=rt.tasks[taskId]||{}, role=opt("role",old.role||null);
     const taskProject=project||old.project||null;
     const taskAccount=taskProject?activeAccount(reg,taskProject,accountArg):(accountArg||old.account||null);
@@ -816,20 +816,24 @@ else if(cmd==="task"){
       replyTo:opt("reply-to",old.replyTo||null),
       escalationTo:opt("escalation-to",old.escalationTo||null),
     },rootController);
-    rt.tasks[taskId]={...old,...route,taskId,project:taskProject,role,
+    const candidate={...old,...route,taskId,project:taskProject,role,
       account:opt("account",old.account||taskAccount||null),sessionId,
       issue:opt("issue",old.issue||null),github:opt("github",old.github||null),status:opt("status",old.status||"RUNNING"),
       stallThresholdSec:opt("stall-sec",old.stallThresholdSec||null)?Number(opt("stall-sec",old.stallThresholdSec||null)):null,
       updatedAt:new Date().toISOString()};
-    rt.tasks[taskId].createdAt ||= rt.tasks[taskId].updatedAt;
-    await saveRuntime(rt); print(rt.tasks[taskId]);
+    candidate.createdAt ||= candidate.updatedAt;
+    assertActiveTaskTarget(candidate);
+    const conflict=activeSessionConflict(Object.values(rt.tasks||{}),candidate);
+    if(conflict) throw new Error(`session already has active task ${conflict.taskId}; complete/clear it or use a different worker session`);
+    rt.tasks[taskId]=candidate;
+    await saveRuntime(rt); print(candidate);
   } else if(sub==="clear"){
     const taskId=args[2]; if(!taskId) throw new Error("task id required");
     const existed=!!rt.tasks[taskId]; delete rt.tasks[taskId]; await saveRuntime(rt); print({ok:true,taskId,existed});
   } else throw new Error("task subcommand must be list, set, or clear");
 }
 else if(cmd==="watch"){
-  const loop=args.includes("--loop"), intervalSec=Math.max(10,Number(opt("interval","15"))||15),
+  const loop=args.includes("--loop"), intervalSec=Math.max(10,Number(opt("interval","30"))||30),
     maxAttempts=Math.max(1,Number(opt("max-recovery","3"))||3), maxTotalRecoveries=Math.max(1,Number(opt("max-total-recovery","8"))||8),
     cooldownSec=Math.max(10,Number(opt("cooldown","45"))||45), aggressive=args.includes("--aggressive"), autoRecover=!args.includes("--dry-run"), maxIterations=Number(opt("iterations","0"))||0;
   const quiet=args.includes("--quiet");
@@ -873,7 +877,7 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
   }
   if(cmd==="send"){
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
-    const taskId=opt("task",null); let tracked=null;
+    const taskOpt=opt("task",null), taskId=taskOpt?assertTaskId(taskOpt):null; let tracked=null;
     if(taskId){
       const before=await state(page), rt=await loadRuntime(), old=rt.tasks[taskId]||{};
       const rootController=projectRecord(reg,chat.project).rootController;
@@ -887,7 +891,11 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
         originalMessage:msg,baselineAssistantCount:before.assistantCount,baselineAssistantHash:hashText(before.lastAssistant||""),baselineAssistantId:before.lastAssistantId||null,
         dispatchedAt:new Date().toISOString(),recoveryAttempts:0,totalRecoveryAttempts:0,lastRecoveryAt:null,lastRecoveryMethod:null,watchErrorCount:0,watchdogNotifiedAt:null,watchdogResultNotifiedAt:null,
         updatedAt:new Date().toISOString()};
-      tracked.createdAt ||= tracked.updatedAt; rt.tasks[taskId]=tracked; await saveRuntime(rt);
+      tracked.createdAt ||= tracked.updatedAt;
+      assertActiveTaskTarget(tracked);
+      const conflict=activeSessionConflict(Object.values(rt.tasks||{}),tracked);
+      if(conflict) throw new Error(`session already has active task ${conflict.taskId}; complete/clear it or use a different worker session`);
+      rt.tasks[taskId]=tracked; await saveRuntime(rt);
     }
     await sendMessage(page,msg); await page.waitForTimeout(400);
     const observed=await observeSession(chat,page,tracked);
