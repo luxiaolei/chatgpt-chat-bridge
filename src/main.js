@@ -565,12 +565,36 @@ async function applyModelSpec(page, spec, explicitEffort=null) {
   return {model:selected,effort:observed.effort||effort,observed};
 }
 
+async function modelSelectorAvailable(page) {
+  return await page.evaluate(() => {
+    const buttons=[...document.querySelectorAll("button")];
+    return buttons.some(button=>{
+      const label=((button.innerText||"")+" "+(button.getAttribute("aria-label")||"")).trim();
+      return /\b(?:Latest|GPT[- ]?\d+(?:\.\d+)*(?:\s+(?:Sol|Terra))?)\b/i.test(label);
+    });
+  }).catch(()=>false);
+}
+
 async function applyConfiguredSessionModel(page, chat) {
+  const observed=observedModel((await state(page)).mode);
+  const effortMatches=!!chat.effort && observed.effort?.toLowerCase()===String(chat.effort).toLowerCase();
+  if(chat.model && effortMatches && !observed.model) {
+    const selectorAvailable=await modelSelectorAvailable(page);
+    if(!selectorAvailable) {
+      return {
+        model:chat.model,
+        effort:observed.effort,
+        observed,
+        reapplied:false,
+        uiModelUnverifiable:true,
+      };
+    }
+  }
   if(chat.model) return await applyModelSpec(page,chat.model,chat.effort||null);
   if(chat.effort) {
     await setEffort(page,chat.effort);
-    const observed=observedModel((await state(page)).mode);
-    return {model:null,effort:observed.effort||chat.effort,observed};
+    const refreshed=observedModel((await state(page)).mode);
+    return {model:null,effort:refreshed.effort||chat.effort,observed:refreshed,reapplied:true};
   }
   return null;
 }
