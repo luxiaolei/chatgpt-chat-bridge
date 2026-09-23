@@ -122,7 +122,7 @@ chat-bridge new \
   --message "You own implementation for GitHub issue #12. Update the issue/PR, then callback the owning controller."
 ```
 
-The bridge captures the real conversation ID and project-scoped URL. New sessions for the same logical project/account are opened as **new tabs inside the bound Ego Space**; they do not create a new Space per session.
+The bridge captures the real conversation ID and project-scoped URL. New sessions for the same logical project/account are opened as **new tabs inside the bound Ego Space**; they do not create a new Space per session. Conversation identity is long-lived, while the Ego page/tab attachment is recyclable: when the managed-page budget is full, the bridge may detach the oldest safe idle session and later reattach it by conversation URL. It never reclaims the control page, a generating session, a session with an active runtime task, the currently active tab, or a session whose composer contains a draft.
 
 ## Project, account, and Space binding
 
