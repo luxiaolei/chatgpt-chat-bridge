@@ -148,7 +148,7 @@ test("runtime stops a cooling identity before browser access and continues anoth
     const visited=[];
     api.override(async(_reg,chat)=>{
       visited.push(chat.id);
-      if(chat.id==="a") await api.detectWebRateLimit({spaceId:1,evaluate:async()=>["Too many requests"]});
+      if(chat.id==="a") await api.detectWebRateLimit({spaceId:1,evaluate:async()=>({candidates:["Too many requests"],dismissed:0})});
       return {page:{}};
     },async()=>({sessionState:"RUNNING_QUIET",recommendation:"WAIT",mode:"5.6 Pro"}));
     const results=await api.watchOnce(reg,null,null,{autoRecover:false});

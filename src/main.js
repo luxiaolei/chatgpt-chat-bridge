@@ -127,20 +127,53 @@ async function saveWebCooldown(value, account) {
   await fs.rename(tmp,file);
   return value;
 }
+async function rateLimitSnapshot(page,{dismiss=false}={}) {
+  return await page.evaluate(({dismiss}) => {
+    const visible=node=>{
+      if(!node) return false;
+      const style=getComputedStyle(node);
+      return style.display!=="none" && style.visibility!=="hidden" && style.opacity!=="0" && node.getClientRects().length>0;
+    };
+    const dialogs=[...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="alert"], [data-state="open"]')]
+      .filter(visible);
+    const rateDialogs=dialogs.filter(node=>/Too many requests|temporarily limited access to your conversations|Please wait a few minutes/i.test(node.innerText||node.textContent||""));
+    let dismissed=0;
+    if(dismiss && rateDialogs.length){
+      const seen=new Set();
+      for(const dialog of rateDialogs){
+        const button=[...dialog.querySelectorAll("button")].find(b=>{
+          if(seen.has(b) || b.disabled || b.getAttribute("aria-disabled")==="true") return false;
+          const label=(b.innerText||b.getAttribute("aria-label")||"").trim();
+          return /^got it$/i.test(label);
+        });
+        if(button){
+          seen.add(button);
+          button.click();
+          dismissed=1;
+          break;
+        }
+      }
+    }
+    const texts=rateDialogs.map(n=>(n.innerText||n.textContent||"").trim()).filter(Boolean);
+    const body=document.body ? document.body.cloneNode(true) : null;
+    body?.querySelectorAll('[data-message-author-role], [role="dialog"], [role="alertdialog"], [role="alert"], [data-state="open"], script, style, template').forEach(node=>node.remove());
+    const bodyText=(body?.textContent||"").trim();
+    return {candidates:bodyText ? [...texts,bodyText] : texts,dismissed};
+  }).catch(()=>({candidates:[],dismissed:0}));
+}
 async function detectWebRateLimit(page, context="ui") {
   const account=taskAccounts.get(Number(page.spaceId));
   if(!account) throw new Error("Page has no bound ChatGPT account");
   await assertWebAvailable(account);
-  const candidates=await page.evaluate(() => {
-    const nodes=[...document.querySelectorAll('[role="dialog"], [role="alert"]')];
-    const texts=nodes.map(n=>(n.innerText||n.textContent||"").trim()).filter(Boolean);
-    const body=document.body ? document.body.cloneNode(true) : null;
-    body?.querySelectorAll('[data-message-author-role], script, style, template').forEach(node=>node.remove());
-    const bodyText=(body?.textContent||"").trim();
-    return bodyText ? [...texts,bodyText] : texts;
-  }).catch(()=>[]);
-  const detail=findRateLimitText(candidates);
+  let snapshot=await rateLimitSnapshot(page,{dismiss:true});
+  let detail=findRateLimitText(snapshot.candidates);
   if(!detail) return null;
+  if(snapshot.dismissed){
+    if(typeof page.waitForTimeout==="function") await page.waitForTimeout(300);
+    snapshot=await rateLimitSnapshot(page,{dismiss:false});
+    detail=findRateLimitText(snapshot.candidates);
+    if(!detail) return {recovered:true,dismissed:true};
+  }
   const next=nextCooldown(await loadWebCooldown(account),Date.now(),context,detail.slice(0,500));
   await saveWebCooldown(next,account);
   throw cooldownError(next,account);
