@@ -10,7 +10,7 @@ const root=path.resolve(import.meta.dirname,"..");
 const scope=id=>createHash("sha256").update(`identity:${id}`).digest("hex");
 
 test("identify binds only the stable login ID, rejects changed login and records HTTP 429",async()=>{
-  for(const file of ["control-routing","page-pool","liveness-policy","task-policy","web-policy","model-policy"]) await import(`../src/${file}.js`);
+  for(const file of ["control-routing","page-pool","liveness-policy","task-policy","web-policy","model-policy","session-policy"]) await import(`../src/${file}.js`);
   const dir=await mkdtemp(path.join(tmpdir(),"bridge-identify-"));
   const keys=["__CHAT_BRIDGE_CONFIG_DIR__","__CHAT_BRIDGE_STATE_DIR__","__CHAT_BRIDGE_ARGS__","document","location","fetch"];
   const previous=keys.map(k=>globalThis[k]);
@@ -120,7 +120,7 @@ m['run']('loop', pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), [sys.argv
 });
 
 test("runtime stops a cooling identity before browser access and continues another account",async()=>{
-  for(const file of ["control-routing","page-pool","liveness-policy","task-policy","web-policy","model-policy"]) await import(`../src/${file}.js`);
+  for(const file of ["control-routing","page-pool","liveness-policy","task-policy","web-policy","model-policy","session-policy"]) await import(`../src/${file}.js`);
   const dir=await mkdtemp(path.join(tmpdir(),"bridge-watch-"));
   const config=path.join(dir,"config"),state=path.join(dir,"state");
   await mkdir(config); await mkdir(state);
