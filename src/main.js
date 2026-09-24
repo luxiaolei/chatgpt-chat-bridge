@@ -514,23 +514,58 @@ async function observeSession(chat,page,task=null) {
   return hb;
 }
 
+function deliveryObserved(before, after) {
+  if(!after) return false;
+  if(after.messageCount>before.messageCount && after.lastUser) return true;
+  if(after.lastUserId && after.lastUserId!==before.lastUserId) return true;
+  return false;
+}
+
+async function waitForDelivery(page, before, timeout=3000) {
+  const deadline=Date.now()+timeout;
+  let latest=null;
+  while(Date.now()<deadline) {
+    await page.waitForTimeout(150);
+    latest=await state(page);
+    if(deliveryObserved(before,latest)) return latest;
+    await detectWebRateLimit(page,"send-verify");
+  }
+  return latest||await state(page);
+}
+
+async function triggerSend(page) {
+  const hasSend=await page.evaluate(()=>!!document.querySelector('button[data-testid="send-button"]'));
+  if(hasSend) {
+    try { await page.click('button[data-testid="send-button"]'); return "click"; }
+    catch {}
+  }
+  await page.focus(COMPOSER_SELECTOR);
+  await page.keyboard.press("Enter");
+  return "enter";
+}
+
 async function sendMessage(page, msg) {
   await detectWebRateLimit(page,"send-before");
+  const before=await state(page);
   await page.focus(COMPOSER_SELECTOR);
   await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Backspace");
   await page.keyboard.insertText(msg);
   await page.waitForTimeout(80);
-  const hasSend=await page.evaluate(()=>!!document.querySelector('button[data-testid="send-button"]'));
-  if(hasSend) {
-    try { await page.click('button[data-testid="send-button"]'); }
-    catch {
-      await page.focus(COMPOSER_SELECTOR);
-      await page.keyboard.press("Enter");
-    }
-  } else await page.keyboard.press("Enter");
-  await page.waitForTimeout(250);
+  const attempts=[];
+  attempts.push(await triggerSend(page));
+  let after=await waitForDelivery(page,before,2200);
+  if(!deliveryObserved(before,after) && String(after.composerText||"").trim()) {
+    attempts.push(await triggerSend(page));
+    after=await waitForDelivery(page,before,2200);
+  }
   await detectWebRateLimit(page,"send-after");
+  if(!deliveryObserved(before,after)) {
+    const err=new Error(`DELIVERY_UNCONFIRMED: composer=${after.composerPresent?"present":"missing"} text=${String(after.composerText||"").trim()?"nonempty":"empty"} attempts=${attempts.join(",")}`);
+    err.code="DELIVERY_UNCONFIRMED";
+    throw err;
+  }
+  return {delivered:true,attempts,lastUserId:after.lastUserId||null,messageCount:after.messageCount};
 }
 
 async function askMessage(page, msg, timeout=180000) {
@@ -1203,10 +1238,20 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
       if(conflict) throw new Error(`session already has active task ${conflict.taskId}; complete/clear it or use a different worker session`);
       rt.tasks[taskId]=tracked; await saveRuntime(rt);
     }
-    await sendMessage(page,msg); await page.waitForTimeout(400);
+    let delivery=null;
+    try { delivery=await sendMessage(page,msg); }
+    catch(error) {
+      if(tracked){
+        const rt=await loadRuntime(), live=rt.tasks[taskId];
+        live.status="BLOCKED"; live.blockedReason=String(error?.message||error); live.updatedAt=new Date().toISOString();
+        rt.tasks[taskId]=live; await saveRuntime(rt);
+      }
+      throw error;
+    }
+    await page.waitForTimeout(250);
     const observed=await observeSession(chat,page,tracked);
-    if(tracked){ const rt=await loadRuntime(), live=rt.tasks[taskId]; live.status=observed.generating?"RUNNING":"DISPATCHED"; live.updatedAt=new Date().toISOString(); rt.tasks[taskId]=live; await saveRuntime(rt); }
-    print({ok:true,chat:chat.name,taskId:taskId||null,state:observed.sessionState,modelSelection:observedModel(observed.mode),dispatchModel});
+    if(tracked){ const rt=await loadRuntime(), live=rt.tasks[taskId]; live.status=observed.generating?"RUNNING":"DISPATCHED"; live.blockedReason=null; live.updatedAt=new Date().toISOString(); rt.tasks[taskId]=live; await saveRuntime(rt); }
+    print({ok:true,delivered:true,delivery,chat:chat.name,taskId:taskId||null,state:observed.sessionState,modelSelection:observedModel(observed.mode),dispatchModel});
   }
   if(cmd==="ask"){
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");

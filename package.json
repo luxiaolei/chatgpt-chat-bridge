@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-chat-bridge",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "private": false,
   "description": "ChatGPT Project chat routing and orchestration over Ego Lite's native ego-browser runtime.",
   "license": "MIT",
