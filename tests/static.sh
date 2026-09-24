@@ -30,7 +30,7 @@ grep -q 'gradedRecover' "$ROOT/src/main.js"
 grep -q 'cmd==="watch"' "$ROOT/src/main.js"
 grep -q 'AWAITING_DURABLE_UPDATE' "$ROOT/src/main.js"
 grep -q 'StartInterval' "$ROOT/scripts/install-watchdog.sh"
-grep -q '"version": "0.4.10"' "$ROOT/package.json"
+grep -q '"version": "0.4.11"' "$ROOT/package.json"
 grep -q 'applyConfiguredSessionModel(page,chat)' "$ROOT/src/main.js"
 grep -q 'modelSelectorAvailable' "$ROOT/src/main.js"
 grep -q 'uiModelUnverifiable' "$ROOT/src/main.js"
@@ -69,3 +69,6 @@ if grep -q 'notifyConductor' "$ROOT/src/main.js"; then
   exit 1
 fi
 echo "static checks passed"
+grep -q 'waitForProjectReady' "$ROOT/src/main.js"
+grep -q 'openConversationFromProject' "$ROOT/src/main.js"
+grep -q 'CONVERSATION_REATTACH_FAILED' "$ROOT/src/main.js"
