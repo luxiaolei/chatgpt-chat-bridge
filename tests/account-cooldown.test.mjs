@@ -104,7 +104,7 @@ test("account cooldown follows identity across projects and aliases; other login
     assert.equal(cli("watch","--loop","--iterations","1","--account","a").status,0);
     // The persistent wrapper stays local when idle, then notices newly added work.
     await writeFile(fake,"#!/bin/sh\ncat >/dev/null\necho browser-entered\n",{mode:0o755});
-    await rm(path.join(state,"ui-pacing.last"));
+    await rm(path.join(state,"ui-pacing.last"),{force:true});
     await writeFile(path.join(state,"runtime.json"),JSON.stringify({tasks:{one:tasks.one}}));
     const loop=spawnSync("python3",["-c",`
 import json, pathlib, runpy, sys

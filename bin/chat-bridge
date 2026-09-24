@@ -132,9 +132,15 @@ for f in "$CONTROL" "$PAGE_POOL" "$LIVENESS" "$TASK_POLICY" "$LIFECYCLE_POLICY" 
   [[ -f "$f" ]] || { echo "chat-bridge: runtime module not found: $f" >&2; exit 127; }
 done
 
-# ponytail: shared browser serialization; split locks only if independent-account throughput needs it.
-LOCK_DIR="$STATE_DIR/ui-pacing.lock"
-STAMP_FILE="$STATE_DIR/ui-pacing.last"
+# Serialize ChatGPT UI per stable account identity. Different logged-in accounts may progress independently.
+PACE_SCOPE="$(python3 "$PREFLIGHT" scope "$CONFIG_DIR" "$STATE_DIR" "$@")"
+[[ -n "$PACE_SCOPE" ]] || { echo "chat-bridge: unable to resolve pacing account scope" >&2; exit 2; }
+LOCK_DIR="$STATE_DIR/ui-pacing-$PACE_SCOPE.lock"
+STAMP_FILE="$STATE_DIR/ui-pacing-$PACE_SCOPE.last"
+LEGACY_STAMP_FILE="$STATE_DIR/ui-pacing.last"
+if [[ ! -f "$STAMP_FILE" && -f "$LEGACY_STAMP_FILE" ]]; then
+  cp "$LEGACY_STAMP_FILE" "$STAMP_FILE" 2>/dev/null || true
+fi
 LOCK_HELD=0
 cleanup_lock() {
   if (( LOCK_HELD )); then

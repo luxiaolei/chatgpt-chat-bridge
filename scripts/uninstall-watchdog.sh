@@ -1,6 +1,12 @@
 #!/bin/zsh
 set -euo pipefail
-LABEL="com.chatgpt-chat-bridge.watchdog"
+ACCOUNT="${1:-}"
+SUFFIX=""
+if [[ -n "$ACCOUNT" ]]; then
+  SAFE_ACCOUNT="${ACCOUNT//[^A-Za-z0-9_.-]/-}"
+  SUFFIX=".$SAFE_ACCOUNT"
+fi
+LABEL="com.chatgpt-chat-bridge.watchdog$SUFFIX"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DOMAIN="gui/$(id -u)"
 if [[ -f "$PLIST" ]]; then

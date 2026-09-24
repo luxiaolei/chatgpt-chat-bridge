@@ -159,6 +159,9 @@ def run(action, config, state, args):
                 return
         print("0")
         return
+    if action == "scope":
+        print(scope(reg, account))
+        return
     data = cooldown(reg, state, account)
     if action == "gate":
         print(f'{data["remainingSec"]:.3f}|{(data["cooldown"] or {}).get("until", "")}|{account}')

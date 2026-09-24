@@ -27,6 +27,7 @@ export CHAT_BRIDGE_UI_MIN_INTERVAL_SEC=10
 export CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC=30
 export CHAT_BRIDGE_MAX_INLINE_WAIT_SEC=5
 export CHAT_BRIDGE_LOCK_WAIT_SEC=1
+PACE_SCOPE="$(python3 "$ROOT/src/web-preflight.py" scope "$CHAT_BRIDGE_CONFIG_DIR" "$CHAT_BRIDGE_STATE_DIR" projects)"
 
 # Concurrent commands cannot both enter Ego/browser work.
 export CHAT_BRIDGE_STATE_DIR="$TMP/concurrent-state"
@@ -86,7 +87,7 @@ PY
 [[ "$(wc -l < "$LOG" | tr -d ' ')" == "1" ]]
 
 # Age the stamp so the next normal command is admitted without waiting.
-python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing.last" <<'PY'
+python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.last" <<'PY'
 import pathlib,sys,time
 p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(str(time.time()-11)+"\n")
 PY
@@ -94,7 +95,7 @@ PY
 [[ "$(wc -l < "$LOG" | tr -d ' ')" == "2" ]]
 
 # Heavy command is deferred when only the normal 10s interval has elapsed.
-python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing.last" <<'PY'
+python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.last" <<'PY'
 import pathlib,sys,time
 pathlib.Path(sys.argv[1]).write_text(str(time.time()-11)+"\n")
 PY
@@ -154,7 +155,7 @@ echo '{"version":2,"projects":{},"tasks":{},"sessions":{}}' > "$CHAT_BRIDGE_STAT
 
 # An active task with no cooldown reaches Ego/browser work.
 echo '{"version":2,"projects":{},"tasks":{"T-1":{"taskId":"T-1","project":"X","role":"worker","status":"RUNNING"}},"sessions":{}}' > "$CHAT_BRIDGE_STATE_DIR/runtime.json"
-python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing.last" <<'PY'
+python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.last" <<'PY'
 import pathlib,sys,time
 pathlib.Path(sys.argv[1]).write_text(str(time.time()-11)+"\n")
 PY
@@ -162,13 +163,13 @@ PY
 [[ "$(wc -l < "$LOG" | tr -d ' ')" == "3" ]]
 
 # A busy pacing lock also fails fast.
-mkdir -p "$CHAT_BRIDGE_STATE_DIR/ui-pacing.lock"
-echo "$$" > "$CHAT_BRIDGE_STATE_DIR/ui-pacing.lock/pid"
+mkdir -p "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.lock"
+echo "$$" > "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.lock/pid"
 set +e
 CHAT_BRIDGE_LOCK_WAIT_SEC=0.5 "$ROOT/bin/chat-bridge" projects >/dev/null 2>"$TMP/lock.err"
 RC=$?
 set -e
-rm -rf "$CHAT_BRIDGE_STATE_DIR/ui-pacing.lock"
+rm -rf "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.lock"
 [[ "$RC" == "75" ]]
 python3 - "$TMP/lock.err" <<'PY'
 import json,pathlib,sys
