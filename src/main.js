@@ -691,6 +691,11 @@ async function modelSelectorAvailable(page) {
   }).catch(()=>false);
 }
 
+function deferrableModelUiError(error) {
+  const text=String(error?.message||error||"");
+  return /model\/effort button disappeared|hidden or inert|none can receive input|page\.focus timed out.*data-chat-bridge-model-option/i.test(text);
+}
+
 async function applyConfiguredSessionModel(page, chat) {
   const observed=observedModel((await state(page)).mode);
   const effortMatches=!!chat.effort && observed.effort?.toLowerCase()===String(chat.effort).toLowerCase();
@@ -1400,11 +1405,18 @@ else if(cmd==="new"){
     await openProjectPage(page,p,binding.projectUrl||null);
     await page.waitForSelector(COMPOSER_SELECTOR,{state:"visible",timeout:15000});
     const model=opt("model","Latest"), requestedEffort=opt("effort",null);
-    const applied=await applyModelSpec(page,model,requestedEffort);
+    let applied=null;
+    try {
+      applied=await applyModelSpec(page,model,requestedEffort);
+    } catch(error) {
+      if(!deferrableModelUiError(error)) throw error;
+      const observed=observedModel((await state(page)).mode);
+      applied={model,effort:requestedEffort||observed.effort||null,observed,deferredUntilDispatch:true};
+    }
     await sendMessage(page,first); await page.waitForURL(/\/c\/[0-9a-f-]+/i,{timeout:30000});
     const url=await page.url(), id=convId(url), projectBase=url.includes("/g/g-p-")?url.replace(/\/c\/[^/]+.*$/,''):binding.projectBase;
     if(projectBase){binding.projectBase=projectBase;binding.projectUrl=projectBase+"/project";binding.projectId=projectIdFromUrl(projectBase);}
-    reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model:applied.model||model,effort:applied.effort||requestedEffort,
+    reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model,effort:requestedEffort||applied.effort||null,
       spaceName:binding.spaceName,spaceId:task.spaceId,page:page.label,createdAt:new Date().toISOString()};
     await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:binding.spaceName,lastCommand:"new",lastSession:id});
     print({...reg.chats[id],modelSelection:applied.observed});

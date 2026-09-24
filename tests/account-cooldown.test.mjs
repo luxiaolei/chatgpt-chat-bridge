@@ -137,13 +137,16 @@ test("runtime stops a cooling identity before browser access and continues anoth
     const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
     const api=await new AsyncFunction("setTimeout","taskSpace",source+`
       const reg=await loadRegistry();
-      return {reg,watchOnce,detectWebRateLimit,accountScope,setModel,setEffort,applyModelSpec,accountPage,
+      return {reg,watchOnce,detectWebRateLimit,accountScope,setModel,setEffort,applyModelSpec,deferrableModelUiError,accountPage,
         bind:(id,a)=>taskAccounts.set(id,a),
         sender:(fn)=>{sendMessage=fn;},
         modelUI:(menu,snapshot)=>{openModelMenu=menu;state=snapshot;},
         override:(ensure,observe)=>{ensurePage=ensure;observeSession=observe;}};
     `)(callback=>callback(),async name=>({spaceId:name==="empty"?10:11,pages:async()=>name==="empty"?[]:[{label:"ready",url:async()=>"https://chatgpt.com/"}]}));
     assert.equal(api.accountScope(reg,"a"),scope("same"));
+    assert.equal(api.deferrableModelUiError(new Error("Model/effort button disappeared before menu open")),true);
+    assert.equal(api.deferrableModelUiError(new Error("Selector option matched 1 elements, but none can receive input; element is hidden or inert")),true);
+    assert.equal(api.deferrableModelUiError(new Error("Requested model is unavailable")),false);
     api.bind(1,"a");
     const visited=[];
     api.override(async(_reg,chat)=>{
