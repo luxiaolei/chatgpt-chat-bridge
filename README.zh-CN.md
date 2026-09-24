@@ -177,6 +177,16 @@ chat-bridge send supply-worker "..." --project "My Project" --task T-001 \
   --controller 00-s --reply-to 00-s --escalation-to 00-g
 ```
 
+### 项目级本地事件流
+
+v0.6 为需要外部 adapter 消费 Web Chat 结果的项目增加本地 durable event journal。事件基础设施由同一个 Chat Bridge 实现，但按 `project + account` 物理分流到独立 JSONL；项目消费者维护自己的 cursor，普通项目不会读取或阻塞其他项目。GitHub/项目数据库仍是业务 durable state，event journal 只承载协调事件。
+
+```bash
+chat-bridge event list --project "My Project" --type ASSISTANT_RESPONSE_READY --after <cursor>
+```
+
+`completionMode=external` 的 task 在出现新的 assistant message 时写入一次 `ASSISTANT_RESPONSE_READY`，同 message ID 不重复写；外部 adapter 可只读本地 event，而不再频繁访问 ChatGPT Web `status`。
+
 Watchdog 的通知顺序是 `replyTo → controller → escalationTo → rootController`，并自动去重。如果 00-s 可用，供应任务不会直接惊动 00-g；只有目标 controller 不可达时才升级。
 
 Worker 正常回调也应先回 owning controller。Controller 处理域内调度、Session 替换和普通 review；跨域 ownership、公共写域、证据口径或优先级冲突再升级 root controller。GitHub Issue/PR 始终是 durable state，Chat 只承载控制与执行上下文。

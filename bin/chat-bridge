@@ -128,7 +128,8 @@ LIFECYCLE_POLICY="${CHAT_BRIDGE_LIFECYCLE_POLICY:-${MAIN:h}/lifecycle-policy.js}
 WEB_POLICY="${CHAT_BRIDGE_WEB_POLICY:-${MAIN:h}/web-policy.js}"
 MODEL_POLICY="${MAIN:h}/model-policy.js"
 SESSION_POLICY="${MAIN:h}/session-policy.js"
-for f in "$CONTROL" "$PAGE_POOL" "$LIVENESS" "$TASK_POLICY" "$LIFECYCLE_POLICY" "$WEB_POLICY" "$MODEL_POLICY" "$SESSION_POLICY"; do
+EVENT_JOURNAL="${MAIN:h}/event-journal.js"
+for f in "$CONTROL" "$PAGE_POOL" "$LIVENESS" "$TASK_POLICY" "$LIFECYCLE_POLICY" "$WEB_POLICY" "$MODEL_POLICY" "$SESSION_POLICY" "$EVENT_JOURNAL"; do
   [[ -f "$f" ]] || { echo "chat-bridge: runtime module not found: $f" >&2; exit 127; }
 done
 
@@ -226,6 +227,7 @@ set +e
   cat "$WEB_POLICY"
   cat "$MODEL_POLICY"
   cat "$SESSION_POLICY"
+  cat "$EVENT_JOURNAL"
   cat "$MAIN"
 } | "$EGO_BROWSER" nodejs
 RC=$?

@@ -7,7 +7,7 @@ import path from "node:path";
 const root=path.resolve(new URL("..", import.meta.url).pathname);
 
 test("external completion keeps idle assistant result owned by external adapter", async()=>{
-  for(const file of ["control-routing","page-pool","liveness-policy","task-policy","lifecycle-policy","web-policy","model-policy","session-policy"]) {
+  for(const file of ["control-routing","page-pool","liveness-policy","task-policy","lifecycle-policy","web-policy","model-policy","session-policy","event-journal"]) {
     await import(`../src/${file}.js`);
   }
   const dir=await mkdtemp(path.join(tmpdir(),"bridge-external-"));
@@ -47,6 +47,7 @@ test("external completion keeps idle assistant result owned by external adapter"
     api.override(async()=>({page:{}}),async()=>({
       sessionState:"IDLE_COMPLETE",recommendation:"RECONCILE_DURABLE_STATE",
       quietForSec:0,runningForSec:0,lastProgressAt:new Date().toISOString(),
+      lastAssistantId:"assistant-1",lastAssistant:"{\"op\":\"context\",\"section\":\"index\"}",
     }));
     const results=await api.watchOnce(reg,null,null,{autoRecover:true});
     assert.equal(results[0].state,"IDLE_COMPLETE");
@@ -57,6 +58,14 @@ test("external completion keeps idle assistant result owned by external adapter"
     assert.equal(runtime.tasks.T1.completionMode,"external");
     assert.equal(runtime.tasks.T1.externalResponsePending,true);
     assert.equal(runtime.tasks.T1.watchdogResultNotifiedAt,null);
+    const events=await globalThis.__CHAT_BRIDGE_EVENTS__.listEvents(stateDir,{project:"P",account:"a"});
+    assert.equal(events.length,1);
+    assert.equal(events[0].type,"ASSISTANT_RESPONSE_READY");
+    assert.equal(events[0].data.assistantId,"assistant-1");
+    assert.match(events[0].data.assistantText,/"op":"context"/);
+    await api.watchOnce(reg,null,null,{autoRecover:true});
+    const deduped=await globalThis.__CHAT_BRIDGE_EVENTS__.listEvents(stateDir,{project:"P",account:"a"});
+    assert.equal(deduped.length,1);
   } finally {
     globalThis.__CHAT_BRIDGE_CONFIG_DIR__=oldConfig;
     globalThis.__CHAT_BRIDGE_STATE_DIR__=oldState;

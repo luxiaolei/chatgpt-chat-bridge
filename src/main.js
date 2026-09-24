@@ -37,6 +37,8 @@ const {modelPreset,observedModel,selectModelLabel}=MODEL_POLICY;
 const SESSION_POLICY=globalThis.__CHAT_BRIDGE_SESSION_POLICY__;
 if(!SESSION_POLICY) throw new Error("chat-bridge session policy module was not loaded");
 const {recoveryRequired}=SESSION_POLICY;
+const EVENT_JOURNAL=globalThis.__CHAT_BRIDGE_EVENTS__ || {appendEvent:async()=>null,listEvents:async()=>[]};
+const {appendEvent,listEvents}=EVENT_JOURNAL;
 const WEB_COOLDOWN_PATH = pathMod.join(STATE_DIR, "web-cooldown.json");
 const taskAccounts=new Map();
 const COMPOSER_SELECTOR = 'div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]';
@@ -115,6 +117,16 @@ async function touchRuntime(project, patch={}) {
   const rt=await loadRuntime();
   if(project) rt.projects[project]={...(rt.projects[project]||{}),...patch,updatedAt:new Date().toISOString()};
   await saveRuntime(rt); return rt;
+}
+
+async function emitTaskEvent(task, type, data={}) {
+  if(!task?.project) return null;
+  const account=task.account||DEFAULT_ACCOUNT;
+  return appendEvent(STATE_DIR,{
+    project:task.project,account,type,taskId:task.taskId||null,role:task.role||null,
+    sessionId:task.sessionId||null,controller:task.controller||null,replyTo:task.replyTo||null,
+    escalationTo:task.escalationTo||null,rootController:task.rootController||null,data,
+  });
 }
 
 async function loadWebCooldown(account) {
@@ -985,6 +997,19 @@ async function watchOnce(reg, project=null, account=null, options={}) {
           live.externalResponseAt=new Date().toISOString();
           live.watchdogResultNotifiedAt=null;
           live.watchdogResultNotification=null;
+          if(observed.lastAssistantId && live.externalEventAssistantId!==observed.lastAssistantId) {
+            const event=await emitTaskEvent(live,"ASSISTANT_RESPONSE_READY",{
+              assistantId:observed.lastAssistantId,
+              assistantText:String(observed.lastAssistant||"").slice(0,131072),
+              sessionState:observed.sessionState,
+              recommendation:observed.recommendation||null,
+              lastProgressAt:observed.lastProgressAt||null,
+            });
+            if(event) {
+              live.externalEventAssistantId=observed.lastAssistantId;
+              live.externalEventCursor=event.cursor;
+            }
+          }
         } else {
           if(!["COMPLETE","FAILED","CANCELLED"].includes(String(live.status).toUpperCase())) live.status="AWAITING_DURABLE_UPDATE";
           if(options.autoRecover!==false && !live.watchdogResultNotifiedAt) {
@@ -1116,7 +1141,7 @@ const project=opt("project",cmd==="watch"?null:reg.defaultProject);
 const accountArg=opt("account",null);
 
 if(cmd==="help"){
-  print("chat-bridge commands: init [--root-controller ROLE], policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE], watch, read, status, send [--task ID --controller ROLE], ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune");
+  print("chat-bridge commands: init [--root-controller ROLE], policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, event list, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE], watch, read, status, send [--task ID --controller ROLE], ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune");
 }
 else if(cmd==="init"){
   const p=project||args[1]; if(!p) throw new Error("project required");
@@ -1259,6 +1284,17 @@ else if(cmd==="sync" || cmd==="discover"){
   }
 }
 else if(cmd==="runtime") print(await loadRuntime());
+else if(cmd==="event"){
+  const sub=args[1]||"list";
+  if(sub!=="list") throw new Error("event subcommand must be list");
+  const p=project||args[2]; if(!p) throw new Error("event list requires --project or project name");
+  const a=activeAccount(reg,p,accountArg);
+  const rows=await listEvents(STATE_DIR,{
+    project:p,account:a,after:opt("after",null),type:opt("type",null),
+    limit:Number(opt("limit","100"))||100,
+  });
+  print({project:p,account:a,events:rows,nextCursor:rows.length?rows[rows.length-1].cursor:opt("after",null)});
+}
 else if(cmd==="task"){
   const sub=args[1]||"list", rt=await loadRuntime();
   if(sub==="list"){
