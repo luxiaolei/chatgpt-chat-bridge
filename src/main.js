@@ -325,13 +325,71 @@ async function waitForConversationReady(page, timeout=15000) {
   throw new Error("Conversation UI did not become ready before timeout");
 }
 
+async function waitForProjectReady(page, projectName, timeout=15000) {
+  const deadline=Date.now()+timeout;
+  while(Date.now()<deadline) {
+    await detectWebRateLimit(page,"project-ready");
+    const ready=await page.evaluate((projectName)=>{
+      const composer=!!document.querySelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]');
+      const effort=[...(document.querySelector("form")?.querySelectorAll("button")||[])].some(button=>
+        /^(Instant|Medium|High|Extra High|Pro)$/i.test((button.innerText||"").trim()));
+      const loading=/Loading project/i.test(document.body?.innerText||"");
+      const title=(document.title||"").toLowerCase();
+      return composer && effort && !loading && title.includes(String(projectName||"").toLowerCase());
+    },projectName).catch(()=>false);
+    if(ready) return true;
+    await page.waitForTimeout(250);
+  }
+  await detectWebRateLimit(page,"project-ready-timeout");
+  throw new Error("Project UI did not become ready before timeout: "+projectName);
+}
+
+async function openConversationFromProject(page, binding, projectName, chatId) {
+  if(!binding?.projectUrl) return false;
+  await page.goto(binding.projectUrl,{waitUntil:"load",timeout:20000});
+  await waitForProjectReady(page,projectName,15000);
+  const marked=await page.evaluate((chatId)=>{
+    document.querySelectorAll("[data-chat-bridge-conversation-target]").forEach(e=>e.removeAttribute("data-chat-bridge-conversation-target"));
+    const link=[...document.querySelectorAll('a[href*="/c/"]')].find(a=>String(a.href||"").includes("/c/"+chatId));
+    if(!link) return false;
+    link.setAttribute("data-chat-bridge-conversation-target","1");
+    return true;
+  },chatId);
+  if(!marked) return false;
+  try {
+    await page.focus('a[data-chat-bridge-conversation-target="1"]');
+    await page.keyboard.press("Enter");
+  } catch {
+    return false;
+  }
+  try {
+    await page.waitForFunction((chatId)=>location.pathname.includes("/c/"+chatId),chatId,{timeout:12000});
+    await waitForConversationReady(page,12000);
+  } catch {
+    return false;
+  }
+  return (await page.url()).includes("/c/"+chatId);
+}
+
 async function ensurePage(reg, chat) {
   const {binding,task}=await openBoundTask(reg,chat.project,chat.account), pages=await pagesOf(task);
   let page=pages.find(p=>p.label===chat.page) || null;
   if(!page) page=await newManagedPage(reg,chat.project,chat.account,task,binding,chat.id);
-  chat.spaceName=binding.spaceName; chat.spaceId=task.spaceId; chat.page=page.label; chat.lastUsedAt=new Date().toISOString();
-  if((await page.url())!==chat.url) await page.goto(chat.url,{waitUntil:"load",timeout:20000});
-  await waitForConversationReady(page);
+  chat.spaceName=binding.spaceName; chat.spaceId=task.spaceId; chat.lastUsedAt=new Date().toISOString();
+  let attached=false;
+  try {
+    if((await page.url())!==chat.url) await page.goto(chat.url,{waitUntil:"load",timeout:20000});
+    await waitForConversationReady(page,12000);
+    attached=(await page.url()).includes("/c/"+chat.id);
+  } catch {}
+  if(!attached) attached=await openConversationFromProject(page,binding,chat.project,chat.id);
+  if(!attached) {
+    chat.page=null;
+    chat.detachedAt=new Date().toISOString();
+    await saveRegistry(reg);
+    throw new Error("CONVERSATION_REATTACH_FAILED: "+chat.role+" ("+chat.id+")");
+  }
+  chat.page=page.label;
   await saveRegistry(reg); return {task,page,binding};
 }
 
@@ -464,8 +522,13 @@ async function sendMessage(page, msg) {
   await page.keyboard.insertText(msg);
   await page.waitForTimeout(80);
   const hasSend=await page.evaluate(()=>!!document.querySelector('button[data-testid="send-button"]'));
-  if(hasSend) await page.click('button[data-testid="send-button"]');
-  else await page.keyboard.press("Enter");
+  if(hasSend) {
+    try { await page.click('button[data-testid="send-button"]'); }
+    catch {
+      await page.focus(COMPOSER_SELECTOR);
+      await page.keyboard.press("Enter");
+    }
+  } else await page.keyboard.press("Enter");
   await page.waitForTimeout(250);
   await detectWebRateLimit(page,"send-after");
 }
@@ -496,14 +559,13 @@ async function openModelMenu(page) {
     return true;
   });
   if(!ok) throw new Error("Model/effort button not found");
-  const opened=await page.evaluate(() => {
-    const b=document.querySelector('button[data-chat-bridge-model-button="1"]');
-    if(!b) return false;
-    b.click();
-    return true;
-  });
-  if(!opened) throw new Error("Model/effort button disappeared before menu open");
-  await page.waitForFunction(()=>document.querySelectorAll('[role="menuitemradio"]').length>0,undefined,{timeout:3000});
+  try {
+    await page.focus('button[data-chat-bridge-model-button="1"]');
+    await page.keyboard.press("Enter");
+  } catch {
+    throw new Error("Model/effort button disappeared before menu open");
+  }
+  await page.waitForFunction(()=>document.querySelectorAll('[role="menuitemradio"]').length>0,undefined,{timeout:5000});
   await page.waitForTimeout(100);
 }
 async function setModel(page, model) {
@@ -513,17 +575,22 @@ async function setModel(page, model) {
   try { model=selectModelLabel(labels,model); }
   catch(error){ await page.keyboard.press("Escape"); throw error; }
   const result=await page.evaluate((model)=>{
+    document.querySelectorAll("[data-chat-bridge-model-option]").forEach(e=>e.removeAttribute("data-chat-bridge-model-option"));
     const items=[...document.querySelectorAll('[role="menuitemradio"]')];
     const x=items.find(e=>(e.innerText||"").trim().toLowerCase()===model.toLowerCase());
     if(!x) return {ok:false,available:items.map(e=>(e.innerText||"").trim())};
-    x.click();
+    x.setAttribute("data-chat-bridge-model-option","1");
     return {ok:true};
   }, model);
   if(!result.ok){
     await page.keyboard.press("Escape");
     throw new Error("Model not found: "+model+"; available="+result.available.join(", "));
   }
+  await page.focus('[data-chat-bridge-model-option="1"]');
+  await page.keyboard.press("Enter");
   await page.waitForTimeout(250);
+  await page.keyboard.press("Escape");
+  await openModelMenu(page);
   const checked=await page.evaluate((model)=>[...document.querySelectorAll('[role="menuitemradio"]')]
     .some(e=>(e.innerText||"").trim().toLowerCase()===model.toLowerCase() && e.getAttribute("aria-checked")==="true"), model);
   await page.keyboard.press("Escape");
@@ -603,12 +670,15 @@ async function openProjectPage(page, projectName, knownUrl=null) {
   const current=await page.url();
   if(current.includes("/g/g-p-") && current.endsWith("/project")) {
     const title=await page.title();
-    if(title.toLowerCase().includes(projectName.toLowerCase())) return current;
+    if(title.toLowerCase().includes(projectName.toLowerCase())) {
+      await waitForProjectReady(page,projectName,15000);
+      return current;
+    }
   }
   if(knownUrl) {
     await page.goto(knownUrl, {waitUntil:"load",timeout:20000});
     await detectWebRateLimit(page,"open-project-known");
-    await waitForConversationReady(page,15000);
+    await waitForProjectReady(page,projectName,15000);
     return await page.url();
   }
   await page.goto("https://chatgpt.com/", {waitUntil:"load",timeout:20000});
@@ -624,8 +694,14 @@ async function openProjectPage(page, projectName, knownUrl=null) {
     return true;
   }, projectName);
   if(!ok) throw new Error("ChatGPT project not found: "+projectName);
-  await page.click('button[data-chat-bridge-open-project="1"]');
+  try {
+    await page.focus('button[data-chat-bridge-open-project="1"]');
+    await page.keyboard.press("Enter");
+  } catch {
+    await page.click('button[data-chat-bridge-open-project="1"]');
+  }
   await page.waitForURL(/\/g\/g-p-[^/]+\/project/, {timeout:15000});
+  await waitForProjectReady(page,projectName,15000);
   return await page.url();
 }
 
