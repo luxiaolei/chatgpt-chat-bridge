@@ -21,6 +21,13 @@ const { stallThresholdSec } = LIVENESS;
 const TASK_POLICY = globalThis.__CHAT_BRIDGE_TASK_POLICY__;
 if(!TASK_POLICY) throw new Error("chat-bridge task policy module was not loaded");
 const { activeTaskStatus, assertTaskId, assertActiveTaskTarget, activeSessionConflict } = TASK_POLICY;
+const LIFECYCLE_POLICY = globalThis.__CHAT_BRIDGE_LIFECYCLE_POLICY__ || {
+  normalizeLifecycle(project={}) {
+    return {autoReconcile:false,reconcileRole:project.rootController||"conductor",minGapSec:300,instruction:null};
+  },
+  reconcileCandidate() { return null; },
+};
+const { normalizeLifecycle, reconcileCandidate } = LIFECYCLE_POLICY;
 const WEB_POLICY = globalThis.__CHAT_BRIDGE_WEB_POLICY__;
 if(!WEB_POLICY) throw new Error("chat-bridge web policy module was not loaded");
 const { findRateLimitText, nextCooldown } = WEB_POLICY;
@@ -69,7 +76,7 @@ function normalizeRegistry(raw) {
   reg.defaultAccount ||= DEFAULT_ACCOUNT;
   reg.accounts[reg.defaultAccount] ||= {name:reg.defaultAccount};
   for (const [name,p0] of Object.entries(reg.projects)) {
-    const p=p0||{}; p.name ||= name; p.activeAccount ||= reg.defaultAccount; p.rootController ||= "conductor"; p.bindings ||= {};
+    const p=p0||{}; p.name ||= name; p.activeAccount ||= reg.defaultAccount; p.rootController ||= "conductor"; p.bindings ||= {}; p.lifecycle ||= {};
     const oldUrl=p.url||null, oldBase=p.projectBase||null;
     if (!p.bindings[p.activeAccount] && (oldUrl||oldBase)) {
       p.bindings[p.activeAccount]={account:p.activeAccount,projectUrl:oldUrl,projectBase:oldBase,
@@ -191,6 +198,13 @@ async function saveRegistry(reg) {
 function opt(name, def=null) {
   const i=args.indexOf("--"+name); return i>=0 ? args[i+1] : def;
 }
+function boolValue(value, def=false) {
+  if(value==null) return def;
+  const text=String(value).trim().toLowerCase();
+  if(["1","true","yes","on"].includes(text)) return true;
+  if(["0","false","no","off"].includes(text)) return false;
+  throw new Error(`invalid boolean: ${value}`);
+}
 function positionals(start=0) {
   const out=[];
   for (let i=start;i<args.length;i++) {
@@ -207,8 +221,8 @@ function print(v){ console.log(typeof v==="string" ? v : JSON.stringify(v,null,2
 
 function projectRecord(reg, project) {
   if(!project) throw new Error("project required");
-  reg.projects[project] ||= {name:project,activeAccount:reg.defaultAccount||DEFAULT_ACCOUNT,rootController:"conductor",bindings:{}};
-  const p=reg.projects[project]; p.activeAccount ||= reg.defaultAccount||DEFAULT_ACCOUNT; p.rootController ||= "conductor"; p.bindings ||= {}; return p;
+  reg.projects[project] ||= {name:project,activeAccount:reg.defaultAccount||DEFAULT_ACCOUNT,rootController:"conductor",bindings:{},lifecycle:{}};
+  const p=reg.projects[project]; p.activeAccount ||= reg.defaultAccount||DEFAULT_ACCOUNT; p.rootController ||= "conductor"; p.bindings ||= {}; p.lifecycle ||= {}; return p;
 }
 function activeAccount(reg, project, explicit=null) {
   return explicit || projectRecord(reg,project).activeAccount || reg.defaultAccount || DEFAULT_ACCOUNT;
@@ -826,6 +840,62 @@ async function notifyController(reg, task, message) {
   return {sent:false,targets,failures};
 }
 
+function projectReconcileMessage(candidate) {
+  const lines=[
+    "[PROJECT EVENT]",
+    "event: RECONCILE_REQUIRED",
+    `project: ${candidate.project}`,
+    `root_controller: ${candidate.rootRole}`,
+    `reason: ${candidate.reason}`,
+    `latest_task: ${candidate.latestTaskId||"unknown"}`,
+    `latest_durable: ${candidate.latestGithub||"unknown"}`,
+    `progress_at: ${candidate.progressAt}`,
+    "",
+    "All non-root project tasks are terminal and new durable progress exists since the previous reconcile event.",
+    "Re-read the project's durable source of truth, reconcile current controller/task state, and dispatch only genuinely runnable next work according to this project's own governance. Do not replay completed work."
+  ];
+  if(candidate.instruction) lines.push("", "Project policy:", candidate.instruction);
+  return lines.join("\n");
+}
+
+async function maybeNotifyProjectReconcile(reg, projectName, account=null) {
+  const project=projectRecord(reg,projectName);
+  const policy=normalizeLifecycle(project);
+  if(!policy.autoReconcile) return null;
+  const rt=await loadRuntime(), runtimeProject=rt.projects[projectName]||{};
+  const candidate=reconcileCandidate(projectName,project,Object.values(rt.tasks||{}),runtimeProject,Date.now());
+  if(!candidate) return null;
+  if(!candidate.ready) return {project:projectName,event:candidate.event,state:"DEFERRED_MIN_GAP",waitSec:candidate.waitSec,eventKey:candidate.eventKey};
+  const a=account||project.activeAccount||reg.defaultAccount||DEFAULT_ACCOUNT;
+  try {
+    const root=resolveChat(reg,candidate.rootRole,projectName,a);
+    await assertWebAvailable(root.account||a);
+    const {page}=await ensurePage(reg,root);
+    const observed=await observeSession(root,page,null);
+    if(observed.generating || !observed.inputReady || String(observed.composerText||"").trim()) {
+      return {project:projectName,event:candidate.event,state:"ROOT_BUSY",eventKey:candidate.eventKey,
+        rootState:observed.sessionState,composerNonempty:!!String(observed.composerText||"").trim()};
+    }
+    const delivery=await sendMessage(page,projectReconcileMessage(candidate));
+    const latest=await loadRuntime();
+    latest.projects[projectName]={...(latest.projects[projectName]||{}),
+      lastReconcileProgressAt:candidate.progressAt,lastReconcileEventKey:candidate.eventKey,
+      lastReconcileNotifiedAt:new Date().toISOString(),
+      lastReconcileNotification:{sent:true,rootRole:candidate.rootRole,delivery}};
+    await saveRuntime(latest);
+    return {project:projectName,event:candidate.event,state:"SENT",eventKey:candidate.eventKey,
+      latestTaskId:candidate.latestTaskId,rootRole:candidate.rootRole,delivery};
+  } catch(error) {
+    const latest=await loadRuntime();
+    latest.projects[projectName]={...(latest.projects[projectName]||{}),
+      pendingReconcileEvent:candidate,lastReconcileError:String(error?.message||error),
+      lastReconcileErrorAt:new Date().toISOString()};
+    await saveRuntime(latest);
+    if(error?.code==="WEB_RATE_LIMITED") return {project:projectName,event:candidate.event,state:"WEB_COOLDOWN",account:error.account,eventKey:candidate.eventKey};
+    return {project:projectName,event:candidate.event,state:"NOT_SENT",error:String(error?.message||error),eventKey:candidate.eventKey};
+  }
+}
+
 async function gradedRecover(reg, chat, page, task, observed, options={}) {
   const rt=await loadRuntime();
   const live=rt.tasks[task.taskId]||task;
@@ -931,6 +1001,20 @@ async function watchOnce(reg, project=null, account=null, options={}) {
       results.push({taskId:task.taskId,role:task.role,sessionId:chat?.id||task.sessionId||null,state:"WATCH_ERROR",error:error.message,watchErrorCount:live.watchErrorCount,notification});
     }
   }
+  const lifecycleProjects=project ? [project] : Object.keys(reg.projects||{}).filter(p=>normalizeLifecycle(reg.projects[p]).autoReconcile);
+  for(const p of lifecycleProjects) {
+    if(account && activeAccount(reg,p,null)!==account) continue;
+    if(options.autoRecover===false) {
+      const latest=await loadRuntime();
+      const candidate=reconcileCandidate(p,projectRecord(reg,p),Object.values(latest.tasks||{}),latest.projects[p]||{},Date.now());
+      if(candidate) results.push({project:p,projectLifecycle:{...candidate,state:candidate.ready?"DRY_RUN_READY":"DRY_RUN_DEFERRED"}});
+      continue;
+    }
+    const waitMs=Math.max(0,taskGapMs-(Date.now()-lastVisitedAt));
+    if(waitMs && lastVisitedAt) await new Promise(resolve=>setTimeout(resolve,waitMs));
+    const lifecycle=await maybeNotifyProjectReconcile(reg,p,account);
+    if(lifecycle) { lastVisitedAt=Date.now(); results.push({project:p,projectLifecycle:lifecycle}); }
+  }
   return results;
 }
 
@@ -1016,7 +1100,7 @@ const project=opt("project",cmd==="watch"?null:reg.defaultProject);
 const accountArg=opt("account",null);
 
 if(cmd==="help"){
-  print("chat-bridge commands: init [--root-controller ROLE], bind, account, space, register, list, sync, discover, projects, runtime, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE], watch, read, status, send [--task ID --controller ROLE], ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune");
+  print("chat-bridge commands: init [--root-controller ROLE], policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE], watch, read, status, send [--task ID --controller ROLE], ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune");
 }
 else if(cmd==="init"){
   const p=project||args[1]; if(!p) throw new Error("project required");
@@ -1029,6 +1113,20 @@ else if(cmd==="init"){
   if(sp){ b.spaceName=sp; b.spaceId=null; b.controlPage=null; }
   await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:b.spaceName,rootController:pr.rootController,lastCommand:"init"});
   print({ok:true,project:p,account:a,rootController:pr.rootController,spaceName:b.spaceName,projectUrl:b.projectUrl});
+}
+else if(cmd==="policy"){
+  const sub=args[1]||"show", p=project; if(!p) throw new Error("policy requires --project");
+  const pr=projectRecord(reg,p);
+  if(sub==="show") print({project:p,rootController:pr.rootController,lifecycle:normalizeLifecycle(pr),raw:pr.lifecycle});
+  else if(sub==="set"){
+    const auto=opt("auto-reconcile",null), role=opt("reconcile-role",null), gap=opt("min-gap-sec",null), instruction=opt("instruction",null);
+    if(auto!=null) pr.lifecycle.autoReconcile=boolValue(auto,pr.lifecycle.autoReconcile===true);
+    if(role!=null) pr.lifecycle.reconcileRole=String(role).trim()||null;
+    if(gap!=null){ const n=Number(gap); if(!Number.isFinite(n)||n<0) throw new Error("min-gap-sec must be >= 0"); pr.lifecycle.minGapSec=n; }
+    if(instruction!=null) pr.lifecycle.instruction=String(instruction).trim()||null;
+    await saveRegistry(reg); await touchRuntime(p,{rootController:pr.rootController,lastCommand:"policy set"});
+    print({ok:true,project:p,rootController:pr.rootController,lifecycle:normalizeLifecycle(pr),raw:pr.lifecycle});
+  } else throw new Error("policy subcommand must be show or set");
 }
 else if(cmd==="bind"){
   const p=project||args[1]; if(!p) throw new Error("project required");

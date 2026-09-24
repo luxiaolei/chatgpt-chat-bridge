@@ -124,10 +124,11 @@ CONTROL="${CHAT_BRIDGE_CONTROL:-${MAIN:h}/control-routing.js}"
 PAGE_POOL="${CHAT_BRIDGE_PAGE_POOL:-${MAIN:h}/page-pool.js}"
 LIVENESS="${CHAT_BRIDGE_LIVENESS_POLICY:-${MAIN:h}/liveness-policy.js}"
 TASK_POLICY="${CHAT_BRIDGE_TASK_POLICY:-${MAIN:h}/task-policy.js}"
+LIFECYCLE_POLICY="${CHAT_BRIDGE_LIFECYCLE_POLICY:-${MAIN:h}/lifecycle-policy.js}"
 WEB_POLICY="${CHAT_BRIDGE_WEB_POLICY:-${MAIN:h}/web-policy.js}"
 MODEL_POLICY="${MAIN:h}/model-policy.js"
 SESSION_POLICY="${MAIN:h}/session-policy.js"
-for f in "$CONTROL" "$PAGE_POOL" "$LIVENESS" "$TASK_POLICY" "$WEB_POLICY" "$MODEL_POLICY" "$SESSION_POLICY"; do
+for f in "$CONTROL" "$PAGE_POOL" "$LIVENESS" "$TASK_POLICY" "$LIFECYCLE_POLICY" "$WEB_POLICY" "$MODEL_POLICY" "$SESSION_POLICY"; do
   [[ -f "$f" ]] || { echo "chat-bridge: runtime module not found: $f" >&2; exit 127; }
 done
 
@@ -215,6 +216,7 @@ set +e
   cat "$PAGE_POOL"
   cat "$LIVENESS"
   cat "$TASK_POLICY"
+  cat "$LIFECYCLE_POLICY"
   cat "$WEB_POLICY"
   cat "$MODEL_POLICY"
   cat "$SESSION_POLICY"

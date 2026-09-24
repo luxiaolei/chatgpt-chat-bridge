@@ -60,6 +60,40 @@ def project_account(reg, project):
     return reg.get("projects", {}).get(project, {}).get("activeAccount") or reg.get("defaultAccount") or "default"
 
 
+def reconcile_pending(reg, runtime, project, now=None):
+    cfg = reg.get("projects", {}).get(project, {})
+    policy = cfg.get("lifecycle", {}) or {}
+    if policy.get("autoReconcile") is not True:
+        return False
+    root = str(policy.get("reconcileRole") or cfg.get("rootController") or "conductor").strip()
+    terminal = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED"}
+    tasks = [t for t in runtime.get("tasks", {}).values() if t.get("project") == project]
+    for task in tasks:
+        status = str(task.get("status") or "").upper()
+        is_root = str(task.get("role") or "").strip() == root and str(task.get("controller") or root).strip() == root
+        if status not in terminal and not is_root:
+            return False
+    durable = [t for t in tasks if str(t.get("status") or "").upper() == "COMPLETE"
+               and t.get("github") and t.get("updatedAt")]
+    if not durable:
+        return False
+    latest = max(durable, key=lambda t: str(t.get("updatedAt")))
+    rp = runtime.get("projects", {}).get(project, {})
+    progress = str(latest.get("updatedAt"))
+    if rp.get("lastReconcileProgressAt") and progress <= str(rp.get("lastReconcileProgressAt")):
+        return False
+    gap = max(0, float(policy.get("minGapSec") or 300))
+    last = rp.get("lastReconcileNotifiedAt")
+    if last:
+        try:
+            last_dt = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+            if ((now or datetime.now(timezone.utc)) - last_dt).total_seconds() < gap:
+                return False
+        except ValueError:
+            pass
+    return True
+
+
 def run(action, config, state, args):
     if action == "loop":
         script, *args = args
@@ -110,6 +144,16 @@ def run(action, config, state, args):
             status = str(task.get("status") or "").upper()
             pending = status == "BLOCKED" and task.get("watchdogPendingNotification")
             if (status not in terminal or pending) and not cooldown(reg, state, a)["active"]:
+                print("1")
+                return
+        projects = [project] if project else list(reg.get("projects", {}).keys())
+        for p in projects:
+            if not p:
+                continue
+            a = project_account(reg, p)
+            if explicit and a != explicit:
+                continue
+            if reconcile_pending(reg, runtime, p) and not cooldown(reg, state, a)["active"]:
                 print("1")
                 return
         print("0")
