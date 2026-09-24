@@ -179,9 +179,10 @@ This callback creates a new user turn in the owning controller Chat and triggers
 7. Agents update GitHub first.
 8. Agents callback the owning controller through chat-bridge.
 9. On callback, the owning controller reconciles GitHub state, reviews evidence, and dispatches the next round or escalates to the root controller.
-10. Continue until project-level acceptance criteria are met.
+10. If project lifecycle auto-reconcile is enabled and all non-root tasks become terminal after new durable progress, treat the bridge `RECONCILE_REQUIRED` event as a prompt to re-read durable state and choose the next genuinely runnable batch. Do not replay completed work and do not let the bridge decide project priorities.
+11. Continue until project-level acceptance criteria are met.
 
-Avoid uncontrolled Chat-to-Chat loops. Only the conductor should normally fan out new work.
+Avoid uncontrolled Chat-to-Chat loops. Only the conductor should normally fan out new work. Lifecycle events are deduped wake-ups, not permission to bypass project governance.
 
 ## GitHub workflow
 

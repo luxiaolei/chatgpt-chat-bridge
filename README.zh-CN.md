@@ -181,6 +181,21 @@ Watchdog 的通知顺序是 `replyTo → controller → escalationTo → rootCon
 
 Worker 正常回调也应先回 owning controller。Controller 处理域内调度、Session 替换和普通 review；跨域 ownership、公共写域、证据口径或优先级冲突再升级 root controller。GitHub Issue/PR 始终是 durable state，Chat 只承载控制与执行上下文。
 
+### 可选的项目自动续航
+
+v0.5 增加项目级 lifecycle policy，**默认关闭**，因此升级不会改变其他项目。开启后，当所有非 root task 都已 terminal、且出现了比上一次 reconcile 更新的 `COMPLETE + GitHub URL` durable progress 时，watchdog 只生成一次 `RECONCILE_REQUIRED / DOMAIN_IDLE_WITH_DURABLE_PROGRESS` 事件并投给该项目配置的 root controller。Bridge 不决定下一项业务工作；root controller 仍按项目自己的治理规则读取 durable state 后决定是否继续派发。
+
+```bash
+chat-bridge policy set --project "My Project" \
+  --auto-reconcile true \
+  --reconcile-role 00-g \
+  --min-gap-sec 300 \
+  --instruction "Read durable state, dispatch only runnable next work, and do not replay completed work."
+chat-bridge policy show --project "My Project"
+```
+
+同一 durable progress 通过 `progressAt/eventKey` 去重；root 正在生成、composer 有草稿、账号冷却或投递未确认时不会覆盖页面状态，后续 watchdog 会继续尝试未消费的事件。`--dry-run` 只显示候选事件，不发送。
+
 总控 Skill 在：
 
 ```text

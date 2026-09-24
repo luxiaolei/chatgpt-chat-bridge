@@ -4,6 +4,14 @@
       .includes(String(value || "").toUpperCase());
   }
 
+  function normalizeCompletionMode(value = "durable") {
+    const mode = String(value || "durable").trim().toLowerCase();
+    if (!["durable", "external"].includes(mode)) {
+      throw new Error("completion mode must be durable or external");
+    }
+    return mode;
+  }
+
   function assertTaskId(value) {
     const taskId = value == null ? "" : String(value).trim();
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(taskId)) {
@@ -34,6 +42,7 @@
 
   globalObject.__CHAT_BRIDGE_TASK_POLICY__ = {
     activeTaskStatus,
+    normalizeCompletionMode,
     assertTaskId,
     assertActiveTaskTarget,
     activeSessionConflict,

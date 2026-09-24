@@ -882,6 +882,9 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null) {
       lastReconcileProgressAt:candidate.progressAt,lastReconcileEventKey:candidate.eventKey,
       lastReconcileNotifiedAt:new Date().toISOString(),
       lastReconcileNotification:{sent:true,rootRole:candidate.rootRole,delivery}};
+    delete latest.projects[projectName].pendingReconcileEvent;
+    delete latest.projects[projectName].lastReconcileError;
+    delete latest.projects[projectName].lastReconcileErrorAt;
     await saveRuntime(latest);
     return {project:projectName,event:candidate.event,state:"SENT",eventKey:candidate.eventKey,
       latestTaskId:candidate.latestTaskId,rootRole:candidate.rootRole,delivery};
@@ -970,12 +973,20 @@ async function watchOnce(reg, project=null, account=null, options={}) {
         recovery=await gradedRecover(reg,chat,page,task,observed,options);
       } else if(observed.sessionState==="IDLE_COMPLETE") {
         const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
-        if(!["COMPLETE","FAILED","CANCELLED"].includes(String(live.status).toUpperCase())) live.status="AWAITING_DURABLE_UPDATE";
         live.recoveryAttempts=0; live.watchErrorCount=0;
-        if(options.autoRecover!==false && !live.watchdogResultNotifiedAt) {
-          notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: AWAITING_DURABLE_UPDATE\nsession_state: IDLE_COMPLETE\nrole: ${live.role||chat.role}\nsummary: Worker is idle with a new assistant result. Reconcile GitHub/callback evidence before marking COMPLETE.`);
-          if(notification.sent) live.watchdogResultNotifiedAt=new Date().toISOString();
-          live.watchdogResultNotification=notification;
+        if((live.completionMode||"durable")==="external") {
+          live.status="RUNNING";
+          live.externalResponsePending=true;
+          live.externalResponseAt=new Date().toISOString();
+          live.watchdogResultNotifiedAt=null;
+          live.watchdogResultNotification=null;
+        } else {
+          if(!["COMPLETE","FAILED","CANCELLED"].includes(String(live.status).toUpperCase())) live.status="AWAITING_DURABLE_UPDATE";
+          if(options.autoRecover!==false && !live.watchdogResultNotifiedAt) {
+            notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: AWAITING_DURABLE_UPDATE\nsession_state: IDLE_COMPLETE\nrole: ${live.role||chat.role}\nsummary: Worker is idle with a new assistant result. Reconcile GitHub/callback evidence before marking COMPLETE.`);
+            if(notification.sent) live.watchdogResultNotifiedAt=new Date().toISOString();
+            live.watchdogResultNotification=notification;
+          }
         }
         latest.tasks[live.taskId]=live; await saveRuntime(latest);
       } else if(observed.sessionState.startsWith("RUNNING")) {
@@ -1265,6 +1276,7 @@ else if(cmd==="task"){
     const candidate={...old,...route,taskId,project:taskProject,role,
       account:opt("account",old.account||taskAccount||null),sessionId,
       issue:opt("issue",old.issue||null),github:opt("github",old.github||null),status:opt("status",old.status||"RUNNING"),
+      completionMode:normalizeCompletionMode(opt("completion-mode",old.completionMode||"durable")),
       stallThresholdSec:opt("stall-sec",old.stallThresholdSec||null)?Number(opt("stall-sec",old.stallThresholdSec||null)):null,
       updatedAt:new Date().toISOString()};
     candidate.createdAt ||= candidate.updatedAt;
@@ -1283,7 +1295,7 @@ else if(cmd==="watch"){
     cooldownSec=Math.max(10,Number(opt("cooldown","45"))||45), aggressive=args.includes("--aggressive"), autoRecover=!args.includes("--dry-run");
   const quiet=args.includes("--quiet");
   const results=await watchOnce(reg,project,accountArg,{autoRecover,maxAttempts,maxTotalRecoveries,cooldownSec,aggressive});
-  const noteworthy=results.some(r=>r.state==="WATCH_ERROR" || r.notification?.sent || (r.recovery?.action&&!["NONE","COOLDOWN"].includes(r.recovery.action)));
+  const noteworthy=results.some(r=>r.state==="WATCH_ERROR" || r.notification?.sent || r.projectLifecycle?.state==="SENT" || r.projectLifecycle?.state==="NOT_SENT" || (r.recovery?.action&&!["NONE","COOLDOWN"].includes(r.recovery.action)));
   if(!quiet || noteworthy) print({at:new Date().toISOString(),project:project||null,iteration:1,autoRecover,results});
 }
 else if(["archive","retire","delete","forget"].includes(cmd)){
@@ -1311,7 +1323,7 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
     const linked=taskId?rt.tasks[taskId]:Object.values(rt.tasks||{}).filter(t=>activeTaskStatus(t.status) && t.project===chat.project && (t.sessionId===chat.id || (!t.sessionId&&t.role===chat.role))).sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")))[0];
     const observed=await observeSession(chat,page,linked||null);
     print({...observed,modelSelection:observedModel(observed.mode),configuredModel:chat.model||null,configuredEffort:chat.effort||null,project:chat.project||null,account:chat.account,status:chat.status,
-      spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page,task:linked?{taskId:linked.taskId,status:linked.status,controller:linked.controller||null,replyTo:linked.replyTo||null,escalationTo:linked.escalationTo||null,recoveryAttempts:linked.recoveryAttempts||0}:null});
+      spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page,task:linked?{taskId:linked.taskId,status:linked.status,completionMode:linked.completionMode||"durable",controller:linked.controller||null,replyTo:linked.replyTo||null,escalationTo:linked.escalationTo||null,recoveryAttempts:linked.recoveryAttempts||0}:null});
   }
   if(cmd==="send"){
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
@@ -1327,8 +1339,9 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
         escalationTo:opt("escalation-to",old.escalationTo||null),
       },rootController);
       tracked={...old,...route,taskId,project:chat.project,role:chat.role,account:chat.account,sessionId:chat.id,status:"DISPATCHED",
+        completionMode:normalizeCompletionMode(opt("completion-mode",old.completionMode||"durable")),
         originalMessage:msg,baselineAssistantCount:before.assistantCount,baselineAssistantHash:hashText(before.lastAssistant||""),baselineAssistantId:before.lastAssistantId||null,
-        dispatchedAt:new Date().toISOString(),recoveryAttempts:0,totalRecoveryAttempts:0,lastRecoveryAt:null,lastRecoveryMethod:null,watchErrorCount:0,watchdogNotifiedAt:null,watchdogResultNotifiedAt:null,
+        dispatchedAt:new Date().toISOString(),recoveryAttempts:0,totalRecoveryAttempts:0,lastRecoveryAt:null,lastRecoveryMethod:null,watchErrorCount:0,watchdogNotifiedAt:null,watchdogResultNotifiedAt:null,watchdogResultNotification:null,
         updatedAt:new Date().toISOString()};
       tracked.createdAt ||= tracked.updatedAt;
       assertActiveTaskTarget(tracked);

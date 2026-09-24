@@ -82,7 +82,8 @@ def reconcile_pending(reg, runtime, project, now=None):
     progress = str(latest.get("updatedAt"))
     if rp.get("lastReconcileProgressAt") and progress <= str(rp.get("lastReconcileProgressAt")):
         return False
-    gap = max(0, float(policy.get("minGapSec") or 300))
+    raw_gap = policy.get("minGapSec")
+    gap = max(0, float(300 if raw_gap is None else raw_gap))
     last = rp.get("lastReconcileNotifiedAt")
     if last:
         try:
