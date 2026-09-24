@@ -20,7 +20,7 @@ if(!LIVENESS) throw new Error("chat-bridge liveness policy module was not loaded
 const { stallThresholdSec } = LIVENESS;
 const TASK_POLICY = globalThis.__CHAT_BRIDGE_TASK_POLICY__;
 if(!TASK_POLICY) throw new Error("chat-bridge task policy module was not loaded");
-const { activeTaskStatus, assertTaskId, assertActiveTaskTarget, activeSessionConflict } = TASK_POLICY;
+const { activeTaskStatus, normalizeCompletionMode, assertTaskId, assertActiveTaskTarget, activeSessionConflict } = TASK_POLICY;
 const LIFECYCLE_POLICY = globalThis.__CHAT_BRIDGE_LIFECYCLE_POLICY__ || {
   normalizeLifecycle(project={}) {
     return {autoReconcile:false,reconcileRole:project.rootController||"conductor",minGapSec:300,instruction:null};
