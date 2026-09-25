@@ -31,3 +31,15 @@ test("unverified aliases are excluded from automatic placement",async()=>{
  assert.equal(b.eligible,false); assert.ok(b.exclusionReasons.includes("IDENTITY_UNVERIFIED"));
  const sel=run("select",f); assert.equal(sel.selectedAccount,"a");
 });
+
+
+test("duplicate aliases do not create fake capacity",async()=>{
+ const f=await fixture(); const fs=await import("node:fs/promises");
+ const reg=JSON.parse(await fs.readFile(path.join(f.config,"registry.json"),"utf8"));
+ reg.accounts.alias={name:"alias",identity:"id-a"};
+ reg.projects.P.bindings.alias={spaceName:"sa"};
+ await fs.writeFile(path.join(f.config,"registry.json"),JSON.stringify(reg));
+ const cap=run("capacity",f); const alias=cap.accounts.find(x=>x.account==="alias");
+ assert.equal(alias.eligible,false); assert.equal(alias.capacityAliasOf,"a");
+ const sel=run("select",f); assert.equal(sel.selectedAccount,"b");
+});

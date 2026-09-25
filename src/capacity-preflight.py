@@ -50,6 +50,7 @@ def snapshot(config, state, project, now=None):
         rows.append({
           'account':account,
           'identityVerified':verified,
+          '_capacityScope':scope(reg,account),
           'spaceName':binding.get('spaceName'),
           'spaceId':binding.get('spaceId'),
           'cooldown':cd,
@@ -61,7 +62,29 @@ def snapshot(config, state, project, now=None):
           'eligible':not reasons,
           'exclusionReasons':reasons,
         })
-    return {'schema':'chat-bridge.capacity.v1','project':project,'activeAccount':proj.get('activeAccount'),'accounts':rows}
+    active=proj.get('activeAccount')
+    groups={}
+    for row in rows:
+        if row['identityVerified']:
+            groups.setdefault(('identity',row['_capacityScope']),[]).append(row)
+        if row.get('spaceName'):
+            groups.setdefault(('space',row['spaceName']),[]).append(row)
+    for members in groups.values():
+        aliases=sorted({r['account'] for r in members})
+        if len(aliases)<2:
+            continue
+        primary=active if active in aliases else aliases[0]
+        for row in members:
+            if row['account']==primary:
+                continue
+            reason=f'DUPLICATE_CAPACITY_ALIAS:{primary}'
+            if reason not in row['exclusionReasons']:
+                row['exclusionReasons'].append(reason)
+            row['eligible']=False
+            row['capacityAliasOf']=primary
+    for row in rows:
+        row.pop('_capacityScope',None)
+    return {'schema':'chat-bridge.capacity.v1','project':project,'activeAccount':active,'accounts':rows}
 
 def affinity_accounts(config, state, project, key):
     if not key: return []
