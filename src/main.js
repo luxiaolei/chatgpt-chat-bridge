@@ -1317,6 +1317,7 @@ else if(cmd==="task"){
     const candidate={...old,...route,taskId,project:taskProject,role,
       account:opt("account",old.account||taskAccount||null),sessionId,
       issue:opt("issue",old.issue||null),github:opt("github",old.github||null),status:opt("status",old.status||"RUNNING"),
+      affinityKey:opt("affinity-key",old.affinityKey||null),
       completionMode:normalizeCompletionMode(opt("completion-mode",old.completionMode||"durable")),
       stallThresholdSec:opt("stall-sec",old.stallThresholdSec||null)?Number(opt("stall-sec",old.stallThresholdSec||null)):null,
       updatedAt:new Date().toISOString()};
@@ -1364,7 +1365,7 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
     const linked=taskId?rt.tasks[taskId]:Object.values(rt.tasks||{}).filter(t=>activeTaskStatus(t.status) && t.project===chat.project && (t.sessionId===chat.id || (!t.sessionId&&t.role===chat.role))).sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")))[0];
     const observed=await observeSession(chat,page,linked||null);
     print({...observed,modelSelection:observedModel(observed.mode),configuredModel:chat.model||null,configuredEffort:chat.effort||null,project:chat.project||null,account:chat.account,status:chat.status,
-      spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page,task:linked?{taskId:linked.taskId,status:linked.status,completionMode:linked.completionMode||"durable",controller:linked.controller||null,replyTo:linked.replyTo||null,escalationTo:linked.escalationTo||null,recoveryAttempts:linked.recoveryAttempts||0}:null});
+      spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page,task:linked?{taskId:linked.taskId,status:linked.status,completionMode:linked.completionMode||"durable",affinityKey:linked.affinityKey||null,controller:linked.controller||null,replyTo:linked.replyTo||null,escalationTo:linked.escalationTo||null,recoveryAttempts:linked.recoveryAttempts||0}:null});
   }
   if(cmd==="send"){
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
@@ -1380,6 +1381,7 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
         escalationTo:opt("escalation-to",old.escalationTo||null),
       },rootController);
       tracked={...old,...route,taskId,project:chat.project,role:chat.role,account:chat.account,sessionId:chat.id,status:"DISPATCHED",
+        affinityKey:opt("affinity-key",old.affinityKey||chat.affinityKey||null),
         completionMode:normalizeCompletionMode(opt("completion-mode",old.completionMode||"durable")),
         originalMessage:msg,baselineAssistantCount:before.assistantCount,baselineAssistantHash:hashText(before.lastAssistant||""),baselineAssistantId:before.lastAssistantId||null,
         dispatchedAt:new Date().toISOString(),recoveryAttempts:0,totalRecoveryAttempts:0,lastRecoveryAt:null,lastRecoveryMethod:null,watchErrorCount:0,watchdogNotifiedAt:null,watchdogResultNotifiedAt:null,watchdogResultNotification:null,
@@ -1431,7 +1433,7 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
 }
 else if(cmd==="new"){
   const p=project; if(!p) throw new Error("--project required");
-  const a=activeAccount(reg,p,accountArg), name=opt("name","New chat"), role=opt("role",name), first=opt("message",null);
+  const a=activeAccount(reg,p,accountArg), name=opt("name","New chat"), role=opt("role",name), first=opt("message",null), affinityKey=opt("affinity-key",null);
   if(!first) throw new Error("--message required");
   const conflict=Object.values(reg.chats).find(c=>c.project===p&&c.account===a&&c.role===role&&c.status==="active");
   if(conflict&&!args.includes("--allow-duplicate-role")) throw new Error(`Active role already exists: ${role} (${conflict.id})`);
@@ -1452,7 +1454,7 @@ else if(cmd==="new"){
     await sendMessage(page,first); await page.waitForURL(/\/c\/[0-9a-f-]+/i,{timeout:30000});
     const url=await page.url(), id=convId(url), projectBase=url.includes("/g/g-p-")?url.replace(/\/c\/[^/]+.*$/,''):binding.projectBase;
     if(projectBase){binding.projectBase=projectBase;binding.projectUrl=projectBase+"/project";binding.projectId=projectIdFromUrl(projectBase);}
-    reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model,effort:requestedEffort||applied.effort||null,
+    reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model,effort:requestedEffort||applied.effort||null,affinityKey,
       spaceName:binding.spaceName,spaceId:task.spaceId,page:page.label,createdAt:new Date().toISOString()};
     await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:binding.spaceName,lastCommand:"new",lastSession:id});
     print({...reg.chats[id],modelSelection:applied.observed});

@@ -15,6 +15,7 @@ fi
 STATE_DIR="${CHAT_BRIDGE_STATE_DIR:-$HOME/.local/state/chat-bridge}"
 CONFIG_DIR="${CHAT_BRIDGE_CONFIG_DIR:-$HOME/.config/chat-bridge}"
 PREFLIGHT="${MAIN:h}/web-preflight.py"
+CAPACITY_PREFLIGHT="${MAIN:h}/capacity-preflight.py"
 UI_MIN_INTERVAL_SEC="${CHAT_BRIDGE_UI_MIN_INTERVAL_SEC:-10}"
 UI_HEAVY_INTERVAL_SEC="${CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC:-30}"
 MAX_INLINE_WAIT_SEC="${CHAT_BRIDGE_MAX_INLINE_WAIT_SEC:-5}"
@@ -46,6 +47,21 @@ PY
 
 CMD="${1:-help}"
 SUB="${2:-}"
+
+if [[ "$CMD" == "capacity" ]]; then
+  exec python3 "$CAPACITY_PREFLIGHT" capacity "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
+fi
+if [[ "$CMD" == "account" && "$SUB" == "select" ]]; then
+  exec python3 "$CAPACITY_PREFLIGHT" select "$CONFIG_DIR" "$STATE_DIR" "${@:3}"
+fi
+if [[ "$CMD" == "new" && " ${*} " == *" --auto-account "* && " ${*} " != *" --account "* ]]; then
+  PROJECT_ARG="$(python3 -c 'import sys; a=sys.argv[1:]; print(a[a.index("--project")+1] if "--project" in a and a.index("--project")+1<len(a) else "")' "$@")"
+  AFFINITY_ARG="$(python3 -c 'import sys; a=sys.argv[1:]; print(a[a.index("--affinity-key")+1] if "--affinity-key" in a and a.index("--affinity-key")+1<len(a) else "")' "$@")"
+  [[ -n "$PROJECT_ARG" ]] || { echo "new --auto-account requires --project" >&2; exit 2; }
+  SELECTED_JSON="$(python3 "$CAPACITY_PREFLIGHT" select "$CONFIG_DIR" "$STATE_DIR" --project "$PROJECT_ARG" ${AFFINITY_ARG:+--affinity-key "$AFFINITY_ARG"})"
+  SELECTED_ACCOUNT="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["selectedAccount"])' <<<"$SELECTED_JSON")"
+  set -- "$@" --account "$SELECTED_ACCOUNT"
+fi
 
 if [[ "$CMD" == "cooldown" ]]; then
   case "$SUB" in

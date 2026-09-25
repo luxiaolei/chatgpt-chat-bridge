@@ -87,6 +87,8 @@ chat-bridge account identify --project "My Project" --account secondary
 
 账号是路由身份；Bridge 不负责自动输入账号密码。对应 Ego Space 必须已经拥有该 ChatGPT 账号/Project 的访问权限。`spaceName` 是稳定绑定，数值 `spaceId` 只作为运行时缓存。
 
+新增 Web workstream 可先用 `chat-bridge capacity --project "PROJECT"` 读取纯本地容量投影，再用 `chat-bridge account select --project "PROJECT" --affinity-key KEY` 做确定性选择；`new --auto-account --affinity-key KEY` 会在进入 Web pacing 前完成选择。已有 conversation/affinity 不会静默迁移账号。完整契约见 `docs/multi-account-capacity.md`。
+
 每个绑定需通过已有的 managed ChatGPT 页面执行 `account identify`：只提取登录用户的稳定 ID，不导出登录令牌。同一 ID 在不同别名、Project、Space 共享冷却，不同 ID 独立；未识别前按配置别名隔离，并返回 `identityVerified: false`，因此相同登录应复用同一个别名。更换登录/profile/Space 后需重新识别；已识别别名发现不同登录会明确报错，需改用不同别名。账号级项目/会话发现复用已绑定页面，不再创建使用不明默认 profile 的全局 Space。
 
 ## Session 生命周期

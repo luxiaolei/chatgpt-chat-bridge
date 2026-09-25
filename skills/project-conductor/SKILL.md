@@ -65,7 +65,7 @@ chat-bridge new --project "PROJECT" \
 
 ### 4. Account and project binding
 
-A logical project may be bound to more than one ChatGPT account. Each account gets its own ChatGPT Project binding and Ego Space. Use account failover when the active account is unavailable or capacity-constrained, but preserve durable state in GitHub before handoff.
+A logical project may be bound to more than one ChatGPT account. Each account gets its own ChatGPT Project binding and Ego Space. For new sessions, prefer `chat-bridge account select --project "PROJECT" --affinity-key KEY` or `new --auto-account --affinity-key KEY`; selection is local/deterministic and existing affinity never migrates silently. Use account failover when the active account is unavailable or capacity-constrained, but preserve durable state in GitHub before handoff.
 
 The bridge does not automate credentials. A selected Ego Space must already have access to the intended account/project.
 

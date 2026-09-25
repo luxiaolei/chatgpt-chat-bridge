@@ -128,6 +128,8 @@ The bridge captures the real conversation ID and project-scoped URL. New session
 
 A logical project can have multiple ChatGPT account bindings. Each binding has its own ChatGPT Project URL and stable Ego Space name. The numeric Ego `spaceId` is treated as a runtime cache and may change when Ego recreates a Space.
 
+For new work, `chat-bridge capacity --project "PROJECT"` projects local account load/cooldown without Web access, and `chat-bridge account select --project "PROJECT" --affinity-key KEY` deterministically selects an eligible account. `new --auto-account --affinity-key KEY` performs that local selection before entering the chosen account's Web pacing scope. Existing conversation affinity never migrates silently. See `docs/multi-account-capacity.md`.
+
 ```bash
 chat-bridge account add secondary --label "Secondary ChatGPT"
 chat-bridge account use secondary --project "My Project"
