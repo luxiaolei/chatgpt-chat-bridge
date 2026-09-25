@@ -17,12 +17,11 @@ def cooldown(state, reg, account, now):
     p=state/'web-cooldowns'/(scope(reg,account)+'.json')
     value=read_json(p,{})
     until=value.get('until')
-    try: active=bool(until and time.mktime(time.strptime(until[:19],'%Y-%m-%dT%H:%M:%S')) > now)
+    try:
+        from datetime import datetime
+        active=bool(until and datetime.fromisoformat(str(until).replace("Z","+00:00")).timestamp()>now)
     except Exception:
-        try:
-            from datetime import datetime, timezone
-            active=datetime.fromisoformat(str(until).replace('Z','+00:00')).timestamp()>now
-        except Exception: active=False
+        active=False
     return {'active':active,'until':until,'strikes':value.get('strikes',0)}
 
 def snapshot(config, state, project, now=None):
