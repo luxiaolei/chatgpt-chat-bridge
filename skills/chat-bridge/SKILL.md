@@ -308,6 +308,8 @@ chat-bridge runtime
 chat-bridge task list --project "PROJECT"
 ```
 
+`control status` separates business intent from technical admission. `businessState` / `businessStateReason` describe the owner-facing project state (for example `REPLANNING`, `NOT_STARTED`, `PAUSED`, or `INTERNAL_TEST`), while `control.mode` (`RUNNING`, `PAUSED`, `DRAINING`) only controls whether new Bridge business work may enter. `durableStateRef` is the stable root ledger/index the controller should re-read on reconciliation; it may link to GitHub Issues/PR evidence rather than duplicating all project state in Chat.
+
 Admission control is persistent:
 
 ```bash

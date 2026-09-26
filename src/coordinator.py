@@ -1035,6 +1035,10 @@ def control_status(db, project=None):
         controller = current_controller_ref(db, reg, name, root_role)
         projects.append({
             "project": name,
+            "businessState": cfg.get("businessState") or ("ARCHIVED" if cfg.get("archived") else "UNSPECIFIED"),
+            "businessStateReason": cfg.get("businessStateReason"),
+            "durableStateRef": cfg.get("durableStateRef"),
+            "archived": bool(cfg.get("archived")),
             "control": management_mode(db, name),
             "rootRole": root_role,
             "rootControllerSessionRef": controller,

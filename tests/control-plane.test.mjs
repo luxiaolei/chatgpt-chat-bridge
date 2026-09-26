@@ -20,7 +20,7 @@ async function fixture({twoAccounts=false}={}) {
   }
   const registry={
     defaultProject:"P",defaultAccount:"a",accounts,
-    projects:{P:{name:"P",activeAccount:"a",rootController:"conductor",bindings,workgroups:{}}},
+    projects:{P:{name:"P",activeAccount:"a",rootController:"conductor",bindings,workgroups:{},businessState:"REPLANNING",durableStateRef:"https://example.invalid/issues/1"}},
     chats:{controller:{id:"controller",project:"P",account:"a",role:"conductor",status:"active",model:"Latest",effort:"High"}}
   };
   await writeFile(path.join(config,"registry.json"),JSON.stringify(registry));
@@ -479,7 +479,10 @@ test("control status distinguishes no work, in progress, awaiting ACK and comple
   try{
     let r=f.call("control",["status","--project","P"]);
     assert.equal(r.status,0,r.stderr);
-    assert.equal(JSON.parse(r.stdout).projects[0].completion.state,"NO_KNOWN_WORK");
+    const initialStatus=JSON.parse(r.stdout).projects[0];
+    assert.equal(initialStatus.completion.state,"NO_KNOWN_WORK");
+    assert.equal(initialStatus.businessState,"REPLANNING");
+    assert.equal(initialStatus.durableStateRef,"https://example.invalid/issues/1");
 
     let get=spawnSync("python3",[path.resolve("src/state-store.py"),"get",f.config,f.state,"runtime"],{encoding:"utf8"});
     let base=JSON.parse(get.stdout), next=structuredClone(base);
