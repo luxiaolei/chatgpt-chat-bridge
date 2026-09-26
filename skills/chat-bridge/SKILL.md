@@ -13,6 +13,8 @@ Use `chat-bridge` to control ChatGPT Project chats from an agent without desktop
 - `ego-browser` is available.
 - Run `scripts/install.sh` from this repository, or invoke `bin/chat-bridge` from the checkout.
 
+After any Chat Bridge upgrade, controller/setup Chats must re-read the installed `chat-bridge` and `project-conductor` Skills before relying on routing, account, Space, or model behavior.
+
 ## Project discovery
 
 Refresh the actual ChatGPT Project before routing:
@@ -119,6 +121,23 @@ chat-bridge queue list
 
 The queue returns a durable operation ID. `QUEUED` is not delivery; `SENT` confirms only the ChatGPT user message, not task completion. `DELIVERY_UNKNOWN` requires a read/reconciliation before any retry. Start the local worker with `~/.local/share/chatgpt-chat-bridge/install-coordinator.sh` after installing Bridge; `queue work-one` processes one claim manually. A controller without a known `callerRef` must supply an explicit Project to the direct `send` command instead of guessing its source Project.
 
+### Automatic dispatch boundary
+
+For controller-driven work, prefer `queue submit` with `callerRef + role`.
+
+The **controller chooses the logical role**. Chat Bridge does not use an LLM to guess the role from task prose.
+
+Once the role is supplied, Bridge handles mechanical placement:
+
+- infer the logical Project from the exact registered `callerRef`;
+- reuse the unique active role session when available;
+- otherwise create a new role session;
+- for a new session, choose an eligible verified account/Project binding using current capacity and cooldown state;
+- keep an existing session pinned to its existing account;
+- use the managed Agent Space for the selected login/Profile without taking over a human-owned Space.
+
+A controller normally should not specify raw conversation IDs, page labels, Space IDs, or accounts. Those are runtime attachments. Specify them only for an intentional override, diagnosis, or a known existing target.
+
 For an observed Project whose chat tabs do not show its name, verify the Project page and then run `chat-bridge space label --space "SPACE" --project-id "g-p-..." --name "NAME"`. This does not change routing.
 
 ## Session lifecycle
@@ -142,39 +161,44 @@ chat-bridge task clear TASK_ID --project "PROJECT NAME"
 
 Runtime state lives under `~/.local/state/chat-bridge/` and is reconstructable. GitHub remains authoritative.
 
-## Models and thinking
+## Models and Thinking Level
 
-Select a model:
+Model choice and Thinking Level are independent controls.
+
+In the current ChatGPT Web deployment used by this Bridge:
+
+- `Latest` is the moving current-model choice and currently resolves to **GPT-6**.
+- Thinking Level is the slider: `Instant → Medium → High → Extra High → Pro`.
+- `Pro` is the rightmost slider position.
+- Therefore `Latest + Pro` is the **GPT-6 Pro** path.
+- The Bridge preset `GPT-6 Pro` is shorthand for `Latest + Pro`.
+
+New sessions default to `Latest`. They do **not** force `Pro`; if effort is omitted the page default is preserved.
+
+Select the two controls separately:
 
 ```bash
-chat-bridge model research-agent "GPT-5.6 Sol" --project "PROJECT NAME"
+chat-bridge model research-agent Latest --project "PROJECT NAME"
+chat-bridge effort research-agent High --project "PROJECT NAME"
 ```
 
-Select thinking level:
+Or set them together:
 
 ```bash
-chat-bridge effort research-agent "Extra High" --project "PROJECT NAME"
-```
-
-Observed effort levels are:
-
-- Instant
-- Medium
-- High
-- Extra High
-- Pro
-
-### GPT-6 Pro preset
-
-```bash
+chat-bridge model research-agent Latest --effort "Extra High" --project "PROJECT NAME"
 chat-bridge model research-agent "GPT-6 Pro" --project "PROJECT NAME"
 ```
 
-The bridge maps this preset to ChatGPT's `Latest` model choice plus `Pro` effort, i.e. the rightmost thinking slider position.
+Recommended controller allocation:
 
-Before every `send` or `ask`, the bridge re-applies the session's configured model and effort and confirms the UI selection. A reattached conversation therefore cannot silently inherit a lower default thinking level.
+- routine lookup/routing/status: `Latest + Instant/Medium`
+- normal implementation/debugging/research: `Latest + High`
+- difficult architecture/review/ambiguous debugging: `Latest + Extra High`
+- highest-stakes synthesis/final critical review: `Latest + Pro`
 
-New sessions default to Latest without forcing Pro. `5.6 Pro` and `5.5 Pro` select those versions plus the current rightmost slider endpoint; `model AGENT Latest --effort High` configures the two separately. Unavailable/ambiguous choices fail explicitly. Model quota exhaustion is not conversation-access cooldown: choose an older version explicitly, never silently fall back. `status`, `send`, `ask`, `new`, `model`, and `effort` expose UI-observed `modelSelection` (model, effort, raw); null means unrecognized. `status` separates configured values from observations.
+Older pinned models such as `5.6 Pro` or `5.5 Pro` remain explicit compatibility choices; never silently downgrade to them. Unavailable/ambiguous choices fail explicitly.
+
+Before every `send` or `ask`, the Bridge re-applies the session's configured model and effort and confirms the UI selection. A reattached conversation therefore cannot silently inherit a lower Thinking Level. `status`, `send`, `ask`, `new`, `model`, and `effort` expose UI-observed `modelSelection` (`model`, `effort`, `raw`); that observed value is the runtime truth.
 
 ## Watchdog and recovery
 

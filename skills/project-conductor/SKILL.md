@@ -9,6 +9,17 @@ You are a project controller Chat. A project may use one backward-compatible `co
 
 If you are the root controller, own cross-domain priorities, ownership transfers, shared-resource conflicts, controller health, and evidence-policy arbitration. If you are a domain controller, own your Issue set, dispatch specialists/workers, recover or replace sessions, request review, and escalate only cross-domain or policy conflicts.
 
+## Controller startup / refresh rule
+
+After Chat Bridge is installed or upgraded, a root controller, domain controller, or setup Chat must re-read both installed Skills before dispatching new work:
+
+```text
+~/.agents/skills/project-conductor/SKILL.md
+~/.agents/skills/chat-bridge/SKILL.md
+```
+
+Do not rely on remembered pre-upgrade routing, Space, account, or model behavior. Treat the installed Skills as the current control contract.
+
 ## Core responsibilities
 
 ### 1. Project control
@@ -39,6 +50,31 @@ chat-bridge send AGENT "TASK ENVELOPE" --project "PROJECT" --task TASK_ID
 ```
 
 For asynchronous new work, use `chat-bridge queue submit --request-id TASK_ID --caller-ref YOUR_REGISTERED_SESSION_REF --role ROLE --message "TASK ENVELOPE"`. The queue infers the Project only from that exact registered source Chat; the tunnel itself does not reveal the source Chat/Project. Read `queue status OPERATION_ID` and reconcile `DELIVERY_UNKNOWN` rather than resending blindly. If your own session reference is unavailable, use the explicit-Project direct command above.
+
+### Controller → Bridge dispatch contract
+
+The controller decides the **business destination role**; Chat Bridge decides the mechanical placement.
+
+For normal asynchronous dispatch, the controller should provide only the durable task identity, its own registered `callerRef`, the target logical `role`, and the task envelope:
+
+```bash
+chat-bridge queue submit \
+  --request-id TASK_ID \
+  --caller-ref YOUR_REGISTERED_SESSION_REF \
+  --role ROLE \
+  --message "TASK ENVELOPE"
+```
+
+The controller normally should **not** choose or remember a raw conversation ID, Ego Space, page label, or ChatGPT account. Given `callerRef + role`, the queue:
+
+1. infers the logical Project from the exact registered caller Chat;
+2. reuses the unique active Chat for that role when one exists;
+3. otherwise creates a new role Chat;
+4. for a new Chat, selects an eligible verified Project/account binding using current capacity and cooldown state;
+5. keeps existing sessions on their current account rather than silently migrating them;
+6. routes callbacks and watchdog escalation through the recorded control chain.
+
+The Bridge does **not** infer the business role from free-form task text. The controller must still decide whether work belongs to `00-s`, `00-t`, `00-v`, `00-f`, another domain role, etc. Use an explicit `sessionRef`, `--account`, or direct `send` only as an intentional override or when targeting a known existing session.
 
 Use `ask` only when the conductor needs the result synchronously.
 
@@ -108,20 +144,36 @@ Use these states:
 
 Run one scan with `chat-bridge watch --project "PROJECT"`; the installed macOS watchdog runs one scan every 60 seconds across all projects. If there are no active tasks it exits locally without starting Ego Lite. Active tasks inside one scan are separated by at least 10 seconds. UI pacing/lock waits longer than 5 seconds return `PACING_DEFERRED` rather than holding a long tool call. A ChatGPT `Too many requests` event creates an adaptive shared 3–15 minute Web cooldown; during it, controllers should continue local/GitHub work and let watchdog skip Web access. Recovery remains conservative and idempotency-aware. After repeated failure, the watchdog marks the task BLOCKED and routes the event through `replyTo → controller → escalationTo → rootController` rather than inventing a project decision.
 
-### 7. Resource allocation
+### 7. Model and Thinking allocation
 
-Assign model and thinking level according to task difficulty, risk, and ambiguity.
+Treat **model** and **Thinking Level** as two separate controls.
+
+For the current ChatGPT Web deployment used by this Bridge:
+
+- `Latest` is the moving current-model choice and currently resolves to **GPT-6**.
+- Thinking is the independent slider: `Instant → Medium → High → Extra High → Pro`.
+- `Pro` is the rightmost Thinking position.
+- Therefore **`Latest + Pro` is the GPT-6 Pro path** used by Chat Bridge.
+- `GPT-6 Pro` in Bridge commands is a convenience preset for `model=Latest, effort=Pro`; it is not a separate account/Space routing decision.
+
+New sessions should default to `Latest` unless a task explicitly requires an older pinned model. If effort is omitted, the page default is preserved; controllers should set effort deliberately when task quality matters.
 
 Recommended policy:
 
-- Routine lookup, routing, status checks: Latest + Instant/Medium.
-- Normal implementation, debugging, scoped research: GPT-5.6 Sol + High.
-- Architecture, difficult review, ambiguous debugging: GPT-5.6 Sol + Extra High.
-- Highest-stakes synthesis, hard cross-system reasoning, final critical review: GPT-6 Pro preset.
+- Routine lookup, routing, status checks: `Latest + Instant/Medium`.
+- Normal implementation, debugging, scoped research: `Latest + High`.
+- Architecture, difficult review, ambiguous debugging: `Latest + Extra High`.
+- Highest-stakes synthesis, hard cross-system reasoning, final critical review: `Latest + Pro` (GPT-6 Pro).
 
-`GPT-6 Pro` means `Latest + Pro` in chat-bridge.
+When creating or configuring a worker, prefer explicit model/effort when deterministic allocation matters:
 
-Do not spend the highest tier on routine work.
+```bash
+chat-bridge new --project "PROJECT" --name ROLE --model Latest --effort High --message "..."
+chat-bridge model ROLE Latest --effort "Extra High" --project "PROJECT"
+chat-bridge model ROLE "GPT-6 Pro" --project "PROJECT"
+```
+
+Do not silently downgrade on quota/model availability errors. `modelSelection` is the UI-observed truth for the current session; a remembered model name is not.
 
 ## Communication protocol
 
