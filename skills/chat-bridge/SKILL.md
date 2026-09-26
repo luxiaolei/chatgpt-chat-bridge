@@ -15,6 +15,8 @@ Use `chat-bridge` to control ChatGPT Project chats from an agent without desktop
 
 After any Chat Bridge upgrade, controller/setup Chats must re-read the installed `chat-bridge` and `project-conductor` Skills before relying on routing, account, Space, or model behavior.
 
+For local repository work in this deployment, discover an authorized Computer plugin whose display name starts with `ChatGPT Computer`, then verify its actual target host/capabilities before use. The account-specific suffix is not stable identity. Git/GitHub writes default to the configured execution host's local `git`/`gh`; do not infer GitHub identity from the ChatGPT account and do not switch to Remote Desktop Commander unless the user explicitly requests it.
+
 ## Project discovery
 
 Refresh the actual ChatGPT Project before routing:
@@ -67,12 +69,12 @@ Create a new Chat inside a ChatGPT Project:
 ```bash
 chat-bridge new --project "PROJECT NAME" \
   --name research-agent \
-  --model "GPT-5.6 Sol" \
+  --model Latest \
   --effort High \
   --message "Initial role and task"
 ```
 
-The command captures the conversation ID, project-scoped URL, model, effort, and current tab attachment in the registry. New sessions for one logical project/account MUST open with `task.newPage()` inside that project/account's bound Ego Space. Do not create a new Space per session.
+The command captures the conversation ID, project-scoped URL, model, effort, and current tab attachment in the registry. The target architecture is one Bridge-managed Ego Space per verified ChatGPT login/Profile, with multiple Project and conversation tabs inside it. Conversation identity is durable; Space/page labels are recyclable runtime attachments. Do not create a new Space per session or per Project merely for concurrency.
 
 ## Accounts and Space binding
 
@@ -83,6 +85,17 @@ chat-bridge bind --project "PROJECT NAME" --account secondary --url "PROJECT URL
 chat-bridge space show --project "PROJECT NAME" --account secondary
 chat-bridge account identify --project "PROJECT NAME" --account secondary
 ```
+
+For Project/location setup and Space convergence:
+
+```bash
+chat-bridge project ensure --project "PROJECT NAME" --account secondary
+chat-bridge project ensure --project "PROJECT NAME" --account secondary --create --confirm
+chat-bridge space consolidate --account secondary
+chat-bridge space consolidate --account secondary --confirm
+```
+
+`project ensure` reuses a real accessible ChatGPT Project when possible. Creating one requires both `--create` and `--confirm`; it does not log in, share a Project, or copy private files. `space consolidate` is dry-run by default and only migrates legacy bindings after the account is drained. A verified login/Profile normally uses one Bridge-managed `chat-bridge-agent-*` Space across Projects. Human-owned Spaces remain outside automated cleanup.
 
 Treat `spaceName` as the stable binding and numeric `spaceId` as a runtime cache. Account bindings do not perform credential login; the bound Ego Space must already have access to the intended ChatGPT account/project.
 
@@ -119,6 +132,29 @@ chat-bridge queue status OPERATION_ID
 chat-bridge queue list
 ```
 
+A controller may pin actual execution resources in the durable operation:
+
+```bash
+chat-bridge queue submit --request-id HZ-002 --caller-ref CONTROLLER_SESSION_REF \
+  --role WORKER_ROLE --model Latest --effort High --message "Task envelope"
+```
+
+For normal worker completion, do not hand-code the callback destination. The queue injects the persisted callback contract. The worker reports a durable result:
+
+```bash
+chat-bridge queue result --task TASK_ID --status COMPLETE \
+  --summary "what changed" --github "https://github.com/OWNER/REPO/issues/123"
+```
+
+That records the result first and queues the callback to the owning controller. Callback `SENT`/`DELIVERED` is not business completion. After review, the current owning controller acknowledges:
+
+```bash
+chat-bridge queue ack --task TASK_ID --result-version 1 \
+  --caller-ref CONTROLLER_SESSION_REF --status ACCEPTED --message "reviewed"
+```
+
+Only an accepted result becomes `COMPLETE`; rejected/blocked results remain visible for follow-up.
+
 The queue returns a durable operation ID. `QUEUED` is not delivery; `SENT` confirms only the ChatGPT user message, not task completion. `DELIVERY_UNKNOWN` requires a read/reconciliation before any retry. Start the local worker with `~/.local/share/chatgpt-chat-bridge/install-coordinator.sh` after installing Bridge; `queue work-one` processes one claim manually. A controller without a known `callerRef` must supply an explicit Project to the direct `send` command instead of guessing its source Project.
 
 ### Automatic dispatch boundary
@@ -138,6 +174,8 @@ Once the role is supplied, Bridge handles mechanical placement:
 
 A controller normally should not specify raw conversation IDs, page labels, Space IDs, or accounts. Those are runtime attachments. Specify them only for an intentional override, diagnosis, or a known existing target.
 
+`queue submit` also reserves a new logical role placement atomically so concurrent requests cannot silently create the same role on two accounts. New placements exclude locally cooling accounts; an already accepted/sticky session is not silently migrated.
+
 For an observed Project whose chat tabs do not show its name, verify the Project page and then run `chat-bridge space label --space "SPACE" --project-id "g-p-..." --name "NAME"`. This does not change routing.
 
 ## Session lifecycle
@@ -150,6 +188,18 @@ chat-bridge delete AGENT_ALIAS --project "PROJECT NAME" --confirm
 ```
 
 Prefer `retire` for replacing a context-heavy or unhealthy role session. `delete` is destructive and must remain explicitly confirmed.
+
+A hard `Context too long` / maximum-conversation condition is not a Retry case. Watchdog classifies it as `CONTEXT_EXHAUSTED` and stops mechanical continuation. Use a checkpointed two-phase replacement:
+
+```bash
+chat-bridge queue checkpoint --project "PROJECT" --role ROLE --session-ref SESSION_REF \
+  --version CP-1 --summary "state needed by successor"
+chat-bridge control rotation-prepare --project "PROJECT" --role ROLE --confirm
+# successor verifies current Skills/tools/host/model, then:
+chat-bridge control rotation-ack --rotation ROTATION_ID --message "verified"
+```
+
+The logical role/controller remains stable while the concrete conversation gets a new generation. Late callbacks follow only a committed successor mapping; old conversations are retained as history instead of being deleted.
 
 ## Runtime task cache
 
@@ -242,7 +292,43 @@ Automatic recovery:
 chat-bridge recover AGENT_ALIAS --project "PROJECT NAME"
 ```
 
-`recover` uses the same conservative recovery policy. It does not re-send the original user task unless `--aggressive` is explicitly supplied.
+`recover` uses the same conservative recovery policy. It does not re-send the original user task unless `--aggressive` is explicitly supplied. A hard context limit is never handled by Retry/Continue; it requires the checkpointed rotation flow above.
+
+Running tasks stay attached by default. Once a task has a durable `RESULT_RECORDED` or terminal status, is past the configured grace window, has no generating UI/draft/user ownership, and the page is Bridge-managed/inactive, watchdog may close that Tab and leave the conversation registered for lazy reattach. Closing a running Tab is not assumed safe; detached-running remains experimental and is not the default policy.
+
+## Management control plane
+
+Local status/topology/runtime/task/event reads do not wake Ego:
+
+```bash
+chat-bridge control status
+chat-bridge topology
+chat-bridge runtime
+chat-bridge task list --project "PROJECT"
+```
+
+Admission control is persistent:
+
+```bash
+chat-bridge control pause --project "PROJECT" --reason "upgrade" --confirm
+chat-bridge control drain --project "PROJECT" --reason "upgrade" --confirm
+chat-bridge control resume --project "PROJECT" --confirm
+```
+
+`pause`/`drain` block new business admission while result recording, callbacks, ACKs, and management recovery remain available. `stop-running` is a separate explicit operation because stopping generation cannot undo external side effects.
+
+Broadcasts are scoped, previewable, persistent, and individually acknowledged:
+
+```bash
+chat-bridge control broadcast --project "PROJECT" --kind RELOAD \
+  --message "Re-read installed Skills and verify version/host/model"
+chat-bridge control broadcast --project "PROJECT" --kind RELOAD \
+  --message "Re-read installed Skills and verify version/host/model" --confirm
+chat-bridge control ack --event EVENT_ID --caller-ref CONTROLLER_SESSION_REF \
+  --status ACKNOWLEDGED --message "checked"
+```
+
+Management authority is distinct from a normal task `callerRef`. Host-local administration may bootstrap approved controller admins; Web-originated workers cannot grant themselves global control.
 
 ## Routing rules
 

@@ -20,10 +20,11 @@ UI_MIN_INTERVAL_SEC="${CHAT_BRIDGE_UI_MIN_INTERVAL_SEC:-10}"
 UI_HEAVY_INTERVAL_SEC="${CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC:-30}"
 MAX_INLINE_WAIT_SEC="${CHAT_BRIDGE_MAX_INLINE_WAIT_SEC:-5}"
 LOCK_WAIT_SEC="${CHAT_BRIDGE_LOCK_WAIT_SEC:-5}"
+EGO_CLIENT_TIMEOUT_SEC="${CHAT_BRIDGE_EGO_CLIENT_TIMEOUT_SEC:-180}"
 
-python3 - "$UI_MIN_INTERVAL_SEC" "$UI_HEAVY_INTERVAL_SEC" "$MAX_INLINE_WAIT_SEC" "$LOCK_WAIT_SEC" <<'PY' >/dev/null
+python3 - "$UI_MIN_INTERVAL_SEC" "$UI_HEAVY_INTERVAL_SEC" "$MAX_INLINE_WAIT_SEC" "$LOCK_WAIT_SEC" "$EGO_CLIENT_TIMEOUT_SEC" <<'PY' >/dev/null
 import sys
-normal,heavy,max_wait,lock_wait=map(float,sys.argv[1:])
+normal,heavy,max_wait,lock_wait,ego_timeout=map(float,sys.argv[1:])
 if normal < 10:
     raise SystemExit("CHAT_BRIDGE_UI_MIN_INTERVAL_SEC must be >= 10")
 if heavy < 30:
@@ -32,6 +33,8 @@ if max_wait < 0 or max_wait > 5:
     raise SystemExit("CHAT_BRIDGE_MAX_INLINE_WAIT_SEC must be between 0 and 5")
 if lock_wait < 0 or lock_wait > 5:
     raise SystemExit("CHAT_BRIDGE_LOCK_WAIT_SEC must be between 0 and 5")
+if ego_timeout < 30 or ego_timeout > 600:
+    raise SystemExit("CHAT_BRIDGE_EGO_CLIENT_TIMEOUT_SEC must be between 30 and 600")
 PY
 
 emit_tempfail() {
@@ -48,10 +51,36 @@ PY
 CMD="${1:-help}"
 SUB="${2:-}"
 
+if [[ "$CMD" == "ask" ]]; then
+  ASK_WRAPPER="${MAIN:h}/ask-wrapper.py"
+  [[ -f "$ASK_WRAPPER" ]] || { echo "chat-bridge: ask wrapper missing: $ASK_WRAPPER" >&2; exit 127; }
+  exec python3 "$ASK_WRAPPER" "$0" "${@:2}"
+fi
+
 if [[ "$CMD" == "queue" ]]; then
   COORDINATOR="${MAIN:h}/coordinator.py"
   [[ -f "$COORDINATOR" ]] || { echo "chat-bridge: coordinator missing: $COORDINATOR" >&2; exit 127; }
   exec python3 "$COORDINATOR" "$SUB" "$CONFIG_DIR" "$STATE_DIR" "${@:3}"
+fi
+if [[ "$CMD" == "control" ]]; then
+  COORDINATOR="${MAIN:h}/coordinator.py"
+  [[ -f "$COORDINATOR" ]] || { echo "chat-bridge: coordinator missing: $COORDINATOR" >&2; exit 127; }
+  exec python3 "$COORDINATOR" control "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
+fi
+
+LOCAL_QUERY="${MAIN:h}/local-query.py"
+if [[ -f "$LOCAL_QUERY" ]]; then
+  if [[ "$CMD" == "topology" ]]; then
+    exec python3 "$LOCAL_QUERY" topology "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
+  elif [[ "$CMD" == "runtime" ]]; then
+    exec python3 "$LOCAL_QUERY" runtime "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
+  elif [[ "$CMD" == "list" ]]; then
+    exec python3 "$LOCAL_QUERY" chat-list "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
+  elif [[ "$CMD" == "task" && "$SUB" == "list" ]]; then
+    exec python3 "$LOCAL_QUERY" task-list "$CONFIG_DIR" "$STATE_DIR" "${@:3}"
+  elif [[ "$CMD" == "event" && "$SUB" == "list" ]]; then
+    exec python3 "$LOCAL_QUERY" event-list "$CONFIG_DIR" "$STATE_DIR" "${@:3}"
+  fi
 fi
 
 if [[ "$CMD" == "capacity" ]]; then
@@ -75,10 +104,10 @@ fi
 
 ORIGIN_ROUTED=0
 case "$CMD" in
-  send|ask|new|read|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete|projects|discover|list|event|task)
+  send|ask|new|read|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete|projects|discover|list|event|task|project)
     ORIGIN_ROUTED=1 ;;
   space)
-    [[ "$SUB" == "show" || "$SUB" == "prune" ]] && ORIGIN_ROUTED=1 ;;
+    [[ "$SUB" == "show" || "$SUB" == "prune" || "$SUB" == "consolidate" ]] && ORIGIN_ROUTED=1 ;;
 esac
 if (( ORIGIN_ROUTED )) && [[ -n "${CHAT_BRIDGE_FROM_ACCOUNT_ID:-}" ]]; then
   ORIGIN_ACCOUNT="$(python3 "$PREFLIGHT" origin-account "$CONFIG_DIR" "$STATE_DIR" "$@")"
@@ -125,7 +154,10 @@ case "$CMD" in
     TOUCH_UI=1
     ;;
   space)
-    [[ "$SUB" == "prune" || "$SUB" == "scan" || "$SUB" == "restore" ]] && TOUCH_UI=1
+    [[ "$SUB" == "prune" || "$SUB" == "scan" || "$SUB" == "restore" || "$SUB" == "gc" || "$SUB" == "consolidate" ]] && TOUCH_UI=1
+    ;;
+  project)
+    [[ "$SUB" == "ensure" ]] && TOUCH_UI=1
     ;;
   account)
     [[ "$SUB" == "identify" ]] && TOUCH_UI=1
@@ -134,6 +166,12 @@ esac
 case "$CMD" in
   new|archive|retire|delete)
     HEAVY_UI=1
+    ;;
+  space)
+    [[ ( "$SUB" == "gc" || "$SUB" == "consolidate" ) && "$*" == *"--confirm"* ]] && HEAVY_UI=1
+    ;;
+  project)
+    [[ "$SUB" == "ensure" && "$*" == *"--create"* && "$*" == *"--confirm"* ]] && HEAVY_UI=1
     ;;
 esac
 
@@ -149,6 +187,12 @@ if [[ "$CMD" == "watch" ]]; then
   if [[ "$HAS_ACTIVE" != "1" ]]; then
     exit 0
   fi
+fi
+
+if [[ "$CMD" == "send" || "$CMD" == "new" ]] && [[ " ${*} " != *" --background "* ]]; then
+  COORDINATOR="${MAIN:h}/coordinator.py"
+  PROJECT_ARG="$(python3 -c 'import sys; a=sys.argv[1:]; print(a[a.index("--project")+1] if "--project" in a and a.index("--project")+1<len(a) else "")' "$@")"
+  python3 "$COORDINATOR" admission-check "$CONFIG_DIR" "$STATE_DIR" "$PROJECT_ARG" >/dev/null
 fi
 
 if (( TOUCH_UI )) && [[ "$CMD" != "watch" ]]; then
@@ -281,6 +325,9 @@ if [[ "$CMD" == "space" && "$SUB" == "restore" && "$(uname -s)" == "Darwin" ]]; 
   [[ -d "$EGO_LITE_APP" ]] && open -a "$EGO_LITE_APP" >/dev/null
 fi
 
+RUNNER="${MAIN:h}/ego-runner.py"
+[[ -f "$RUNNER" ]] || { echo "chat-bridge: ego runner missing: $RUNNER" >&2; exit 127; }
+
 set +e
 {
   printf 'globalThis.__CHAT_BRIDGE_ARGS__ = %s;\n' "$ARGS_JSON"
@@ -300,7 +347,7 @@ set +e
   cat "$EVENT_JOURNAL"
   cat "$TOPOLOGY"
   cat "$MAIN"
-} | "$EGO_BROWSER" nodejs
+} | python3 "$RUNNER" "$EGO_BROWSER" "$EGO_CLIENT_TIMEOUT_SEC"
 RC=$?
 set -e
 

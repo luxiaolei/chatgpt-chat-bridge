@@ -56,7 +56,7 @@ if(!MODEL_POLICY) throw new Error("chat-bridge model policy module was not loade
 const {modelPreset,observedModel,selectModelLabel}=MODEL_POLICY;
 const SESSION_POLICY=globalThis.__CHAT_BRIDGE_SESSION_POLICY__;
 if(!SESSION_POLICY) throw new Error("chat-bridge session policy module was not loaded");
-const {recoveryRequired}=SESSION_POLICY;
+const {recoveryRequired,contextExhausted}=SESSION_POLICY;
 const EVENT_JOURNAL=globalThis.__CHAT_BRIDGE_EVENTS__ || {appendEvent:async()=>null,listEvents:async()=>[]};
 const {appendEvent,listEvents}=EVENT_JOURNAL;
 const SPACE_CATALOG=globalThis.__CHAT_BRIDGE_SPACE_CATALOG__;
@@ -300,6 +300,19 @@ function bindingObserved(reg, account, binding) {
   const canonical=value=>String(value||"").match(/g-p-[0-9a-f]{32}/)?.[0]||null;
   return canonical(projectId) && observed.some(value=>canonical(value)===canonical(projectId));
 }
+function bindingExecutionReadiness(project, binding) {
+  const requirements=project?.requirements||{};
+  const contextVersion=String(requirements.contextVersion||"").trim();
+  const requiredTools=new Set(requirements.tools||[]);
+  if(!contextVersion && !requiredTools.size) return {ready:true,missing:[]};
+  const readiness=binding?.readiness||{}, missing=[];
+  if(contextVersion && String(readiness.contextVersion||"")!==contextVersion) missing.push("contextVersion");
+  const tools=new Set(readiness.tools||[]);
+  for(const tool of requiredTools) if(!tools.has(tool)) missing.push("tool:"+tool);
+  if(!readiness.attestedAt) missing.push("attestation");
+  return {ready:missing.length===0,missing,requirements,readiness};
+}
+
 async function openBoundTask(reg, project, account=null, options={}) {
   const b=bindingFor(reg,project,account,true);
   if(!bindingObserved(reg,b.account,b)) throw new Error(`PROJECT_NOT_OBSERVED_FOR_LOGIN: ${project} / ${b.account}; scan and bind the actual Project before UI work`);
@@ -321,19 +334,68 @@ async function openBoundTask(reg, project, account=null, options={}) {
   if(Number(b.spaceId)!==Number(task.spaceId)){ b.spaceId=task.spaceId; await saveRegistry(reg); }
   return {binding:b,task};
 }
+function samePhysicalSpace(record, binding, task) {
+  if(!record) return false;
+  if(record.spaceName && binding.spaceName && record.spaceName===binding.spaceName) return true;
+  if(record.spaceId!=null && task?.spaceId!=null && Number(record.spaceId)===Number(task.spaceId)) return true;
+  return false;
+}
+
+function projectBindingForTask(reg, taskRecord) {
+  const project=reg.projects?.[taskRecord?.project];
+  if(!project) return null;
+  const chat=taskRecord?.sessionId?reg.chats?.[taskRecord.sessionId]:null;
+  const account=taskRecord?.account||chat?.account||project.activeAccount||reg.defaultAccount;
+  return project.bindings?.[account]||null;
+}
+
+function spaceProtection(reg, runtime, binding, task) {
+  const labels=new Set();
+  const protectedChatIds=new Set();
+  for(const project of Object.values(reg.projects||{})) {
+    for(const candidate of Object.values(project.bindings||{})) {
+      if(samePhysicalSpace(candidate,binding,task) && candidate?.controlPage) labels.add(candidate.controlPage);
+    }
+  }
+  for(const chat of Object.values(reg.chats||{})) {
+    if(!samePhysicalSpace(chat,binding,task)) continue;
+    if(chat.status==="active" && chat.page) {
+      labels.add(chat.page);
+      protectedChatIds.add(chat.id);
+    }
+  }
+  for(const live of Object.values(runtime.tasks||{})) {
+    if(!activeTaskStatus(live.status)) continue;
+    const chat=live.sessionId?reg.chats?.[live.sessionId]:null;
+    const liveBinding=projectBindingForTask(reg,live);
+    if(chat && samePhysicalSpace(chat,binding,task)) {
+      if(chat.page) labels.add(chat.page);
+      protectedChatIds.add(chat.id);
+    } else if(liveBinding && samePhysicalSpace(liveBinding,binding,task)) {
+      for(const candidate of Object.values(reg.chats||{})) {
+        if(candidate.project===live.project && candidate.role===live.role && samePhysicalSpace(candidate,binding,task) && candidate.page) {
+          labels.add(candidate.page);
+          protectedChatIds.add(candidate.id);
+        }
+      }
+    }
+  }
+  return {labels,protectedChatIds};
+}
+
 async function reclaimIdlePageSlot(reg, project, account, task, binding, excludeChatId=null) {
   const rt=await loadRuntime();
   const tabs=await task.tabs().catch(()=>[]);
   const activeLabels=tabs.filter(t=>t.active&&t.label).map(t=>t.label);
+  const protection=spaceProtection(reg,rt,binding,task);
+  for(const label of activeLabels) protection.labels.add(label);
+  const chats=Object.values(reg.chats||{}).filter(chat=>samePhysicalSpace(chat,binding,task));
   const candidates=pageDetachCandidates(
-    Object.values(reg.chats||{}),
+    chats,
     Object.values(rt.tasks||{}),
     {
-      project,
-      account,
-      controlPage:binding.controlPage||null,
-      excludeChatIds:excludeChatId?[excludeChatId]:[],
-      excludePageLabels:activeLabels,
+      excludeChatIds:[...protection.protectedChatIds,...(excludeChatId?[excludeChatId]:[])],
+      excludePageLabels:[...protection.labels],
     }
   );
   for(const candidate of candidates) {
@@ -342,15 +404,20 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     catch {
       candidate.page=null;
       candidate.detachedAt=new Date().toISOString();
+      candidate.attachmentEpoch=Number(candidate.attachmentEpoch||0)+1;
       await saveRegistry(reg);
       continue;
     }
+    const tab=tabs.find(item=>item.label===candidate.page);
+    if(!tab || tab.active || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
     if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
-    await page.close().catch(()=>{});
     const oldPage=candidate.page;
+    try { await page.close(); }
+    catch { continue; }
     candidate.page=null;
     candidate.detachedAt=new Date().toISOString();
+    candidate.attachmentEpoch=Number(candidate.attachmentEpoch||0)+1;
     await saveRegistry(reg);
     return {chatId:candidate.id,role:candidate.role,page:oldPage};
   }
@@ -507,7 +574,8 @@ async function ensurePage(reg, chat, options={}) {
     await saveRegistry(reg);
     throw new Error("CONVERSATION_REATTACH_FAILED: "+chat.role+" ("+chat.id+")");
   }
-  chat.page=page.label;
+  if(chat.page!==page.label || Number(chat.spaceId)!==Number(task.spaceId)) chat.attachmentEpoch=Number(chat.attachmentEpoch||0)+1;
+  chat.page=page.label; chat.spaceId=task.spaceId; chat.pageSpaceId=task.spaceId;
   await saveRegistry(reg); return {task,page,binding};
 }
 
@@ -547,7 +615,8 @@ async function state(page) {
       .filter(x=>!x.disabled && recoveryWords.some(k=>x.label.toLowerCase().includes(k)));
     const alerts=[...document.querySelectorAll('[role="alert"], [data-testid*="error" i]')]
       .map(x=>(x.innerText||'').trim()).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).slice(-8);
-    const errorWords=["something went wrong","error generating","network error","unable to load conversation","try again later"];
+    const errorWords=["something went wrong","error generating","network error","unable to load conversation","try again later",
+      "context too long","maximum context length","conversation is too long","maximum length for this conversation","reached the maximum"];
     const knownErrors=[...document.querySelectorAll('main div, main span, main p, [role="main"] div, [role="main"] span, [role="main"] p')]
       .filter(x=>!x.closest('[data-message-author-role]')).map(x=>(x.innerText||'').trim()).filter(v=>v && v.length<300)
       .filter(v=>errorWords.some(k=>v.toLowerCase().includes(k))).filter((v,i,a)=>a.indexOf(v)===i).slice(-5);
@@ -581,7 +650,8 @@ function classifySnapshot(raw, heartbeat, task=null, effort=null) {
   const quietForSec=heartbeat.quietForSec||0;
   const threshold=Number(task?.stallThresholdSec)||stallThresholdSec(effort||raw.mode);
   let sessionState="IDLE", recommendation="NONE";
-  if(!raw.online || !raw.composerPresent) { sessionState="BLOCKED"; recommendation="ESCALATE"; }
+  if(contextExhausted(raw)) { sessionState="CONTEXT_EXHAUSTED"; recommendation="ROTATE_SESSION"; }
+  else if(!raw.online || !raw.composerPresent) { sessionState="BLOCKED"; recommendation="ESCALATE"; }
   else if(recoveryRequired(raw)) { sessionState="ERROR_RECOVERABLE"; recommendation="RECOVER_NATIVE"; }
   else if(raw.generating) {
     if(quietForSec>=threshold) { sessionState="SUSPECT_STALL"; recommendation="STOP_AND_CONTINUE"; }
@@ -867,6 +937,22 @@ async function applyConfiguredSessionModel(page, chat) {
   return null;
 }
 
+async function applyDispatchModel(page, chat, requestedModel=null, requestedEffort=null) {
+  const model=requestedModel || chat.model || null;
+  const effort=requestedEffort || chat.effort || null;
+  let selection=null;
+  if(model) selection=await applyModelSpec(page,model,effort);
+  else if(effort) {
+    await setEffort(page,effort);
+    const observed=observedModel((await state(page)).mode);
+    selection={model:null,effort:observed.effort||effort,observed,reapplied:true};
+  } else selection=await applyConfiguredSessionModel(page,chat);
+  if(requestedModel) chat.model=requestedModel;
+  if(requestedEffort) chat.effort=requestedEffort;
+  if(requestedModel || requestedEffort) await saveRegistry(reg);
+  return selection;
+}
+
 async function openProjectPage(page, projectName, knownUrl=null) {
   const current=await page.url();
   if(current.includes("/g/g-p-") && current.endsWith("/project")) {
@@ -904,6 +990,186 @@ async function openProjectPage(page, projectName, knownUrl=null) {
   await page.waitForURL(/\/g\/g-p-[^/]+\/project/, {timeout:15000});
   await waitForProjectReady(page,projectName,15000);
   return await page.url();
+}
+
+function managedSpacePlan(reg, account, preferredProfileId=null) {
+  const identity=reg.accounts?.[account]?.identity;
+  if(!identity) throw new Error("TARGET_IDENTITY_UNVERIFIED");
+  const observedSpaces=Object.values(reg.spaces||{}).filter(space=>space.identity===identity&&space.profileId);
+  if(!observedSpaces.length) throw new Error("NEEDS_LOGIN_OR_PROFILE_SCAN");
+  const profileIds=[...new Set(observedSpaces.map(space=>space.profileId).filter(Boolean))];
+  let profileId=preferredProfileId||null;
+  if(profileId && !profileIds.includes(profileId)) throw new Error("PROFILE_NOT_OBSERVED_FOR_LOGIN");
+  if(!profileId) {
+    if(profileIds.length!==1) throw new Error("PROFILE_AMBIGUOUS_FOR_LOGIN");
+    profileId=profileIds[0];
+  }
+  const source=observedSpaces.find(space=>space.profileId===profileId)||observedSpaces[0];
+  const accountName=source.accountName||reg.accounts?.[account]?.label||account;
+  const profileSuffix=profileIds.length>1?"-"+crypto.createHash("sha256").update(String(profileId)).digest("hex").slice(0,8):"";
+  const spaceName="chat-bridge-agent-"+slug(accountName)+profileSuffix;
+  return {identity,profileId,profileIds,accountName,spaceName};
+}
+
+async function accountManagedTask(reg, account, preferredProfileId=null) {
+  const plan=managedSpacePlan(reg,account,preferredProfileId);
+  const {profileId,accountName,spaceName:name}=plan;
+  const available=typeof listTaskSpaces==="function"?await listTaskSpaces():[];
+  const duplicates=available.filter(space=>space.name===name);
+  if(duplicates.length>1) throw new Error("AMBIGUOUS_SPACE: "+name);
+  const existing=duplicates[0];
+  if(existing && ["user","agentDelegatedToUser"].includes(existing.ownership)) {
+    const error=new Error("SPACE_IN_USER_CONTROL: "+name);
+    error.code="SPACE_IN_USER_CONTROL";
+    error.spaceName=name;
+    error.ownership=existing.ownership;
+    throw error;
+  }
+  if(existing?.profileId && existing.profileId!==profileId) throw new Error("SPACE_PROFILE_MISMATCH: "+name);
+  const task=await taskSpace(name,!existing?{profileId}:undefined);
+  return {task,spaceName:name,profileId,accountName};
+}
+
+async function consolidateAccountSpace(reg, account, options={}) {
+  const preferred=options.profileId||null, plan=managedSpacePlan(reg,account,preferred);
+  const identity=plan.identity;
+  const aliases=Object.entries(reg.accounts||{}).filter(([,record])=>record.identity===identity).map(([name])=>name);
+  const affected=[];
+  for(const [projectName,project] of Object.entries(reg.projects||{})) {
+    for(const alias of aliases) {
+      const binding=project.bindings?.[alias];
+      if(binding) affected.push({project:projectName,account:alias,from:binding.spaceName||null,to:plan.spaceName});
+    }
+  }
+  const preview={ok:true,dryRun:!options.confirm,account,aliases,profileId:plan.profileId,spaceName:plan.spaceName,affected};
+  if(!options.confirm) return preview;
+  const migration=coordinated("migration-check",{account});
+  if(!migration.safe) return {...preview,ok:false,status:"NOT_DRAINED",migration};
+  const {task}=await accountManagedTask(reg,account,plan.profileId);
+  const oldSpaces=new Set();
+  for(const item of affected) {
+    const binding=reg.projects[item.project].bindings[item.account];
+    if(binding.spaceName && binding.spaceName!==plan.spaceName) oldSpaces.add(binding.spaceName);
+    binding.spaceName=plan.spaceName;binding.profileId=plan.profileId;binding.spaceId=task.spaceId;binding.controlPage=null;
+  }
+  for(const chat of Object.values(reg.chats||{})) {
+    if(!aliases.includes(chat.account)) continue;
+    const binding=reg.projects?.[chat.project]?.bindings?.[chat.account];
+    if(!binding || binding.spaceName!==plan.spaceName) continue;
+    if(chat.spaceName && chat.spaceName!==plan.spaceName) oldSpaces.add(chat.spaceName);
+    chat.spaceName=plan.spaceName;chat.spaceId=task.spaceId;chat.pageSpaceId=task.spaceId;
+    if(chat.page) {
+      chat.page=null;chat.detachedAt=new Date().toISOString();chat.attachmentEpoch=Number(chat.attachmentEpoch||0)+1;
+    }
+  }
+  await saveRegistry(reg);
+  return {...preview,dryRun:false,spaceId:task.spaceId,oldSpaces:[...oldSpaces],migrated:true};
+}
+
+async function createProjectViaUI(page, projectName) {
+  await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000});
+  await page.waitForTimeout(600);
+  await detectWebRateLimit(page,"project-create-home");
+  const marked=await page.evaluate(()=>{
+    document.querySelectorAll("[data-chat-bridge-create-project]").forEach(e=>e.removeAttribute("data-chat-bridge-create-project"));
+    const candidates=[...document.querySelectorAll("button,a")].filter(el=>{
+      const text=((el.innerText||"")+" "+(el.getAttribute("aria-label")||"")).trim();
+      const style=getComputedStyle(el);
+      return el.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
+        /^(new project|create project|add project|新建项目|创建项目)$/i.test(text);
+    });
+    if(candidates.length!==1) return {count:candidates.length};
+    candidates[0].setAttribute("data-chat-bridge-create-project","1");
+    return {count:1};
+  });
+  if(marked.count!==1) throw new Error("PROJECT_CREATE_CONTROL_"+(marked.count?"AMBIGUOUS":"NOT_FOUND"));
+  try { await page.focus('[data-chat-bridge-create-project="1"]'); await page.keyboard.press("Enter"); }
+  catch { await page.click('[data-chat-bridge-create-project="1"]'); }
+  await page.waitForTimeout(400);
+  const prepared=await page.evaluate((name)=>{
+    const dialog=document.querySelector('[role="dialog"]')||document.body;
+    const fields=[...dialog.querySelectorAll('input,textarea')].filter(el=>{
+      const style=getComputedStyle(el);
+      return el.getClientRects().length>0&&style.visibility!=="hidden"&&style.display!=="none";
+    });
+    const field=fields.find(el=>/project|项目/i.test((el.getAttribute("placeholder")||"")+" "+(el.getAttribute("aria-label")||"")))||fields[0];
+    if(!field) return {field:false,buttons:0};
+    const setter=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(field),"value")?.set;
+    if(setter) setter.call(field,name); else field.value=name;
+    field.dispatchEvent(new Event("input",{bubbles:true}));
+    field.dispatchEvent(new Event("change",{bubbles:true}));
+    document.querySelectorAll("[data-chat-bridge-confirm-project]").forEach(e=>e.removeAttribute("data-chat-bridge-confirm-project"));
+    const buttons=[...dialog.querySelectorAll("button")].filter(el=>{
+      const style=getComputedStyle(el);
+      const text=((el.innerText||"")+" "+(el.getAttribute("aria-label")||"")).trim();
+      return !el.disabled&&el.getAttribute("aria-disabled")!=="true"&&el.getClientRects().length>0&&
+        style.visibility!=="hidden"&&style.display!=="none"&&/^(create|create project|创建|创建项目)$/i.test(text);
+    });
+    if(buttons.length===1) buttons[0].setAttribute("data-chat-bridge-confirm-project","1");
+    return {field:true,buttons:buttons.length};
+  },projectName);
+  if(!prepared.field || prepared.buttons!==1) throw new Error("PROJECT_CREATE_DIALOG_NOT_READY");
+  try { await page.focus('[data-chat-bridge-confirm-project="1"]'); await page.keyboard.press("Enter"); }
+  catch { await page.click('[data-chat-bridge-confirm-project="1"]'); }
+  await page.waitForURL(/\/g\/g-p-[^/]+\/project/,{timeout:20000});
+  await waitForProjectReady(page,projectName,15000);
+  return await page.url();
+}
+
+async function ensureProjectLocation(reg, projectName, account, options={}) {
+  const pr=projectRecord(reg,projectName);
+  const accountRecord=reg.accounts?.[account];
+  if(!accountRecord?.identity) return {ok:false,status:"NEEDS_LOGIN",project:projectName,account};
+  const current=pr.bindings?.[account]||null;
+  if(current?.projectUrl && bindingObserved(reg,account,current)) {
+    try {
+      const {task,spaceName,profileId}=await accountManagedTask(reg,account,current?.profileId||null);
+      const page=(await pagesOf(task))[0]||await task.newPage();
+      const url=await openProjectPage(page,projectName,current.projectUrl);
+      current.spaceName=spaceName;
+      current.profileId=profileId;
+      current.spaceId=task.spaceId;
+      current.projectUrl=url;
+      current.projectBase=url.replace(/\/project$/,'');
+      current.projectId=projectIdFromUrl(url);
+      current.verifiedAt=new Date().toISOString();
+      await saveRegistry(reg);
+      const readiness=bindingExecutionReadiness(pr,current);
+      return {ok:readiness.ready,status:readiness.ready?"READY":"CONTENT_NOT_READY",accessReady:true,
+        project:projectName,account,projectId:current.projectId,projectUrl:url,spaceName,created:false,
+        missing:readiness.missing,requirements:readiness.requirements||null,readiness:readiness.readiness||null};
+    } catch(error) {
+      if(!options.create) return {ok:false,status:"PROJECT_NOT_ACCESSIBLE",project:projectName,account,error:String(error.message||error)};
+    }
+  }
+  const {task,spaceName,profileId}=await accountManagedTask(reg,account,current?.profileId||null);
+  const page=(await pagesOf(task))[0]||await task.newPage();
+  let url=null;
+  let created=false;
+  try {
+    url=await openProjectPage(page,projectName,null);
+  } catch(error) {
+    if(!options.create) return {ok:false,status:"NEEDS_PROJECT_SETUP",project:projectName,account,spaceName};
+    if(!options.confirm) return {ok:false,status:"NEEDS_APPROVAL",project:projectName,account,spaceName};
+    url=await createProjectViaUI(page,projectName);
+    created=true;
+  }
+  const b=bindingFor(reg,projectName,account,true);
+  b.account=account;
+  b.projectUrl=url;
+  b.projectBase=url.replace(/\/project$/,'');
+  b.projectId=projectIdFromUrl(url);
+  b.spaceName=spaceName;
+  b.spaceId=task.spaceId;
+  b.profileId=profileId;
+  b.controlPage=page.label;
+  b.verifiedAt=new Date().toISOString();
+  await saveRegistry(reg);
+  await touchRuntime(projectName,{activeAccount:account,spaceName,lastCommand:"project ensure"});
+  const readiness=bindingExecutionReadiness(pr,b);
+  return {ok:readiness.ready,status:readiness.ready?"READY":"CONTENT_NOT_READY",accessReady:true,
+    project:projectName,account,projectId:b.projectId,projectUrl:url,spaceName,created,
+    missing:readiness.missing,requirements:readiness.requirements||null,readiness:readiness.readiness||null};
 }
 
 async function syncProject(reg, page, projectName, account, binding) {
@@ -1135,10 +1401,48 @@ async function clearUserControlPause(chat) {
   return changed;
 }
 
+async function detachTerminalTaskPages(reg, project=null, account=null) {
+  const graceSec=Math.max(30,Number(process.env.CHAT_BRIDGE_TERMINAL_TAB_GRACE_SEC||180)||180);
+  const rt=await loadRuntime(), now=Date.now(), closed=[];
+  const terminal=new Set(["COMPLETE","FAILED","CANCELLED","RESULT_RECORDED"]);
+  for(const taskRecord of Object.values(rt.tasks||{})) {
+    if(project && taskRecord.project!==project) continue;
+    if(account && (taskRecord.account||reg.chats?.[taskRecord.sessionId]?.account)!==account) continue;
+    if(!terminal.has(String(taskRecord.status||"").toUpperCase())) continue;
+    if(taskRecord.watchdogPendingNotification || taskRecord.externalResponsePending) continue;
+    const updated=Date.parse(taskRecord.updatedAt||taskRecord.stateUpdatedAt||taskRecord.createdAt||0);
+    if(!Number.isFinite(updated) || (now-updated)/1000<graceSec) continue;
+    const chat=taskRecord.sessionId?reg.chats?.[taskRecord.sessionId]:null;
+    if(!chat?.page || chat.status!=="active") continue;
+    const otherActive=Object.values(rt.tasks||{}).some(other=>other.taskId!==taskRecord.taskId &&
+      activeTaskStatus(other.status) && other.sessionId===chat.id);
+    if(otherActive) continue;
+    let opened;
+    try { opened=await openBoundTask(reg,chat.project,chat.account,{pauseOnUserControl:true}); }
+    catch { continue; }
+    let page;
+    try { page=opened.task.page(chat.page); } catch { continue; }
+    const tabs=await opened.task.tabs().catch(()=>[]);
+    const tab=tabs.find(item=>item.label===chat.page);
+    if(!tab || tab.active || tab.openedBy!=="agent") continue;
+    const snapshot=await state(page).catch(()=>null);
+    if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
+    const oldPage=chat.page;
+    try { await page.close(); } catch { continue; }
+    chat.page=null;
+    chat.detachedAt=new Date().toISOString();
+    chat.attachmentEpoch=Number(chat.attachmentEpoch||0)+1;
+    closed.push({taskId:taskRecord.taskId,sessionId:chat.id,page:oldPage});
+  }
+  if(closed.length) await saveRegistry(reg);
+  return closed;
+}
+
 async function watchOnce(reg, project=null, account=null, options={}) {
   const rt=await loadRuntime(), results=[];
   const taskGapMs=Math.max(10000,Number(process.env.CHAT_BRIDGE_WATCH_TASK_GAP_MS||10000)||10000);
-  const tasks=Object.values(rt.tasks||{}).filter(t=>!t.watchdogPausedForUserControl &&
+  const tasks=options.skipTasks?[]:Object.values(rt.tasks||{}).filter(t=>!t.watchdogPausedForUserControl &&
+    (!options.taskId||t.taskId===options.taskId) &&
     (activeTaskStatus(t.status)||(t.status==="BLOCKED"&&t.watchdogPendingNotification)) && (!project||t.project===project) &&
     (!account||(reg.chats[t.sessionId]?.account||t.account||reg.projects[t.project]?.activeAccount||reg.defaultAccount)===account));
   let lastVisitedAt=0;
@@ -1163,7 +1467,23 @@ async function watchOnce(reg, project=null, account=null, options={}) {
       const {page}=await ensurePage(reg,chat,{pauseOnUserControl:true});
       const observed=await observeSession(chat,page,task);
       let recovery={action:"NONE"}, notification=null;
-      if(options.autoRecover!==false && ["ERROR_RECOVERABLE","IDLE_INCOMPLETE","SUSPECT_STALL","BLOCKED"].includes(observed.sessionState)) {
+      if(observed.sessionState==="CONTEXT_EXHAUSTED") {
+        const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
+        live.status="BLOCKED";
+        live.blockedReason="CONTEXT_EXHAUSTED";
+        live.contextExhaustedAt=new Date().toISOString();
+        live.recommendation="ROTATE_SESSION";
+        if(options.autoRecover!==false && !live.watchdogNotifiedAt) {
+          notification=await notifyController(reg,live,`[WATCHDOG]
+task_id: ${live.taskId}
+status: BLOCKED
+session_state: CONTEXT_EXHAUSTED
+role: ${live.role||chat.role}
+summary: Conversation reached a hard context limit. Do not retry/continue this Chat; prepare a checkpointed replacement session.`);
+          if(notification.sent) live.watchdogNotifiedAt=new Date().toISOString();
+        }
+        latest.tasks[live.taskId]=live; await saveRuntime(latest);
+      } else if(options.autoRecover!==false && ["ERROR_RECOVERABLE","IDLE_INCOMPLETE","SUSPECT_STALL","BLOCKED"].includes(observed.sessionState)) {
         recovery=await gradedRecover(reg,chat,page,task,observed,options);
       } else if(observed.sessionState==="IDLE_COMPLETE") {
         const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
@@ -1235,7 +1555,7 @@ async function watchOnce(reg, project=null, account=null, options={}) {
       results.push({taskId:task.taskId,role:task.role,sessionId:chat?.id||task.sessionId||null,state:"WATCH_ERROR",error:error.message,watchErrorCount:live.watchErrorCount,notification});
     }
   }
-  const lifecycleProjects=project ? [project] : Object.keys(reg.projects||{}).filter(p=>normalizeLifecycle(reg.projects[p]).autoReconcile);
+  const lifecycleProjects=options.skipLifecycle?[]:(project ? [project] : Object.keys(reg.projects||{}).filter(p=>normalizeLifecycle(reg.projects[p]).autoReconcile));
   for(const p of lifecycleProjects) {
     if(account && activeAccount(reg,p,null)!==account) continue;
     if(options.autoRecover===false) {
@@ -1248,6 +1568,10 @@ async function watchOnce(reg, project=null, account=null, options={}) {
     if(waitMs && lastVisitedAt) await new Promise(resolve=>setTimeout(resolve,waitMs));
     const lifecycle=await maybeNotifyProjectReconcile(reg,p,account);
     if(lifecycle) { lastVisitedAt=Date.now(); results.push({project:p,projectLifecycle:lifecycle}); }
+  }
+  if(options.autoRecover!==false) {
+    const closed=await detachTerminalTaskPages(reg,project,account);
+    if(closed.length) results.push({state:"TERMINAL_TABS_DETACHED",closed});
   }
   return results;
 }
@@ -1309,23 +1633,37 @@ async function conversationLifecycle(reg, chat, action) {
 
 async function pruneProjectSpace(reg, project, account=null) {
   const a=activeAccount(reg,project,account), {binding,task}=await openBoundTask(reg,project,a);
+  const rt=await loadRuntime();
   const detached=[];
   while(true) {
     const item=await reclaimIdlePageSlot(reg,project,a,task,binding,null);
     if(!item) break;
     detached.push(item);
   }
-  const pages=await pagesOf(task), keep=new Set([binding.controlPage].filter(Boolean));
-  for(const c of Object.values(reg.chats)) {
-    if(c.project===project && c.account===a && c.status==="active" && c.page) keep.add(c.page);
-  }
+  const pages=await pagesOf(task), tabs=await task.tabs().catch(()=>[]);
+  const protection=spaceProtection(reg,rt,binding,task);
+  for(const tab of tabs) if(tab.active&&tab.label) protection.labels.add(tab.label);
   const closed=[];
   for(const page of pages) {
-    if(keep.has(page.label)) continue;
-    await page.close().catch(()=>{}); closed.push(page.label);
+    if(protection.labels.has(page.label)) continue;
+    const tab=tabs.find(item=>item.label===page.label);
+    if(!tab || tab.active || tab.openedBy!=="agent") continue;
+    const snapshot=await state(page).catch(()=>null);
+    if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
+    try { await page.close(); }
+    catch { continue; }
+    closed.push(page.label);
+    for(const chat of Object.values(reg.chats||{})) {
+      if(samePhysicalSpace(chat,binding,task) && chat.page===page.label) {
+        chat.page=null;
+        chat.detachedAt=new Date().toISOString();
+        chat.attachmentEpoch=Number(chat.attachmentEpoch||0)+1;
+      }
+    }
   }
+  if(closed.length) await saveRegistry(reg);
   return {ok:true,project,account:a,spaceName:binding.spaceName,spaceId:task.spaceId,
-    kept:[...keep],detached,closed};
+    protected:[...protection.labels],detached,closed};
 }
 
 async function gcAgentSpaces(reg, confirm=false) {
@@ -1360,7 +1698,7 @@ const project=opt("project",cmd==="watch"?null:reg.defaultProject);
 const accountArg=opt("account",null);
 
 if(cmd==="help"){
-  print("chat-bridge commands: init [--root-controller ROLE], policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, event list, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE], watch, read, status, send [--task ID --controller ROLE], ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune|gc|scan|map|restore|label");
+  print("chat-bridge commands: init [--root-controller ROLE], project ensure, policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, event list, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE], watch, read, status, send [--task ID --controller ROLE], ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune|gc|consolidate|scan|map|restore|label");
 }
 else if(cmd==="topology"){
   print(TOPOLOGY.topologyPreview(reg,await loadRuntime()));
@@ -1376,6 +1714,16 @@ else if(cmd==="init"){
   if(sp){ b.spaceName=sp; b.spaceId=null; b.controlPage=null; }
   await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:b.spaceName,rootController:pr.rootController,lastCommand:"init"});
   print({ok:true,project:p,account:a,rootController:pr.rootController,spaceName:b.spaceName,projectUrl:b.projectUrl});
+}
+else if(cmd==="project"){
+  const sub=args[1]||"ensure";
+  if(sub!=="ensure") throw new Error("project subcommand must be ensure");
+  const p=project||opt("project",null);
+  if(!p) throw new Error("project ensure requires --project");
+  const a=activeAccount(reg,p,accountArg);
+  const create=args.includes("--create");
+  const confirm=args.includes("--confirm");
+  print(await ensureProjectLocation(reg,p,a,{create,confirm}));
 }
 else if(cmd==="policy"){
   const sub=args[1]||"show", p=project; if(!p) throw new Error("policy requires --project");
@@ -1533,6 +1881,9 @@ else if(cmd==="space"){
   const sub=args[1]||"show";
   if(sub==="gc") {
     print(await gcAgentSpaces(reg,args.includes("--confirm")));
+  } else if(sub==="consolidate") {
+    const a=accountArg||reg.defaultAccount||DEFAULT_ACCOUNT;
+    print(await consolidateAccountSpace(reg,a,{confirm:args.includes("--confirm"),profileId:opt("profile",null)}));
   } else {
     const p=project; if(!p) throw new Error("--project required");
     const a=activeAccount(reg,p,accountArg), b=bindingFor(reg,p,a,true);
@@ -1549,7 +1900,7 @@ else if(cmd==="space"){
       const result=await pruneProjectSpace(reg,p,a);
       await touchRuntime(p,{activeAccount:a,spaceName:b.spaceName,lastCommand:"space prune"});
       print(result);
-    } else throw new Error("space subcommand must be show, bind, prune, or gc");
+    } else throw new Error("space subcommand must be show, bind, prune, gc, or consolidate");
   }
 }
 else if(cmd==="register"){
@@ -1629,6 +1980,10 @@ else if(cmd==="task"){
       account:opt("account",old.account||taskAccount||null),sessionId,
       issue:opt("issue",old.issue||null),github:opt("github",old.github||null),status:opt("status",old.status||"RUNNING"),
       affinityKey:opt("affinity-key",old.affinityKey||null),
+      workgroupId:opt("workgroup",old.workgroupId||null),
+      requestedModel:opt("model",old.requestedModel||null),
+      requestedEffort:opt("effort",old.requestedEffort||null),
+      resourcePolicyVersion:opt("resource-policy-version",old.resourcePolicyVersion||null),
       completionMode:normalizeCompletionMode(opt("completion-mode",old.completionMode||"durable")),
       originalMessage:opt("original-message",old.originalMessage||null),
       baselineAssistantCount:baselineCountText!==null?Number(baselineCountText):old.baselineAssistantCount,
@@ -1652,7 +2007,8 @@ else if(cmd==="watch"){
   const maxAttempts=Math.max(1,Number(opt("max-recovery","3"))||3), maxTotalRecoveries=Math.max(1,Number(opt("max-total-recovery","8"))||8),
     cooldownSec=Math.max(10,Number(opt("cooldown","45"))||45), aggressive=args.includes("--aggressive"), autoRecover=!args.includes("--dry-run");
   const quiet=args.includes("--quiet");
-  const results=await watchOnce(reg,project,accountArg,{autoRecover,maxAttempts,maxTotalRecoveries,cooldownSec,aggressive});
+  const results=await watchOnce(reg,project,accountArg,{autoRecover,maxAttempts,maxTotalRecoveries,cooldownSec,aggressive,
+    taskId:opt("task-id",null),skipTasks:args.includes("--skip-tasks"),skipLifecycle:args.includes("--skip-lifecycle")});
   const noteworthy=results.some(r=>r.state==="WATCH_ERROR" || r.notification?.sent || r.projectLifecycle?.state==="SENT" || r.projectLifecycle?.state==="NOT_SENT" || (r.recovery?.action&&!["NONE","COOLDOWN"].includes(r.recovery.action)));
   if(!quiet || noteworthy) print({at:new Date().toISOString(),project:project||null,iteration:1,autoRecover,results});
 }
@@ -1673,8 +2029,9 @@ else if(["archive","retire","delete","forget"].includes(cmd)){
 else if(["read","status","send","ask","model","effort","stop","retry","recover","resend"].includes(cmd)){
   const key=args[1]; if(!key) throw new Error("chat key required");
   const chat=resolveChat(reg,key,project,accountArg);
-  if(["send","ask","retry","recover","resend"].includes(cmd)) await clearUserControlPause(chat);
-  const {page,binding}=await ensurePage(reg,chat);
+  const background=args.includes("--background");
+  if(["send","ask","retry","recover","resend"].includes(cmd) && !background) await clearUserControlPause(chat);
+  const {page,binding}=await ensurePage(reg,chat,{pauseOnUserControl:background});
   await touchRuntime(chat.project,{activeAccount:chat.account,spaceName:binding.spaceName,lastCommand:cmd,lastSession:chat.id});
   if(cmd==="read") print((await state(page)).lastAssistant);
   if(cmd==="status"){
@@ -1687,7 +2044,8 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
   }
   if(cmd==="send"){
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
-    const dispatchModel=await applyConfiguredSessionModel(page,chat);
+    const requestedModel=opt("model",null), requestedEffort=opt("effort",null);
+    const dispatchModel=await applyDispatchModel(page,chat,requestedModel,requestedEffort);
     const taskOpt=opt("task",null), taskId=taskOpt?assertTaskId(taskOpt):null; let tracked=null, priorTask=null;
     if(taskId){
       const before=await state(page), rt=await loadRuntime(), old=rt.tasks[taskId]||{};
@@ -1706,6 +2064,10 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
       tracked={...old,...route,taskId,project:chat.project,role:chat.role,account:chat.account,sessionId:chat.id,status:"DISPATCHED",
         controllerSessionRef:callerRef,replyToSessionRef:replyRef,
         affinityKey:opt("affinity-key",old.affinityKey||chat.affinityKey||null),
+        workgroupId:opt("workgroup",old.workgroupId||chat.workgroupId||null),
+        requestedModel:requestedModel||old.requestedModel||chat.model||null,
+        requestedEffort:requestedEffort||old.requestedEffort||chat.effort||null,
+        resourcePolicyVersion:opt("resource-policy-version",old.resourcePolicyVersion||null),
         completionMode:normalizeCompletionMode(opt("completion-mode",old.completionMode||"durable")),
         originalMessage:msg,baselineAssistantCount:before.assistantCount,baselineAssistantHash:hashText(before.lastAssistant||""),baselineAssistantId:before.lastAssistantId||null,
         dispatchedAt:new Date().toISOString(),recoveryAttempts:0,totalRecoveryAttempts:0,lastRecoveryAt:null,lastRecoveryMethod:null,watchErrorCount:0,watchdogNotifiedAt:null,watchdogResultNotifiedAt:null,watchdogResultNotification:null,
@@ -1765,7 +2127,7 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
 }
 else if(cmd==="new"){
   const p=project; if(!p) throw new Error("--project required");
-  const a=activeAccount(reg,p,accountArg), name=opt("name","New chat"), role=opt("role",name), first=opt("message",null), affinityKey=opt("affinity-key",null);
+  const a=activeAccount(reg,p,accountArg), name=opt("name","New chat"), role=opt("role",name), first=opt("message",null), affinityKey=opt("affinity-key",null), workgroupId=opt("workgroup",null);
   if(!first) throw new Error("--message required");
   const conflict=Object.values(reg.chats).find(c=>c.project===p&&c.account===a&&c.role===role&&c.status==="active");
   if(conflict&&!args.includes("--allow-duplicate-role")) throw new Error(`Active role already exists: ${role} (${conflict.id})`);
@@ -1779,7 +2141,7 @@ else if(cmd==="new"){
     try {
       applied=await applyModelSpec(page,model,requestedEffort);
     } catch(error) {
-      if(!deferrableModelUiError(error)) throw error;
+      if(args.includes("--strict-model") || !deferrableModelUiError(error)) throw error;
       const observed=observedModel((await state(page)).mode);
       applied={model,effort:requestedEffort||observed.effort||null,observed,deferredUntilDispatch:true};
     }
@@ -1787,8 +2149,8 @@ else if(cmd==="new"){
     await sendMessage(page,first); await page.waitForURL(/\/c\/[0-9a-f-]+/i,{timeout:30000});
     const url=await page.url(), id=convId(url), projectBase=url.includes("/g/g-p-")?url.replace(/\/c\/[^/]+.*$/,''):binding.projectBase;
     if(projectBase){binding.projectBase=projectBase;binding.projectUrl=projectBase+"/project";binding.projectId=projectIdFromUrl(projectBase);}
-    reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model,effort:requestedEffort||applied.effort||null,affinityKey,
-      spaceName:binding.spaceName,spaceId:task.spaceId,page:page.label,createdAt:new Date().toISOString()};
+    reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model,effort:requestedEffort||applied.effort||null,affinityKey,workgroupId,
+      spaceName:binding.spaceName,spaceId:task.spaceId,pageSpaceId:task.spaceId,page:page.label,attachmentEpoch:1,createdAt:new Date().toISOString()};
     await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:binding.spaceName,lastCommand:"new",lastSession:id});
     print({...reg.chats[id],modelSelection:applied.observed,baselineAssistantCount:before.assistantCount,
       baselineAssistantHash:hashText(before.lastAssistant||""),baselineAssistantId:before.lastAssistantId||null,

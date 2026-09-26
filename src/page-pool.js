@@ -1,6 +1,6 @@
 (function installPagePool(globalObject) {
   function taskActive(status = "") {
-    return !["COMPLETE", "FAILED", "CANCELLED", "BLOCKED"]
+    return !["COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "RESULT_RECORDED"]
       .includes(String(status).toUpperCase());
   }
 

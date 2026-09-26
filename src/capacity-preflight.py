@@ -2,7 +2,7 @@
 from __future__ import annotations
 import argparse, hashlib, json, pathlib, re, sys, time
 
-TERMINAL = {'COMPLETE','FAILED','CANCELLED','BLOCKED'}
+TERMINAL = {'COMPLETE','FAILED','CANCELLED','BLOCKED','RESULT_RECORDED'}
 
 def read_json(path, default):
     try: return json.loads(path.read_text())
@@ -23,6 +23,19 @@ def cooldown(state, reg, account, now):
     except Exception:
         active=False
     return {'active':active,'until':until,'strikes':value.get('strikes',0)}
+
+def binding_execution_ready(project, binding):
+    req=(project or {}).get("requirements") or {}
+    context=str(req.get("contextVersion") or "").strip()
+    required=set(req.get("tools") or [])
+    if not context and not required:
+        return True
+    ready=(binding or {}).get("readiness") or {}
+    if context and str(ready.get("contextVersion") or "")!=context:
+        return False
+    if not required.issubset(set(ready.get("tools") or [])):
+        return False
+    return bool(ready.get("attestedAt"))
 
 def snapshot(config, state, project, now=None):
     now=time.time() if now is None else float(now)
@@ -55,6 +68,7 @@ def snapshot(config, state, project, now=None):
         bound_id=binding.get('projectId') or (re.search(r'/g/(g-p-[^/]+)',binding.get('projectUrl') or '') or [None,None])[1]
         canonical=lambda value: (re.search(r'g-p-[0-9a-f]{32}',value or '') or [None])[0]
         if observed and (not canonical(bound_id) or canonical(bound_id) not in {canonical(item) for item in observed}): reasons.append('PROJECT_NOT_OBSERVED_FOR_LOGIN')
+        if not binding_execution_ready(proj,binding): reasons.append('PROJECT_CONTENT_NOT_READY')
         if cd['active']: reasons.append('WEB_COOLDOWN')
         allowed=proj.get('allowedAccounts')
         if isinstance(allowed,list) and account not in allowed: reasons.append('NOT_IN_PROJECT_ACCOUNT_POOL')

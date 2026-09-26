@@ -89,7 +89,7 @@ Create a session when:
 - a specialist role should remain stable,
 - or an existing Chat has become unhealthy or too context-heavy.
 
-Reuse an existing Chat when the new task is in the same workstream and its context remains useful. Normally keep one active session per logical role/project/account. When replacing a context-heavy or unhealthy session, prefer `chat-bridge retire ROLE --project "PROJECT"` before creating the replacement.
+Reuse an existing Chat when the new task is in the same workstream and its context remains useful. Normally keep one active concrete session per logical role, but treat the role/controller as a stable logical identity that can rotate to a successor conversation. Do not manually retire a context-exhausted controller before the successor has acknowledged the handoff. Use checkpoint + `control rotation-prepare` + successor `rotation-ack`; only then retire the predecessor and route late callbacks to the committed successor.
 
 Create:
 
@@ -129,6 +129,9 @@ chat-bridge task clear TASK_ID --project "PROJECT"
 ```
 
 ### 6. Watchdog and liveness
+
+Before normal orchestration after an upgrade, use the persistent management plane rather than sending ad-hoc chat instructions: pause/drain admission, install/check, broadcast a versioned reload request, collect per-controller ACKs, canary, then resume the acknowledged scope. `control status` distinguishes active work, durable results awaiting ACK, unknown delivery, blockers, and known completion; an empty queue alone is not project completion.
+
 
 Every dispatched work item should be tracked with `--task TASK_ID`. The local watchdog owns mechanical liveness/recovery; the conductor owns project decisions.
 
@@ -177,52 +180,16 @@ Do not silently downgrade on quota/model availability errors. `modelSelection` i
 
 ## Communication protocol
 
-Every dispatched task should carry a small envelope:
+The business envelope should contain the goal, durable Issue/PR references, acceptance criteria, role, and constraints. Do not repeat or invent callback destination metadata in every prompt: `queue submit` persists the owning caller/task and injects the versioned control footer automatically.
 
-```text
-[TASK]
-task_id: <stable id>
-issue: <repo>#<number>
-from: conductor
-to: <agent alias>
-reply_to: <owning controller>
-escalation_to: <root controller>
-attempt: 1
-max_hops: 5
-
-Goal:
-...
-
-Acceptance criteria:
-...
-
-Required durable update:
-- Update the GitHub Issue/PR first.
-- Then send a callback to the owning controller with the GitHub URL and concise result.
-```
-
-Agent callback:
-
-```text
-[RESULT]
-task_id: ...
-from: <agent alias>
-to: <owning controller>
-status: COMPLETE | BLOCKED | ERROR
-github: <issue/pr url>
-summary: ...
-next: ...
-```
-
-The agent must update GitHub before sending `COMPLETE`.
-
-Callback command:
+Workers update durable GitHub/project state first, then report through:
 
 ```bash
-chat-bridge send <owning-controller> "[RESULT] ..." --project "PROJECT"
+chat-bridge queue result --task TASK_ID --status COMPLETE \
+  --summary "concise result" --github "ISSUE_OR_PR_URL"
 ```
 
-This callback creates a new user turn in the owning controller Chat and triggers that controller's next orchestration round.
+Bridge records `RESULT_RECORDED` before callback delivery and resolves the owning controller from persisted task state. The controller reviews durable evidence and sends `queue ack ... --status ACCEPTED`; only then does the task become `COMPLETE`. Callback delivery alone and a worker's self-reported COMPLETE are not acceptance.
 
 ## Continuous execution loop
 
@@ -232,9 +199,9 @@ This callback creates a new user turn in the owning controller Chat and triggers
 4. Allocate model and effort.
 5. Dispatch tasks with task IDs and GitHub references.
 6. Agents perform work.
-7. Agents update GitHub first.
-8. Agents callback the owning controller through chat-bridge.
-9. On callback, the owning controller reconciles GitHub state, reviews evidence, and dispatches the next round or escalates to the root controller.
+7. Agents update GitHub first and submit `queue result`.
+8. ChatBridge records the result, routes a persistent callback to the current owning controller, and keeps unknown delivery reconcilable.
+9. On callback, the owning controller reconciles GitHub state, reviews evidence, returns `queue ack`, and only then dispatches the next round or escalates.
 10. If project lifecycle auto-reconcile is enabled and all non-root tasks become terminal after new durable progress, treat the bridge `RECONCILE_REQUIRED` event as a prompt to re-read durable state and choose the next genuinely runnable batch. Do not replay completed work and do not let the bridge decide project priorities.
 11. Continue until project-level acceptance criteria are met.
 
@@ -258,9 +225,7 @@ The conductor should keep the umbrella Issue updated with:
 
 ## Local work routing
 
-If work requires local filesystem, GUI, browser state, builds, or machine-specific tools:
-- use the Remote Desktop Commander plugin, or
-- use the Web Codex / codex-chatgpt-web environment when appropriate.
+If work requires local filesystem, builds, Git/GitHub CLI, or machine-specific tools, use the account's authorized plugin whose display name begins with `ChatGPT Computer`, verify the actual target host/capabilities, and execute on the configured host. Plugin suffixes differ by ChatGPT account and are not stable identity. For this deployment, Git/GitHub writes default to local `git`/`gh` on the approved execution host. Do not silently use Remote Desktop Commander or a different Web GitHub identity.
 
 If work does not require local state, keep it in Chat and GitHub rather than introducing local dependencies.
 

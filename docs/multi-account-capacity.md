@@ -10,7 +10,7 @@ Project systems such as QuantCompany consume this layer while keeping local rese
 
 ## Topology
 
-A logical project may bind multiple ChatGPT accounts. Each project/account pair owns one stable Ego Space and may host multiple managed conversation tabs. Existing conversation identity is sticky and never silently migrates between accounts.
+A logical project may bind multiple ChatGPT accounts. Each verified login/Profile normally owns one Bridge-managed Ego Space shared by that account's Project/session tabs. Project/account bindings point to real ChatGPT Project locations inside that browser identity; they do not create extra capacity by creating extra Spaces. Existing conversation identity is sticky and never silently migrates between accounts.
 
 ## Capacity projection
 
@@ -35,7 +35,7 @@ Selection applies only to new work and never moves an existing conversation.
 
 Callers may provide an opaque affinity_key. Chat Bridge persists and compares it only for sticky placement; it must not interpret project-domain semantics.
 
-new --auto-account --affinity-key KEY selects an account from local state, creates the conversation in that project/account Ego Space, and persists selected account plus affinity metadata. Explicit --account overrides auto placement.
+new --auto-account --affinity-key KEY selects an account from local state, creates the conversation in that verified login/Profile's managed Space and target Project location, and persists selected account plus affinity metadata. Explicit --account overrides auto placement.
 
 ## Event transport
 
@@ -53,7 +53,7 @@ No session tokens are exported. Chat Bridge adds no shell, filesystem, Python, d
 
 - Capacity projection tests cover multiple accounts and cooldown isolation.
 - Selector tests cover explicit override, sticky affinity, deterministic least-load placement, and no eligible account.
-- new --auto-account uses the selected project/account Space.
+- new --auto-account uses the selected verified login/Profile managed Space and target Project location.
 - Existing active session affinity never migrates silently.
 - Event isolation/cursor tests continue to pass.
 - npm test, static and pacing checks pass.

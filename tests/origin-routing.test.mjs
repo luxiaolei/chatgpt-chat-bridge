@@ -22,12 +22,12 @@ test('an observed origin Space selects its login for a bound Project without --a
     const run=(...args)=>spawnSync(path.join(root,'bin/chat-bridge'),args,{env,encoding:'utf8'});
     const same=run('event','list','--project','P');
     assert.equal(same.status,0,same.stderr);
-    const selected=JSON.parse((await readFile(capture,'utf8')).split('\n')[0].split(' = ')[1].replace(/;$/,''));
-    assert.equal(selected[selected.indexOf('--account')+1],'b');
+    assert.equal(JSON.parse(same.stdout).account,'b');
+    await assert.rejects(readFile(capture,'utf8'),{code:'ENOENT'});
     const explicit=run('event','list','--project','P','--account','a');
     assert.equal(explicit.status,0,explicit.stderr);
-    const overridden=JSON.parse((await readFile(capture,'utf8')).split('\n')[0].split(' = ')[1].replace(/;$/,''));
-    assert.equal(overridden[overridden.indexOf('--account')+1],'a');
+    assert.equal(JSON.parse(explicit.stdout).account,'a');
+    await assert.rejects(readFile(capture,'utf8'),{code:'ENOENT'});
     const help=spawnSync(path.join(root,'bin/chat-bridge'),['help'],
       {env:{...env,CHAT_BRIDGE_FROM_SPACE:'unrelated'},encoding:'utf8'});
     assert.equal(help.status,0,help.stderr);
@@ -35,8 +35,15 @@ test('an observed origin Space selects its login for a bound Project without --a
       {env:{...env,CHAT_BRIDGE_FROM_SPACE:''},encoding:'utf8'});
     assert.equal(unknownOrigin.status,2);
     assert.match(unknownOrigin.stderr,/AMBIGUOUS_PROJECT_ACCOUNT/);
-    delete registry.projects.P.bindings.b;
-    await writeFile(path.join(config,'registry.json'),JSON.stringify(registry));
+    const store=path.join(root,'src/state-store.py');
+    const current=spawnSync('python3',[store,'get',config,state,'registry'],{encoding:'utf8'});
+    assert.equal(current.status,0,current.stderr);
+    const base=JSON.parse(current.stdout), next=structuredClone(base);
+    delete next.projects.P.bindings.b;
+    const updated=spawnSync('python3',[store,'put',config,state,'registry'],{
+      input:JSON.stringify({base,next}),encoding:'utf8'
+    });
+    assert.equal(updated.status,0,updated.stderr);
     const missing=run('event','list','--project','P');
     assert.equal(missing.status,2);
     assert.match(missing.stderr,/PROJECT_NOT_BOUND_FOR_ORIGIN_ACCOUNT/);
@@ -73,8 +80,8 @@ test('stable login origin survives Space rename and rejects unknown identities',
     const env={...process.env,CHAT_BRIDGE_CONFIG_DIR:config,CHAT_BRIDGE_STATE_DIR:state,EGO_BROWSER_BIN:fake,CAPTURE:capture,CHAT_BRIDGE_FROM_ACCOUNT_ID:accountId};
     const result=spawnSync(path.join(root,'bin/chat-bridge'),['event','list','--project','P'],{env,encoding:'utf8'});
     assert.equal(result.status,0,result.stderr);
-    const args=JSON.parse((await readFile(capture,'utf8')).split('\n')[0].split(' = ')[1].replace(/;$/,''));
-    assert.equal(args[args.indexOf('--account')+1],'b');
+    assert.equal(JSON.parse(result.stdout).account,'b');
+    await assert.rejects(readFile(capture,'utf8'),{code:'ENOENT'});
     const bad=spawnSync(path.join(root,'bin/chat-bridge'),['event','list','--project','P'],{env:{...env,CHAT_BRIDGE_FROM_ACCOUNT_ID:'user-x'},encoding:'utf8'});
     assert.equal(bad.status,2);
     assert.match(bad.stderr,/ORIGIN_ACCOUNT_NOT_VERIFIED/);

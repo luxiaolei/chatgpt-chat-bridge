@@ -112,13 +112,17 @@ def main():
 
         if command == "get":
             current = json.loads(db.execute("SELECT payload FROM documents WHERE kind=?", (kind,)).fetchone()[0])
+            # SQLite is authoritative. Repair compatibility projection opportunistically.
+            project(destination, current)
         else:
             db.execute("BEGIN IMMEDIATE")
             current = json.loads(db.execute("SELECT payload FROM documents WHERE kind=?", (kind,)).fetchone()[0])
             current = apply(current, payload["base"], payload["next"])
             db.execute("UPDATE documents SET payload=? WHERE kind=?", (json.dumps(current, ensure_ascii=False), kind))
-            project(destination, current)
             db.commit()
+            # Project only after the authoritative transaction commits. If a crash occurs
+            # before this write, the next get repairs the JSON projection from SQLite.
+            project(destination, current)
         print(json.dumps(current, ensure_ascii=False))
     except Exception:
         if db.in_transaction:

@@ -70,7 +70,7 @@ def reconcile_pending(reg, runtime, project, now=None):
     if policy.get("autoReconcile") is not True:
         return False
     root = str(policy.get("reconcileRole") or cfg.get("rootController") or "conductor").strip()
-    terminal = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED"}
+    terminal = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "RESULT_RECORDED"}
     tasks = [t for t in runtime.get("tasks", {}).values() if t.get("project") == project]
     for task in tasks:
         status = str(task.get("status") or "").upper()
@@ -155,31 +155,49 @@ def run(action, config, state, args):
         script, *command = args
         project = option(command, "--project")
         runtime = read_json(state / "runtime.json")
-        terminal = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED"}
-        accounts = []
-        for task in runtime.get("tasks", {}).values():
+        terminal = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "RESULT_RECORDED"}
+        task_rows = []
+        for task_key, task in runtime.get("tasks", {}).items():
             if project and task.get("project") != project:
                 continue
             if task.get("watchdogPausedForUserControl"):
                 continue
             status = str(task.get("status") or "").upper()
-            if status not in terminal or (status == "BLOCKED" and task.get("watchdogPendingNotification")):
-                accounts.append(task_account(reg, task))
+            pending = status == "BLOCKED" and task.get("watchdogPendingNotification")
+            if status not in terminal or pending:
+                task_rows.append((str(task.get("taskId") or task_key), task_account(reg, task)))
+        lifecycle_rows = []
         for name in ([project] if project else reg.get("projects", {})):
-            if reconcile_pending(reg, runtime, name):
-                accounts.append(project_account(reg, name))
-        result = 0
-        for account in dict.fromkeys(accounts):
-            if cooldown(reg, state, account)["active"]:
-                continue
-            stamp = state / ("ui-pacing-" + scope(reg, account) + ".last")
+            if name and reconcile_pending(reg, runtime, name):
+                lifecycle_rows.append((name, project_account(reg, name)))
+
+        def wait_for_lane(account):
+            stamp_path = state / ("ui-pacing-" + scope(reg, account) + ".last")
             try:
-                wait = max(0, max(10, float(os.environ.get("CHAT_BRIDGE_UI_MIN_INTERVAL_SEC", "10"))) - (time.time() - float(stamp.read_text().strip())))
+                wait = max(0, max(10, float(os.environ.get("CHAT_BRIDGE_UI_MIN_INTERVAL_SEC", "10"))) -
+                           (time.time() - float(stamp_path.read_text().strip())))
             except (FileNotFoundError, ValueError):
                 wait = 0
             if wait:
                 time.sleep(wait)
-            completed = subprocess.run([script, *command, "--account", account], check=False)
+
+        result = 0
+        for task_id, account in task_rows:
+            if not task_id or cooldown(reg, state, account)["active"]:
+                continue
+            wait_for_lane(account)
+            completed = subprocess.run([script, *command, "--account", account,
+                                        "--task-id", task_id, "--skip-lifecycle"], check=False)
+            if completed.returncode and not result:
+                result = completed.returncode
+        for name, account in lifecycle_rows:
+            if cooldown(reg, state, account)["active"]:
+                continue
+            wait_for_lane(account)
+            extra = ["--account", account, "--skip-tasks"]
+            if not project:
+                extra += ["--project", name]
+            completed = subprocess.run([script, *command, *extra], check=False)
             if completed.returncode and not result:
                 result = completed.returncode
         raise SystemExit(result)
@@ -207,30 +225,35 @@ def run(action, config, state, args):
             account = matches[0].get("account") or account
     if action == "watch":
         runtime = read_json(state / "runtime.json")
-        terminal = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED"}
-        for task in runtime.get("tasks", {}).values():
-            a = task_account(reg, task)
-            if project and task.get("project") != project:
-                continue
-            if explicit and a != explicit:
-                continue
-            if task.get("watchdogPausedForUserControl"):
-                continue
-            status = str(task.get("status") or "").upper()
-            pending = status == "BLOCKED" and task.get("watchdogPendingNotification")
-            if (status not in terminal or pending) and not cooldown(reg, state, a)["active"]:
-                print("1")
-                return
-        projects = [project] if project else list(reg.get("projects", {}).keys())
-        for p in projects:
-            if not p:
-                continue
-            a = project_account(reg, p)
-            if explicit and a != explicit:
-                continue
-            if reconcile_pending(reg, runtime, p) and not cooldown(reg, state, a)["active"]:
-                print("1")
-                return
+        terminal = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "RESULT_RECORDED"}
+        task_filter = option(args, "--task-id")
+        if "--skip-tasks" not in args:
+            for task_key, task in runtime.get("tasks", {}).items():
+                if task_filter and str(task.get("taskId") or task_key) != task_filter:
+                    continue
+                a = task_account(reg, task)
+                if project and task.get("project") != project:
+                    continue
+                if explicit and a != explicit:
+                    continue
+                if task.get("watchdogPausedForUserControl"):
+                    continue
+                status = str(task.get("status") or "").upper()
+                pending = status == "BLOCKED" and task.get("watchdogPendingNotification")
+                if (status not in terminal or pending) and not cooldown(reg, state, a)["active"]:
+                    print("1")
+                    return
+        if "--skip-lifecycle" not in args:
+            projects = [project] if project else list(reg.get("projects", {}).keys())
+            for p in projects:
+                if not p:
+                    continue
+                a = project_account(reg, p)
+                if explicit and a != explicit:
+                    continue
+                if reconcile_pending(reg, runtime, p) and not cooldown(reg, state, a)["active"]:
+                    print("1")
+                    return
         print("0")
         return
     if action == "scope":
