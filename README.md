@@ -144,6 +144,25 @@ The bridge does not automate account credentials. The bound Ego Space must alrea
 
 Run `account identify` for each binding using an existing managed ChatGPT page. It reads only the logged-in user's stable ID, never exports session tokens, and rejects a different login under an already identified alias. Identical IDs share cooldown across aliases, projects and Spaces; different IDs are independent. Before identification, cooldown uses the configured alias (`identityVerified: false`), so use the same alias for the same login. Re-identify after changing login/profile/Space; a different login needs a different alias. `projects` and account-wide discovery read an existing bound page instead of creating a global Space with an unrelated default profile.
 
+### Space catalog and reopening
+
+Accounts, Projects, and Spaces are many-to-many. Scan an existing Space to record its actual ChatGPT login and Project URLs visible in open tabs without changing routing bindings:
+
+```bash
+chat-bridge space scan --space "QC, Social - Manual"
+chat-bridge space map
+chat-bridge space restore --space "QC, Social - Manual"
+chat-bridge space restore # all scanned Spaces
+chat-bridge space gc      # dry-run: list reclaimable idle Agent Spaces
+chat-bridge space gc --confirm
+```
+
+The local registry keeps the stable user ID and display name, never credentials or tokens. `space map` separates observed Space contents from `configuredBindings`. On macOS, `restore` launches Ego Lite, finds the saved Space by name, verifies the login ID, and opens only missing Project tabs. It will not silently create a new Space in a default profile. An expired login requires the user to sign in; cold-start restoration after fully quitting Ego Lite still needs a live end-to-end check.
+
+`space gc` is conservative and dry-run by default. It considers only unbound `chat-bridge-agent-*` Spaces that are still Agent-owned and have no live task; user-owned and delegated-to-user Spaces are never candidates. `--confirm` re-checks ownership/liveness immediately before calling Ego's `finish({keep: []})`, which preserves user-created or unmanaged tabs.
+
+When a chat tab exposes only a Project ID, verify the actual Project page name and record it with `chat-bridge space label --space "SPACE" --project-id "g-p-..." --name "NAME"`. This labels an observed Project without changing routing.
+
 ## Session lifecycle
 
 ```bash
@@ -224,7 +243,7 @@ Install the macOS watchdog for all projects:
 ~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 60
 ```
 
-launchd starts a fresh one-shot scan every 60 seconds. A one-shot watchdog exits locally without starting Ego Lite when there are no active tasks. Recovery is conservative: native Continue/Retry first, then `continue`, then Stop + guarded continue. Original-task replay requires `--aggressive`. UI completion never marks the durable task COMPLETE; it becomes `AWAITING_DURABLE_UPDATE` until GitHub is reconciled.
+launchd starts a fresh one-shot scan every 60 seconds. A one-shot watchdog exits locally without starting Ego Lite when there are no active tasks. If the relevant Space is currently `user` or `agentDelegatedToUser`, watchdog records `watchdogPausedForUserControl` and stops polling that task without claiming the Space or counting a watch error; later preflight skips it locally, so subsequent scans do not wake Ego for that task. An explicit `send`, `ask`, `retry`, `recover`, or `resend` clears the pause and may continue in a separate managed Agent Space. Recovery is conservative: native Continue/Retry first, then `continue`, then Stop + guarded continue. Original-task replay requires `--aggressive`. UI completion never marks the durable task COMPLETE; it becomes `AWAITING_DURABLE_UPDATE` until GitHub is reconciled.
 
 All bridge commands that touch ChatGPT Web share a cross-process pacing lock. Normal UI operations default to and cannot be configured below a 10-second interval; heavy conversation lifecycle operations (`new`, `archive`, `retire`, `delete`) default to and cannot be configured below 30 seconds. A command never waits more than 5 seconds inline by default: if the remaining pacing/lock wait is longer, it returns machine-readable `PACING_DEFERRED` (exit 75) so the caller can do other work instead of holding a long tool turn. Within one watchdog scan, active tasks are separated by at least 10 seconds. Local registry/runtime reads are not throttled.
 
@@ -273,6 +292,8 @@ chat-bridge ask research-agent "..." --project "My Project"
 ```
 
 on the connected computer running Ego Lite.
+
+When a connected computer supplies `CHAT_BRIDGE_FROM_SPACE`, commands without `--account` use that Space's previously verified ChatGPT login and the matching Project binding. The Space label is only a lookup key, not account identity. If the source login has no binding for the requested Project, the command fails before opening another account's chat. Without source context, a Project bound to multiple distinct logins requires an explicit `--account`; an unqualified watchdog scan enters each eligible account's pacing lane separately.
 
 ### Web/local Codex
 

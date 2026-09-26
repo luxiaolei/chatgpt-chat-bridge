@@ -72,6 +72,8 @@ The registry is versioned and stores logical projects, ChatGPT account identitie
 
 `spaceName` is the stable binding key. `spaceId` and page labels are runtime attachments and may be recreated. Version-1 registries are migrated to version 2; stale per-session Space attachments are cleared instead of being treated as permanent identity.
 
+`registry.spaces` is a separate observed catalog: each scanned Ego Space records the actual ChatGPT user ID/display name and Project IDs seen in its open tabs. This is a many-to-many observation layer: one account can host multiple Projects, and a Project can appear in multiple accounts and Spaces. The catalog never overwrites the per-project/account routing binding; its `spaceId` is only a last-seen cache. `space restore` requires the saved named Space and a matching login before opening missing Project tabs.
+
 A session record contains conversation identity plus routing metadata such as logical role, account, lifecycle status, model/effort, Space, and tab/page attachment.
 
 The runtime file contains reconstructable orchestration state such as active task IDs and recent project execution metadata. It must never outrank GitHub Issues/PRs as project truth.
@@ -86,7 +88,7 @@ Logical Project
   └─ ChatGPT account binding B → one Ego Space → many tabs/sessions
 ```
 
-All new sessions for the same project/account are created with `task.newPage()` inside the bound Space. A normal session creation must not create a new Space. A separate Space should be created only for explicit Space tests, account isolation, or a deliberate rebind. `chat-bridge space prune --project NAME` closes stale tabs that are not the control tab or an active registered session.
+All new sessions for the same project/account are created with `task.newPage()` inside the bound Space. A normal session creation must not create a new Space. A separate Space should be created only for explicit Space tests, account isolation, or a deliberate rebind. `chat-bridge space prune --project NAME` closes stale tabs that are not the control tab or an active registered session. `chat-bridge space gc` is a dry-run lifecycle garbage collector for unbound idle `chat-bridge-agent-*` Spaces; only `ownership=agent` Spaces with no live task are candidates, and `--confirm` revalidates ownership/liveness before `finish({keep: []})`.
 
 A ChatGPT conversation ID is independent of its Ego Space attachment. Rebinding a project/account to another Space preserves conversation identity and causes sessions to reattach in tabs in the new Space. Page labels are a bounded runtime pool, not durable session identity: if `task.newPage()` hits the Ego page budget, the bridge may reclaim an idle managed session page and set that session's registry `page` to null. The next use reattaches the same conversation by URL. The control page, active/generating pages, active-task sessions, active tab, and non-empty composer drafts are protected from reclamation.
 
@@ -120,7 +122,7 @@ IDLE_INCOMPLETE                     or BLOCKED
 
 `lastProgressAt` and per-task baselines are stored in runtime state. Per-task `stallThresholdSec` can override the effort-based defaults. A new result is identified primarily by ChatGPT's stable `data-message-id`, with count/hash/length as additional signals.
 
-The watchdog never marks a project task COMPLETE from UI state alone. `IDLE_COMPLETE` becomes `AWAITING_DURABLE_UPDATE`; the owning controller must reconcile GitHub Issue/PR/callback evidence. Mechanical recovery is conservative: native recovery control, then `continue`, then Stop + guarded continue. Original-task replay requires explicit aggressive mode. Exhausted recovery becomes `BLOCKED` and routes an event through `replyTo → controller → escalationTo → rootController`.
+The watchdog never marks a project task COMPLETE from UI state alone. `IDLE_COMPLETE` becomes `AWAITING_DURABLE_UPDATE`; the owning controller must reconcile GitHub Issue/PR/callback evidence. A Space in `user` or `agentDelegatedToUser` ownership is a hard automation boundary: watchdog does not claim it, persists `watchdogPausedForUserControl`, and later local preflight suppresses that task before browser startup. Explicit user-directed `send`/`ask`/`retry`/`recover`/`resend` clears the pause and allows work to continue through the normal managed-Agent-Space selection path. Mechanical recovery is conservative: native recovery control, then `continue`, then Stop + guarded continue. Original-task replay requires explicit aggressive mode. Exhausted recovery becomes `BLOCKED` and routes an event through `replyTo → controller → escalationTo → rootController`.
 
 For continuous local operation, macOS launchd runs a fresh one-shot `chat-bridge watch --quiet` periodically. A fresh process reloads registry/runtime each scan, so newly created sessions and account/Space rebindings are visible without restarting a daemon.
 

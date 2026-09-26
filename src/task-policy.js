@@ -39,6 +39,13 @@
       task.sessionId === candidate.sessionId
     ) || null;
   }
+  function assertComposerSafe(snapshot = {}) {
+    if (snapshot.generating || !snapshot.inputReady) throw new Error("CHAT_BUSY");
+    if (String(snapshot.composerText || "").trim()) throw new Error("USER_DRAFT_PRESENT");
+  }
+  function isPreSendDefer(error) {
+    return ["CHAT_BUSY", "USER_DRAFT_PRESENT"].includes(error?.message);
+  }
 
   globalObject.__CHAT_BRIDGE_TASK_POLICY__ = {
     activeTaskStatus,
@@ -46,5 +53,7 @@
     assertTaskId,
     assertActiveTaskTarget,
     activeSessionConflict,
+    assertComposerSafe,
+    isPreSendDefer,
   };
 })(globalThis);

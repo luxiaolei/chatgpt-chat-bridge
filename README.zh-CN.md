@@ -91,6 +91,25 @@ chat-bridge account identify --project "My Project" --account secondary
 
 每个绑定需通过已有的 managed ChatGPT 页面执行 `account identify`：只提取登录用户的稳定 ID，不导出登录令牌。同一 ID 在不同别名、Project、Space 共享冷却，不同 ID 独立；未识别前按配置别名隔离，并返回 `identityVerified: false`，因此相同登录应复用同一个别名。更换登录/profile/Space 后需重新识别；已识别别名发现不同登录会明确报错，需改用不同别名。账号级项目/会话发现复用已绑定页面，不再创建使用不明默认 profile 的全局 Space。
 
+### Space 清单与恢复
+
+一个 ChatGPT 账号可以有多个 Project；同一个 Project 也可以出现在多个账号、多个 Ego Space。`space scan` 读取现有 Space 中的实际登录用户 ID/显示名和已打开标签里的 Project URL，记录到本机 `registry.json` 的 `spaces` 清单；它不会改动现有的项目路由绑定，也不会保存密码或令牌。没有打开的 Project 不会被猜测为已观察到。
+
+```bash
+chat-bridge space scan --space "QC, Social - Manual"
+chat-bridge space map
+chat-bridge space restore --space "QC, Social - Manual"
+chat-bridge space restore                  # 恢复所有已扫描的 Space
+chat-bridge space gc                       # 只预览可回收的空闲 Agent Space
+chat-bridge space gc --confirm
+```
+
+`space map` 分开显示现场扫描结果与 `configuredBindings`（原有路由配置）。`restore` 在 macOS 上启动 Ego Lite，按名字查找**已存在**的 Space，核对实际登录 ID，再打开缺失的 Project 标签；已有标签不会重复打开。找不到原 Space、账号变更或登录失效时会停下，不会用默认 profile 新建一个看似同名的 Space。恢复已测试现有运行中的 Space；真正关闭应用后的冷启动仍需现场验证，且浏览器登录过期时需用户重新登录。
+
+`space gc` 默认只做 dry-run。它只会把“未被当前绑定使用、没有 live task、名称为 `chat-bridge-agent-*`、且 ownership 仍为 agent”的 Space 列为候选；`user` 和 `agentDelegatedToUser` 永远不会进入候选。只有显式加 `--confirm` 才会在二次核验后调用 Ego 的 `finish({keep: []})`，用户创建或未管理的标签仍受保护。
+
+如果聊天标签只暴露 Project ID，可在打开真实 Project 页面核对名称后，用 `chat-bridge space label --space "SPACE" --project-id "g-p-..." --name "名称"` 补记；该命令只允许给已扫描的 Project 命名，不改变路由。
+
 ## Session 生命周期
 
 ```bash
@@ -253,11 +272,13 @@ chat-bridge watch --project "My Project"
 ~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 60
 ```
 
-launchd 每 60 秒启动一次全新的 one-shot 扫描；如果本地 runtime 没有 active task，watchdog 会在本地直接退出，不启动 Ego Lite/ChatGPT Web。恢复顺序默认是：原生 Continue/Retry → 发 `continue` → 明确卡死后 Stop + guarded continue。只有 `--aggressive` 才允许重发原始任务。Chat UI 看起来完成时只标记 `AWAITING_DURABLE_UPDATE`，最终 COMPLETE 仍需 GitHub 证据。
+launchd 每 60 秒启动一次全新的 one-shot 扫描；如果本地 runtime 没有 active task，watchdog 会在本地直接退出，不启动 Ego Lite/ChatGPT Web。如果目标 Space 当前为 `user` 或 `agentDelegatedToUser`，watchdog 会记录 `watchdogPausedForUserControl` 并停止巡检该 task，不 claim Space，也不累计 watch error；后续 preflight 会在本地直接跳过它，因此不会每分钟再次唤醒 Ego。只有显式执行 `send`、`ask`、`retry`、`recover` 或 `resend` 才会清除此暂停，并可转到独立 managed Agent Space 继续。恢复顺序默认是：原生 Continue/Retry → 发 `continue` → 明确卡死后 Stop + guarded continue。只有 `--aggressive` 才允许重发原始任务。Chat UI 看起来完成时只标记 `AWAITING_DURABLE_UPDATE`，最终 COMPLETE 仍需 GitHub 证据。
 
-所有会触碰 ChatGPT Web 的 bridge 命令共享跨进程节流锁：普通网页操作默认间隔 10 秒且不可配置得更快；`new` / `archive` / `retire` / `delete` 这类重型会话操作默认 30 秒且不可配置得更快。单个 CLI 调用默认最多内联等待 5 秒；如果剩余 pacing/锁等待更长，就快速返回机器可读的 `PACING_DEFERRED`（exit 75），让调用方去做本地/GitHub 工作，而不是把当前 Chat 卡在长 tool wait。单次 watchdog 扫描多个 active task 时，task 之间至少间隔 10 秒；本地 registry/runtime 读取不节流。
+所有会触碰 ChatGPT Web 的 bridge 命令按已验证的登录账号分别使用跨进程节流锁：普通网页操作默认间隔 10 秒且不可配置得更快；`new` / `archive` / `retire` / `delete` 这类重型会话操作默认 30 秒且不可配置得更快。单个 CLI 调用默认最多内联等待 5 秒；如果剩余 pacing/锁等待更长，就快速返回机器可读的 `PACING_DEFERRED`（exit 75），让调用方去做本地/GitHub 工作，而不是把当前 Chat 卡在长 tool wait。单次 watchdog 扫描同一登录账号的多个 active task 时，task 之间至少间隔 10 秒；本地 registry/runtime 读取不节流。
 
-如果 ChatGPT 出现 `Too many requests` / “temporarily limited access to your conversations”，runtime 会写 `web-cooldowns/<账号身份哈希>.json` 并停止该账号的 Web 操作。冷却从 3 分钟起步，连续触发升级为 5、10、15 分钟；人工命令快速返回 `WEB_COOLDOWN_ACTIVE`，watchdog 跳过冷却账号但继续其他账号；没有可巡检任务时不启动 Ego。用 `chat-bridge cooldown status --account secondary`（或 `--project`）查看；清理需 `cooldown clear --account secondary --confirm`。升级保留的旧 `web-cooldown.json` 只保护默认账号。浏览器操作的跨进程节奏锁仍共享，不等于账号额度共享。
+如果 ChatGPT 出现 `Too many requests` / “temporarily limited access to your conversations”，runtime 会写 `web-cooldowns/<账号身份哈希>.json` 并停止该账号的 Web 操作。冷却从 3 分钟起步，连续触发升级为 5、10、15 分钟；人工命令快速返回 `WEB_COOLDOWN_ACTIVE`，watchdog 跳过冷却账号但继续其他账号；没有可巡检任务时不启动 Ego。用 `chat-bridge cooldown status --account secondary`（或 `--project`）查看；清理需 `cooldown clear --account secondary --confirm`。升级保留的旧 `web-cooldown.json` 只保护默认账号。浏览器操作按已验证的账号身份分别加锁，不等于账号额度共享。
+
+已连接电脑若提供 `CHAT_BRIDGE_FROM_SPACE`，未写 `--account` 的命令会根据该 Space 已验证的 ChatGPT 登录身份，选择同账号的 Project 绑定。Space 名只是查找键，不是账号身份。来源账号没有该 Project 的绑定时会拒绝发送；没有来源上下文且 Project 属于多个不同登录账号时，需要明确写 `--account`。未指定账号的 watchdog 巡检按账号分别取锁。
 
 ## 恢复
 

@@ -38,8 +38,22 @@
       });
   }
 
+  function orphanManagedPageCandidates(managedPages = [], tabs = [], options = {}) {
+    if (options.hasLiveTasks) return [];
+    const protectedPages = new Set(options.protectedPageLabels || []);
+    const tabByLabel = new Map((tabs || []).filter(tab => tab?.label).map(tab => [tab.label, tab]));
+    return (managedPages || []).filter(page => {
+      const label = page?.label;
+      if (!label || protectedPages.has(label)) return false;
+      const tab = tabByLabel.get(label);
+      if (!tab || tab.active) return false;
+      return tab.openedBy === "agent";
+    });
+  }
+
   globalObject.__CHAT_BRIDGE_PAGE_POOL__ = {
     pageDetachCandidates,
+    orphanManagedPageCandidates,
     taskActive,
   };
 })(globalThis);

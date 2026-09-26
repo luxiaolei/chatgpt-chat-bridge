@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+globalThis.__CHAT_BRIDGE_STORE_PATH__=path.resolve("src/state-store.py");
+globalThis.__CHAT_BRIDGE_COORDINATOR_PATH__=path.resolve("src/coordinator.py");
 
 const root=path.resolve(new URL("..", import.meta.url).pathname);
 

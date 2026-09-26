@@ -32,11 +32,13 @@ chat-bridge sync --project "PROJECT"
 chat-bridge list --project "PROJECT"
 ```
 
-Dispatch:
+Dispatch to an existing session:
 
 ```bash
 chat-bridge send AGENT "TASK ENVELOPE" --project "PROJECT" --task TASK_ID
 ```
+
+For asynchronous new work, use `chat-bridge queue submit --request-id TASK_ID --caller-ref YOUR_REGISTERED_SESSION_REF --role ROLE --message "TASK ENVELOPE"`. The queue infers the Project only from that exact registered source Chat; the tunnel itself does not reveal the source Chat/Project. Read `queue status OPERATION_ID` and reconcile `DELIVERY_UNKNOWN` rather than resending blindly. If your own session reference is unavailable, use the explicit-Project direct command above.
 
 Use `ask` only when the conductor needs the result synchronously.
 
@@ -44,7 +46,7 @@ Use `ask` only when the conductor needs the result synchronously.
 
 Create, reuse, and retire project Chats deliberately.
 
-For each logical project/account, keep one bound Ego Space. New worker Chats must open as tabs inside that Space; do not allocate a new Space per session. Treat conversation ID/role as the long-lived session identity, the stable Space name as routing configuration, and page labels/Space ID as runtime attachments. When the Ego page budget is full, the bridge may detach a safe idle session tab and later reattach that conversation automatically; active tasks, generating sessions, active tabs, drafts, and the control page are protected. Use `chat-bridge space prune --project "PROJECT"` only for stale untracked tabs after tests or session churn.
+Use one verified managed Agent Space per login/Profile when practical, with tabs for multiple Projects and sessions; never take over the user's manual Space. Treat conversation ID/role as the long-lived session identity, the actual ChatGPT Project ID as the project location, and page labels/Space ID as runtime attachments. When the Ego page budget is full, the bridge may detach a safe idle session tab and later reattach that conversation automatically; active tasks, generating sessions, active tabs, drafts, and the control page are protected. Use `chat-bridge space prune --project "PROJECT"` only for stale untracked tabs after tests or session churn.
 
 Create a session when:
 - a workstream has a distinct long-lived context,
@@ -65,7 +67,9 @@ chat-bridge new --project "PROJECT" \
 
 ### 4. Account and project binding
 
-A logical project may be bound to more than one ChatGPT account. Each account gets its own ChatGPT Project binding and Ego Space. For new sessions, prefer `chat-bridge account select --project "PROJECT" --affinity-key KEY` or `new --auto-account --affinity-key KEY`; selection is local/deterministic and existing affinity never migrates silently. Use account failover when the active account is unavailable or capacity-constrained, but preserve durable state in GitHub before handoff.
+A logical business project may be bound to more than one ChatGPT account; each account's actual ChatGPT Project is verified separately, while its managed Space can host tabs for multiple Projects. For new sessions, prefer the durable queue with an exact `callerRef`, or `chat-bridge account select --project "PROJECT" --affinity-key KEY` / `new --auto-account --affinity-key KEY`; existing sessions never migrate silently. Use account failover only to a verified binding and preserve durable state in GitHub before handoff.
+
+For HZ OS, new work may move to `hzcodex` only after its own HZ OS Project is observed and bound; Ru Wang's existing chats/tasks stay put. Because `hzcodex` has a different Web GitHub connection, do HZ OS Git operations through this Mac's `xlmini` local `git`/`gh` via ChatGPT Computer. Verify the repository remote and local GitHub identity before pushing; do not infer them from the ChatGPT account.
 
 The bridge does not automate credentials. A selected Ego Space must already have access to the intended account/project.
 

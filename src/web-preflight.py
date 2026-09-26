@@ -2,7 +2,9 @@
 import hashlib
 import json
 import math
+import os
 import pathlib
+import re
 import sys
 import subprocess
 import time
@@ -62,6 +64,8 @@ def project_account(reg, project):
 
 def reconcile_pending(reg, runtime, project, now=None):
     cfg = reg.get("projects", {}).get(project, {})
+    if runtime.get("projects", {}).get(project, {}).get("watchdogPausedForUserControl"):
+        return False
     policy = cfg.get("lifecycle", {}) or {}
     if policy.get("autoReconcile") is not True:
         return False
@@ -111,6 +115,74 @@ def run(action, config, state, args):
                 return
             time.sleep(interval)
     reg = read_json(config / "registry.json")
+    if action == "origin-account":
+        identity = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID", "")
+        if not identity or not re.fullmatch(r"[0-9a-f]{64}", identity):
+            raise ValueError("ORIGIN_ACCOUNT_NOT_VERIFIED")
+        aliases = [alias for alias, record in reg.get("accounts", {}).items() if record.get("identity") and scope(reg, alias) == identity]
+        if not aliases:
+            raise ValueError("ORIGIN_ACCOUNT_NOT_VERIFIED")
+        project = option(args, "--project", reg.get("defaultProject"))
+        bindings = reg.get("projects", {}).get(project, {}).get("bindings", {}) if project else {}
+        bound = [alias for alias in aliases if bindings.get(alias, {}).get("projectUrl")]
+        if project and not bound:
+            raise ValueError("PROJECT_NOT_BOUND_FOR_ORIGIN_ACCOUNT: " + str(project))
+        print((bound or aliases)[0])
+        return
+    if action == "origin":
+        space_name = os.environ.get("CHAT_BRIDGE_FROM_SPACE", "")
+        space = reg.get("spaces", {}).get(space_name, {})
+        identity = space.get("identity")
+        if not identity or reg.get("accounts", {}).get(space.get("account"), {}).get("identity") != identity:
+            raise ValueError("ORIGIN_SPACE_NOT_VERIFIED: " + space_name)
+        account = space["account"]
+        project = option(args, "--project", reg.get("defaultProject"))
+        if project and not reg.get("projects", {}).get(project, {}).get("bindings", {}).get(account, {}).get("projectUrl"):
+            raise ValueError("PROJECT_NOT_BOUND_FOR_ORIGIN_ACCOUNT: " + project + " / " + account)
+        print(account)
+        return
+    if action == "unambiguous":
+        project = option(args, "--project", reg.get("defaultProject"))
+        chat = reg.get("chats", {}).get(args[1]) if len(args) > 1 else None
+        if chat and chat.get("project") == project:
+            return
+        bindings = reg.get("projects", {}).get(project, {}).get("bindings", {})
+        scopes = {scope(reg, account) for account, binding in bindings.items() if binding.get("projectUrl")}
+        if len(scopes) > 1:
+            raise ValueError("AMBIGUOUS_PROJECT_ACCOUNT: " + str(project) + "; provide a verified origin Space or --account")
+        return
+    if action == "watch-all":
+        script, *command = args
+        project = option(command, "--project")
+        runtime = read_json(state / "runtime.json")
+        terminal = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED"}
+        accounts = []
+        for task in runtime.get("tasks", {}).values():
+            if project and task.get("project") != project:
+                continue
+            if task.get("watchdogPausedForUserControl"):
+                continue
+            status = str(task.get("status") or "").upper()
+            if status not in terminal or (status == "BLOCKED" and task.get("watchdogPendingNotification")):
+                accounts.append(task_account(reg, task))
+        for name in ([project] if project else reg.get("projects", {})):
+            if reconcile_pending(reg, runtime, name):
+                accounts.append(project_account(reg, name))
+        result = 0
+        for account in dict.fromkeys(accounts):
+            if cooldown(reg, state, account)["active"]:
+                continue
+            stamp = state / ("ui-pacing-" + scope(reg, account) + ".last")
+            try:
+                wait = max(0, max(10, float(os.environ.get("CHAT_BRIDGE_UI_MIN_INTERVAL_SEC", "10"))) - (time.time() - float(stamp.read_text().strip())))
+            except (FileNotFoundError, ValueError):
+                wait = 0
+            if wait:
+                time.sleep(wait)
+            completed = subprocess.run([script, *command, "--account", account], check=False)
+            if completed.returncode and not result:
+                result = completed.returncode
+        raise SystemExit(result)
     cmd = args[0] if args else "help"
     project = option(args, "--project", None if cmd in ("watch", "projects") else reg.get("defaultProject"))
     explicit = option(args, "--account")
@@ -141,6 +213,8 @@ def run(action, config, state, args):
             if project and task.get("project") != project:
                 continue
             if explicit and a != explicit:
+                continue
+            if task.get("watchdogPausedForUserControl"):
                 continue
             status = str(task.get("status") or "").upper()
             pending = status == "BLOCKED" and task.get("watchdogPendingNotification")

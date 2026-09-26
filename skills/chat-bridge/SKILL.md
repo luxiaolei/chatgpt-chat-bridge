@@ -86,6 +86,41 @@ Treat `spaceName` as the stable binding and numeric `spaceId` as a runtime cache
 
 Identify each binding from an existing managed ChatGPT page. The stable logged-in user ID (never tokens) shares cooldown across aliases/projects/Spaces; different users remain independent. Until identified, cooldown follows the configured alias and is explicitly unverified: reuse the alias for the same login. Re-identify after changing login/profile/Space; a different login requires another alias. Account-wide discovery uses a bound page, never an arbitrary default-profile global Space.
 
+For a ChatGPT Web controller, a user request that does not name a destination Project means the Project containing the controller's current Chat. Identify that Project from the current Chat's context and pass its name as `--project`; an explicitly named destination Project overrides it. The tunnel does not supply the source Chat's Project. Never substitute the registry's default Project or infer a Project from the Space name. If the current Chat is outside a Project or its Project cannot be verified, ask for the destination Project before sending.
+
+Using the controller's own ChatGPT Computer connection: pass the destination Project with `--project` and the target Chat by its registered alias, then omit `--account` and `--space`. A linked tunnel supplies the stable `CHAT_BRIDGE_FROM_ACCOUNT_ID` hint; older tunnels may supply a Space label. The bridge verifies a matching login and uses that account's binding for the named Project. Neither hint identifies the source Chat or its Project, and neither is an authentication boundary. An unknown or mismatched origin fails closed.
+
+A local shell call outside the connected computer has no automatic origin. If the origin is missing and a Project is bound to different logins, use `--account` only when the intended account is known; never guess from the default account or Space name. An origin with no matching Project binding fails closed. The local skill file is not automatically loaded into ChatGPT Web; a Web controller must read it through its connected computer before relying on these rules.
+
+One account may have multiple Projects, and one Project may appear in multiple accounts and Spaces. The observed Space catalog is separate from each project's configured routing Space:
+
+```bash
+chat-bridge space scan --space "EXISTING SPACE NAME"
+chat-bridge space map
+chat-bridge space restore --space "EXISTING SPACE NAME"
+chat-bridge space restore # all scanned Spaces
+chat-bridge space gc      # dry-run only
+chat-bridge space gc --confirm
+```
+
+Scan records the actual logged-in user ID/display name, Profile, and Project URLs from open tabs, not credentials. Human-owned Spaces remain untouched by automated dispatch; Bridge may use a separate managed Agent Space for the verified login/Profile and keep multiple Project tabs there. A Project binding is not eligible for new work when that login's observed catalog does not contain its actual Project ID. Restore verifies login identity before opening missing tabs; changed/expired logins require user action.
+
+For HZ OS work moved to `hzcodex`, first verify that `hzcodex` actually has an HZ OS ChatGPT Project and bind its observed ID/Profile. A copied Project ID from the Ru Wang account is not proof. Keep Ru Wang's existing sessions and in-flight tasks where they are; change only new-task admission after verification. The `hzcodex` Web GitHub connector may use a different identity: HZ OS repository work must use this Mac's `xlmini` local Git/`gh` through ChatGPT Computer, checking the target repository remote and local `gh auth status` before any push/PR. Do not silently switch GitHub accounts or credentials.
+
+## Durable dispatch queue
+
+When the controller knows its registered session reference, use the queue for asynchronous work. `callerRef` pins the source Chat, so an omitted `--project` uses that Chat's registered Project; an explicit Project is an intentional cross-project route. The tunnel does not supply `callerRef`, so never infer it from a Space or account.
+
+```bash
+chat-bridge queue submit --request-id HZ-001 --caller-ref CONTROLLER_SESSION_REF --role WORKER_ROLE --message "Task envelope"
+chat-bridge queue status OPERATION_ID
+chat-bridge queue list
+```
+
+The queue returns a durable operation ID. `QUEUED` is not delivery; `SENT` confirms only the ChatGPT user message, not task completion. `DELIVERY_UNKNOWN` requires a read/reconciliation before any retry. Start the local worker with `~/.local/share/chatgpt-chat-bridge/install-coordinator.sh` after installing Bridge; `queue work-one` processes one claim manually. A controller without a known `callerRef` must supply an explicit Project to the direct `send` command instead of guessing its source Project.
+
+For an observed Project whose chat tabs do not show its name, verify the Project page and then run `chat-bridge space label --space "SPACE" --project-id "g-p-..." --name "NAME"`. This does not change routing.
+
 ## Session lifecycle
 
 ```bash
@@ -151,7 +186,7 @@ chat-bridge watch --project "PROJECT NAME" --dry-run
 chat-bridge watch --project "PROJECT NAME"
 ```
 
-The watchdog uses multiple signals: Stop/Send/composer controls, stable ChatGPT message IDs, assistant text/hash/length, a page-side MutationObserver, recovery/error UI, and elapsed time since real progress. Normal quiet thinking is not interrupted until the task's stall threshold is crossed.
+The watchdog uses multiple signals: Stop/Send/composer controls, stable ChatGPT message IDs, assistant text/hash/length, a page-side MutationObserver, recovery/error UI, and elapsed time since real progress. Normal quiet thinking is not interrupted until the task's stall threshold is crossed. If the bound Space is `user` or `agentDelegatedToUser`, watchdog must not claim or switch that Space: it records `watchdogPausedForUserControl`, and later preflight suppresses that task locally until an explicit `send`, `ask`, `retry`, `recover`, or `resend` clears the pause.
 
 Install the macOS launchd watchdog (all projects, one-shot scan every 60 seconds):
 
@@ -163,7 +198,7 @@ Remove it with `~/.local/share/chatgpt-chat-bridge/uninstall-watchdog.sh`.
 
 Recovery ladder is deliberately conservative: native Continue/Try again/Retry/Regenerate → `continue` → Stop + guarded continue. Re-sending the original task is only enabled with `--aggressive`. Repeated failures mark the task `BLOCKED` and wake the owning controller/root escalation chain for GitHub reconciliation.
 
-All ChatGPT-Web-touching commands are serialized through a shared browser pacing gate. Normal UI work cannot run faster than 10 seconds; `new`, `archive`, `retire`, and `delete` cannot run faster than 30 seconds. Calls wait at most 5 seconds inline; longer pacing/lock waits return `PACING_DEFERRED` (exit 75). Watchdog separates tasks by at least 10 seconds. `Too many requests` creates an adaptive 3–15 minute account-scoped cooldown; manual commands return `WEB_COOLDOWN_ACTIVE`. Watchdog skips that identity but continues others, and never starts Ego when no eligible tasks remain. Use `cooldown status --account ALIAS` (or `--project NAME`) and `cooldown clear --account ALIAS --confirm`. Legacy global cooldown protects only the default account. The shared pacing lock is not an account quota.
+ChatGPT-Web-touching commands are serialized per verified login identity, including aliases of the same account; different logins have separate pacing gates. Normal UI work cannot run faster than 10 seconds; `new`, `archive`, `retire`, and `delete` cannot run faster than 30 seconds. Calls wait at most 5 seconds inline; longer pacing/lock waits return `PACING_DEFERRED` (exit 75). Watchdog separates tasks on the same login by at least 10 seconds. `Too many requests` creates an adaptive 3–15 minute account-scoped cooldown; manual commands return `WEB_COOLDOWN_ACTIVE`. Watchdog skips that identity but continues others, and never starts Ego when no eligible tasks remain. Use `cooldown status --account ALIAS` (or `--project NAME`) and `cooldown clear --account ALIAS --confirm`. Legacy global cooldown protects only the default account. A pacing lock is not an account quota.
 
 Stop an active generation:
 
@@ -188,7 +223,7 @@ chat-bridge recover AGENT_ALIAS --project "PROJECT NAME"
 ## Routing rules
 
 - Prefer stable logical role/registry aliases over raw conversation IDs.
-- Keep one bound Ego Space per logical project/account; open worker sessions as tabs inside it.
+- Keep a verified managed Agent Space per login/Profile, with Project tabs as needed; do not take over a human-owned Space.
 - A role should normally have one active session per project/account; retire the old session before replacement.
 - Sync before dispatching a multi-chat batch.
 - Use `ask` when the caller must synchronously consume the result.

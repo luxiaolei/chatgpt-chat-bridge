@@ -48,6 +48,12 @@ PY
 CMD="${1:-help}"
 SUB="${2:-}"
 
+if [[ "$CMD" == "queue" ]]; then
+  COORDINATOR="${MAIN:h}/coordinator.py"
+  [[ -f "$COORDINATOR" ]] || { echo "chat-bridge: coordinator missing: $COORDINATOR" >&2; exit 127; }
+  exec python3 "$COORDINATOR" "$SUB" "$CONFIG_DIR" "$STATE_DIR" "${@:3}"
+fi
+
 if [[ "$CMD" == "capacity" ]]; then
   exec python3 "$CAPACITY_PREFLIGHT" capacity "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
 fi
@@ -58,9 +64,37 @@ if [[ "$CMD" == "new" && " ${*} " == *" --auto-account "* && " ${*} " != *" --ac
   PROJECT_ARG="$(python3 -c 'import sys; a=sys.argv[1:]; print(a[a.index("--project")+1] if "--project" in a and a.index("--project")+1<len(a) else "")' "$@")"
   AFFINITY_ARG="$(python3 -c 'import sys; a=sys.argv[1:]; print(a[a.index("--affinity-key")+1] if "--affinity-key" in a and a.index("--affinity-key")+1<len(a) else "")' "$@")"
   [[ -n "$PROJECT_ARG" ]] || { echo "new --auto-account requires --project" >&2; exit 2; }
-  SELECTED_JSON="$(python3 "$CAPACITY_PREFLIGHT" select "$CONFIG_DIR" "$STATE_DIR" --project "$PROJECT_ARG" ${AFFINITY_ARG:+--affinity-key "$AFFINITY_ARG"})"
+  if [[ -n "$AFFINITY_ARG" ]]; then
+    SELECTED_JSON="$(python3 "$CAPACITY_PREFLIGHT" select "$CONFIG_DIR" "$STATE_DIR" --project "$PROJECT_ARG" --affinity-key "$AFFINITY_ARG")"
+  else
+    SELECTED_JSON="$(python3 "$CAPACITY_PREFLIGHT" select "$CONFIG_DIR" "$STATE_DIR" --project "$PROJECT_ARG")"
+  fi
   SELECTED_ACCOUNT="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["selectedAccount"])' <<<"$SELECTED_JSON")"
   set -- "$@" --account "$SELECTED_ACCOUNT"
+fi
+
+ORIGIN_ROUTED=0
+case "$CMD" in
+  send|ask|new|read|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete|projects|discover|list|event|task)
+    ORIGIN_ROUTED=1 ;;
+  space)
+    [[ "$SUB" == "show" || "$SUB" == "prune" ]] && ORIGIN_ROUTED=1 ;;
+esac
+if (( ORIGIN_ROUTED )) && [[ -n "${CHAT_BRIDGE_FROM_ACCOUNT_ID:-}" ]]; then
+  ORIGIN_ACCOUNT="$(python3 "$PREFLIGHT" origin-account "$CONFIG_DIR" "$STATE_DIR" "$@")"
+  if [[ " ${*} " != *" --account "* ]]; then
+    set -- "$@" --account "$ORIGIN_ACCOUNT"
+  fi
+elif (( ORIGIN_ROUTED )) && [[ -n "${CHAT_BRIDGE_FROM_SPACE:-}" && " ${*} " != *" --account "* ]]; then
+  ORIGIN_ACCOUNT="$(python3 "$PREFLIGHT" origin "$CONFIG_DIR" "$STATE_DIR" "$@")"
+  set -- "$@" --account "$ORIGIN_ACCOUNT"
+fi
+if [[ -z "${CHAT_BRIDGE_FROM_SPACE:-}" && -z "${CHAT_BRIDGE_FROM_ACCOUNT_ID:-}" && " ${*} " != *" --account "* ]]; then
+  case "$CMD" in
+    send|ask|new|read|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete)
+      python3 "$PREFLIGHT" unambiguous "$CONFIG_DIR" "$STATE_DIR" "$@"
+      ;;
+  esac
 fi
 
 if [[ "$CMD" == "cooldown" ]]; then
@@ -91,7 +125,7 @@ case "$CMD" in
     TOUCH_UI=1
     ;;
   space)
-    [[ "$SUB" == "prune" ]] && TOUCH_UI=1
+    [[ "$SUB" == "prune" || "$SUB" == "scan" || "$SUB" == "restore" ]] && TOUCH_UI=1
     ;;
   account)
     [[ "$SUB" == "identify" ]] && TOUCH_UI=1
@@ -107,6 +141,9 @@ esac
 if [[ "$CMD" == "watch" ]]; then
   if (( ${@[(Ie)--loop]} )); then
     exec python3 "$PREFLIGHT" loop "$CONFIG_DIR" "$STATE_DIR" "$0" "$@"
+  fi
+  if (( ! ${@[(Ie)--account]} )); then
+    exec python3 "$PREFLIGHT" watch-all "$CONFIG_DIR" "$STATE_DIR" "$0" "$@"
   fi
   HAS_ACTIVE="$(python3 "$PREFLIGHT" watch "$CONFIG_DIR" "$STATE_DIR" "$@")"
   if [[ "$HAS_ACTIVE" != "1" ]]; then
@@ -145,9 +182,14 @@ WEB_POLICY="${CHAT_BRIDGE_WEB_POLICY:-${MAIN:h}/web-policy.js}"
 MODEL_POLICY="${MAIN:h}/model-policy.js"
 SESSION_POLICY="${MAIN:h}/session-policy.js"
 EVENT_JOURNAL="${MAIN:h}/event-journal.js"
-for f in "$CONTROL" "$PAGE_POOL" "$LIVENESS" "$TASK_POLICY" "$LIFECYCLE_POLICY" "$WEB_POLICY" "$MODEL_POLICY" "$SESSION_POLICY" "$EVENT_JOURNAL"; do
+TOPOLOGY="${MAIN:h}/topology.js"
+SPACE_CATALOG="${MAIN:h}/space-catalog.js"
+[[ -f "$SPACE_CATALOG" ]] || SPACE_CATALOG="${MAIN:h}/space-catalog.mjs"
+for f in "$CONTROL" "$PAGE_POOL" "$LIVENESS" "$TASK_POLICY" "$LIFECYCLE_POLICY" "$WEB_POLICY" "$MODEL_POLICY" "$SESSION_POLICY" "$EVENT_JOURNAL" "$TOPOLOGY"; do
   [[ -f "$f" ]] || { echo "chat-bridge: runtime module not found: $f" >&2; exit 127; }
 done
+[[ -f "$SPACE_CATALOG" ]] || { echo "chat-bridge: space catalog module not found" >&2; exit 127; }
+SPACE_CATALOG_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$SPACE_CATALOG")"
 
 # Serialize ChatGPT UI per stable account identity. Different logged-in accounts may progress independently.
 PACE_SCOPE="$(python3 "$PREFLIGHT" scope "$CONFIG_DIR" "$STATE_DIR" "$@")"
@@ -229,12 +271,24 @@ fi
 ARGS_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1:], ensure_ascii=False))' "$@")"
 CONFIG_JSON="$(python3 -c 'import json,os; print(json.dumps(os.environ.get("CHAT_BRIDGE_CONFIG_DIR")))' )"
 STATE_JSON="$(python3 -c 'import json,os; print(json.dumps(os.environ.get("CHAT_BRIDGE_STATE_DIR")))' )"
+STORE_PATH="${MAIN:h}/state-store.py"
+[[ -f "$STORE_PATH" ]] || { echo "chat-bridge: state store missing: $STORE_PATH" >&2; exit 127; }
+STORE_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$STORE_PATH")"
+COORDINATOR_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${MAIN:h}/coordinator.py")"
+
+if [[ "$CMD" == "space" && "$SUB" == "restore" && "$(uname -s)" == "Darwin" ]]; then
+  EGO_LITE_APP="${EGO_LITE_APP:-/Applications/ego lite.app}"
+  [[ -d "$EGO_LITE_APP" ]] && open -a "$EGO_LITE_APP" >/dev/null
+fi
 
 set +e
 {
   printf 'globalThis.__CHAT_BRIDGE_ARGS__ = %s;\n' "$ARGS_JSON"
   printf 'globalThis.__CHAT_BRIDGE_CONFIG_DIR__ = %s;\n' "$CONFIG_JSON"
   printf 'globalThis.__CHAT_BRIDGE_STATE_DIR__ = %s;\n' "$STATE_JSON"
+  printf 'globalThis.__CHAT_BRIDGE_STORE_PATH__ = %s;\n' "$STORE_JSON"
+  printf 'globalThis.__CHAT_BRIDGE_COORDINATOR_PATH__ = %s;\n' "$COORDINATOR_JSON"
+  [[ -n "$SPACE_CATALOG_JSON" ]] && printf 'globalThis.__CHAT_BRIDGE_SPACE_CATALOG__ = await import(%s);\n' "$SPACE_CATALOG_JSON"
   cat "$CONTROL"
   cat "$PAGE_POOL"
   cat "$LIVENESS"
@@ -244,6 +298,7 @@ set +e
   cat "$MODEL_POLICY"
   cat "$SESSION_POLICY"
   cat "$EVENT_JOURNAL"
+  cat "$TOPOLOGY"
   cat "$MAIN"
 } | "$EGO_BROWSER" nodejs
 RC=$?

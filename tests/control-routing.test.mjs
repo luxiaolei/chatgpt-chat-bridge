@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import "../src/control-routing.js";
 
-const { controlRoute, notificationTargets } = globalThis.__CHAT_BRIDGE_CONTROL__;
+const { controlRoute, notificationTargets, resolveControllerTarget } = globalThis.__CHAT_BRIDGE_CONTROL__;
 
 test("single-conductor projects stay backward compatible", () => {
   assert.deepEqual(controlRoute({}, "conductor"), {
@@ -48,4 +48,16 @@ test("blank values do not shadow project root", () => {
   assert.deepEqual(notificationTargets({
     controller: " ", replyTo: "", escalationTo: null,
   }, "00-g"), ["00-g"]);
+});
+
+test('exact controller session wins across accounts and duplicate roles fail closed', () => {
+  const chats = {
+    a: { id: 'a', project: 'P', account: 'alpha', role: 'conductor', status: 'active' },
+    b: { id: 'b', project: 'P', account: 'beta', role: 'conductor', status: 'active' },
+  };
+  assert.equal(resolveControllerTarget(chats, 'a', 'P').id, 'a');
+  assert.equal(resolveControllerTarget(chats, 'a', 'another-project').id, 'a');
+  assert.equal(resolveControllerTarget(chats, 'conductor', 'P', 'beta').id, 'b');
+  assert.throws(() => resolveControllerTarget(chats, 'conductor', 'P'), /AMBIGUOUS_CONTROLLER/);
+  assert.throws(() => resolveControllerTarget(chats, 'unknown', 'P'), /UNKNOWN_CONTROLLER/);
 });

@@ -30,11 +30,17 @@ def snapshot(config, state, project, now=None):
     rt=read_json(state/'runtime.json',{})
     proj=(reg.get('projects') or {}).get(project) or {}
     accounts=sorted((proj.get('bindings') or {}).keys())
+    all_chats=list((reg.get('chats') or {}).values())
+    all_tasks=list((rt.get('tasks') or {}).values())
+    aliases_by_scope={alias:scope(reg,alias) for alias in (reg.get('accounts') or {})}
+    def identity_scope(alias): return aliases_by_scope.get(alias) if alias else None
     rows=[]
     for account in accounts:
         binding=(proj.get('bindings') or {}).get(account) or {}
-        chats=[c for c in (reg.get('chats') or {}).values() if c.get('project')==project and c.get('account')==account and c.get('status')=='active']
-        tasks=[t for t in (rt.get('tasks') or {}).values() if t.get('project')==project and (t.get('account')==account or (t.get('sessionId') and (reg.get('chats') or {}).get(t.get('sessionId'),{}).get('account')==account)) and str(t.get('status','')).upper() not in TERMINAL]
+        account_scope=scope(reg,account)
+        chats=[c for c in all_chats if identity_scope(c.get('account'))==account_scope and c.get('status')=='active']
+        tasks=[t for t in all_tasks if str(t.get('status','')).upper() not in TERMINAL and
+               identity_scope((reg.get('chats') or {}).get(t.get('sessionId'),{}).get('account') or t.get('account'))==account_scope]
         sessions=rt.get('sessions') or {}
         running=sum(1 for c in chats if str((sessions.get(c.get('id')) or {}).get('sessionState','')).startswith('RUNNING'))
         cd=cooldown(state,reg,account,now)
@@ -43,7 +49,19 @@ def snapshot(config, state, project, now=None):
         if not binding: reasons.append('BINDING_MISSING')
         if not binding.get('spaceName'): reasons.append('SPACE_MISSING')
         if not verified: reasons.append('IDENTITY_UNVERIFIED')
+        observed=[p.get('id') for space in (reg.get('spaces') or {}).values()
+                  if space.get('identity')==(reg.get('accounts',{}).get(account) or {}).get('identity')
+                  for p in space.get('projects') or []]
+        bound_id=binding.get('projectId') or (re.search(r'/g/(g-p-[^/]+)',binding.get('projectUrl') or '') or [None,None])[1]
+        canonical=lambda value: (re.search(r'g-p-[0-9a-f]{32}',value or '') or [None])[0]
+        if observed and (not canonical(bound_id) or canonical(bound_id) not in {canonical(item) for item in observed}): reasons.append('PROJECT_NOT_OBSERVED_FOR_LOGIN')
         if cd['active']: reasons.append('WEB_COOLDOWN')
+        allowed=proj.get('allowedAccounts')
+        if isinstance(allowed,list) and account not in allowed: reasons.append('NOT_IN_PROJECT_ACCOUNT_POOL')
+        account_config=(reg.get('accounts') or {}).get(account) or {}
+        if account_config.get('acceptNewTasks') is False: reasons.append('NEW_TASKS_PAUSED')
+        max_tasks=account_config.get('maxActiveTasks')
+        if isinstance(max_tasks,int) and max_tasks>0 and len(tasks)>=max_tasks: reasons.append('LOCAL_CONCURRENCY_LIMIT')
         stamp=state/f'ui-pacing-{scope(reg,account)}.last'
         try: last_ui=float(stamp.read_text().strip())
         except Exception: last_ui=None
@@ -113,7 +131,7 @@ def choose(config, state, project, affinity=None, explicit=None, now=None):
         else:
             eligible=[x for x in snap['accounts'] if x['eligible']]
             if not eligible: raise RuntimeError('no eligible ChatGPT account binding')
-            selected=min(eligible,key=lambda x:(x['activeTasks'],x['attachedPages'],x['activeChats'],x['account']))['account']
+            selected=min(eligible,key=lambda x:(x['activeTasks'],x['runningSessions'],x['attachedPages'],x['account']))['account']
     row=by[selected]
     if not row['eligible']:
         raise RuntimeError('selected sticky/explicit account is not currently eligible: '+','.join(row['exclusionReasons']))

@@ -2,25 +2,45 @@ const fs = await import("node:fs/promises");
 const os = await import("node:os");
 const pathMod = await import("node:path");
 const crypto = await import("node:crypto");
+const childProcess = await import("node:child_process");
 const args = globalThis.__CHAT_BRIDGE_ARGS__ || [];
 const HOME = os.homedir();
 const CONFIG_DIR = globalThis.__CHAT_BRIDGE_CONFIG_DIR__ || process.env.CHAT_BRIDGE_CONFIG_DIR || pathMod.join(HOME, ".config", "chat-bridge");
 const STATE_DIR = globalThis.__CHAT_BRIDGE_STATE_DIR__ || process.env.CHAT_BRIDGE_STATE_DIR || pathMod.join(HOME, ".local", "state", "chat-bridge");
 const REG_PATH = pathMod.join(CONFIG_DIR, "registry.json");
 const RUNTIME_PATH = pathMod.join(STATE_DIR, "runtime.json");
+const STORE_PATH = globalThis.__CHAT_BRIDGE_STORE_PATH__;
+const COORDINATOR_PATH = globalThis.__CHAT_BRIDGE_COORDINATOR_PATH__;
+const stateBaselines = new WeakMap();
+function stored(command, kind, payload=null) {
+  if(!STORE_PATH) throw new Error("state-store.py is required; reinstall ChatBridge");
+  const result=childProcess.spawnSync("python3",[STORE_PATH,command,CONFIG_DIR,STATE_DIR,kind],{
+    encoding:"utf8",input:payload?JSON.stringify(payload):undefined,maxBuffer:32*1024*1024,timeout:20000
+  });
+  if(result.status!==0) throw new Error(`STATE_STORE_${kind.toUpperCase()}: ${(result.stderr||result.error?.message||"unknown error").trim()}`);
+  return JSON.parse(result.stdout);
+}
+function coordinated(command, payload) {
+  if(!COORDINATOR_PATH) throw new Error("coordinator.py is required; reinstall ChatBridge");
+  const result=childProcess.spawnSync("python3",[COORDINATOR_PATH,command,CONFIG_DIR,STATE_DIR],{
+    encoding:"utf8",input:JSON.stringify(payload),maxBuffer:4*1024*1024
+  });
+  if(result.status!==0) throw new Error(`COORDINATOR_${command.toUpperCase()}: ${(result.stderr||result.error?.message||"unknown error").trim()}`);
+  return JSON.parse(result.stdout);
+}
 const DEFAULT_ACCOUNT = "default";
 const CONTROL = globalThis.__CHAT_BRIDGE_CONTROL__;
 if(!CONTROL) throw new Error("chat-bridge control routing module was not loaded");
-const { controlRoute, notificationTargets } = CONTROL;
+const { controlRoute, notificationTargets, resolveControllerTarget } = CONTROL;
 const PAGE_POOL = globalThis.__CHAT_BRIDGE_PAGE_POOL__;
 if(!PAGE_POOL) throw new Error("chat-bridge page pool module was not loaded");
-const { pageDetachCandidates } = PAGE_POOL;
+const { pageDetachCandidates, orphanManagedPageCandidates } = PAGE_POOL;
 const LIVENESS = globalThis.__CHAT_BRIDGE_LIVENESS__;
 if(!LIVENESS) throw new Error("chat-bridge liveness policy module was not loaded");
 const { stallThresholdSec } = LIVENESS;
 const TASK_POLICY = globalThis.__CHAT_BRIDGE_TASK_POLICY__;
 if(!TASK_POLICY) throw new Error("chat-bridge task policy module was not loaded");
-const { activeTaskStatus, normalizeCompletionMode, assertTaskId, assertActiveTaskTarget, activeSessionConflict } = TASK_POLICY;
+const { activeTaskStatus, normalizeCompletionMode, assertTaskId, assertActiveTaskTarget, activeSessionConflict, assertComposerSafe, isPreSendDefer } = TASK_POLICY;
 const LIFECYCLE_POLICY = globalThis.__CHAT_BRIDGE_LIFECYCLE_POLICY__ || {
   normalizeLifecycle(project={}) {
     return {autoReconcile:false,reconcileRole:project.rootController||"conductor",minGapSec:300,instruction:null};
@@ -39,6 +59,8 @@ if(!SESSION_POLICY) throw new Error("chat-bridge session policy module was not l
 const {recoveryRequired}=SESSION_POLICY;
 const EVENT_JOURNAL=globalThis.__CHAT_BRIDGE_EVENTS__ || {appendEvent:async()=>null,listEvents:async()=>[]};
 const {appendEvent,listEvents}=EVENT_JOURNAL;
+const SPACE_CATALOG=globalThis.__CHAT_BRIDGE_SPACE_CATALOG__;
+const TOPOLOGY=globalThis.__CHAT_BRIDGE_TOPOLOGY__;
 const WEB_COOLDOWN_PATH = pathMod.join(STATE_DIR, "web-cooldown.json");
 const taskAccounts=new Map();
 const COMPOSER_SELECTOR = 'div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]';
@@ -70,15 +92,17 @@ function defaultSpaceName(project, account=DEFAULT_ACCOUNT) {
   return `chat-bridge-project-${slug(project)}-${slug(account)}`;
 }
 function emptyRegistry() {
-  return { version: 2, defaultProject: null, defaultAccount: DEFAULT_ACCOUNT, accounts: {}, projects: {}, chats: {} };
+  return { version: 2, defaultProject: null, defaultAccount: DEFAULT_ACCOUNT, accounts: {}, projects: {}, chats: {}, spaces: {} };
 }
 function normalizeRegistry(raw) {
   const reg={...emptyRegistry(),...(raw||{})};
-  reg.accounts ||= {}; reg.projects ||= {}; reg.chats ||= {};
+  reg.accounts ||= {}; reg.projects ||= {}; reg.chats ||= {}; reg.spaces ||= {};
   reg.defaultAccount ||= DEFAULT_ACCOUNT;
   reg.accounts[reg.defaultAccount] ||= {name:reg.defaultAccount};
   for (const [name,p0] of Object.entries(reg.projects)) {
     const p=p0||{}; p.name ||= name; p.activeAccount ||= reg.defaultAccount; p.rootController ||= "conductor"; p.bindings ||= {}; p.lifecycle ||= {};
+    p.businessProjectId ||= crypto.createHash("sha256").update(`business-project:${name}`).digest("hex").slice(0,20);
+    p.workgroups ||= {};
     const oldUrl=p.url||null, oldBase=p.projectBase||null;
     if (!p.bindings[p.activeAccount] && (oldUrl||oldBase)) {
       p.bindings[p.activeAccount]={account:p.activeAccount,projectUrl:oldUrl,projectBase:oldBase,
@@ -105,13 +129,15 @@ function normalizeRuntime(raw) {
   return rt;
 }
 async function loadRuntime() {
-  try { return normalizeRuntime(JSON.parse(await fs.readFile(RUNTIME_PATH,"utf8"))); }
-  catch { return normalizeRuntime({}); }
+  const runtime=normalizeRuntime(stored("get","runtime"));
+  stateBaselines.set(runtime,structuredClone(runtime));
+  return runtime;
 }
 async function saveRuntime(runtime) {
-  runtime=normalizeRuntime(runtime);
-  await fs.mkdir(pathMod.dirname(RUNTIME_PATH),{recursive:true});
-  await fs.writeFile(RUNTIME_PATH,JSON.stringify(runtime,null,2)+"\n");
+  const next=normalizeRuntime(runtime),base=stateBaselines.get(runtime);
+  if(!base) throw new Error("runtime state must be loaded before save");
+  stored("put","runtime",{base,next});
+  stateBaselines.set(runtime,structuredClone(next));
 }
 async function touchRuntime(project, patch={}) {
   const rt=await loadRuntime();
@@ -199,13 +225,15 @@ async function detectWebRateLimit(page, context="ui") {
 }
 
 async function loadRegistry() {
-  try { return normalizeRegistry(JSON.parse(await fs.readFile(REG_PATH, "utf8"))); }
-  catch { return emptyRegistry(); }
+  const registry=normalizeRegistry(stored("get","registry"));
+  stateBaselines.set(registry,structuredClone(registry));
+  return registry;
 }
 async function saveRegistry(reg) {
-  reg=normalizeRegistry(reg);
-  await fs.mkdir(pathMod.dirname(REG_PATH), { recursive: true });
-  await fs.writeFile(REG_PATH, JSON.stringify(reg, null, 2) + "\n");
+  const next=normalizeRegistry(reg),base=stateBaselines.get(reg);
+  if(!base) throw new Error("registry state must be loaded before save");
+  stored("put","registry",{base,next});
+  stateBaselines.set(reg,structuredClone(next));
 }
 function opt(name, def=null) {
   const i=args.indexOf("--"+name); return i>=0 ? args[i+1] : def;
@@ -263,10 +291,30 @@ function resolveChat(reg, key, project=null, account=null, includeInactive=false
   throw new Error("Ambiguous chat: "+key);
 }
 async function pagesOf(task) { try { return await task.pages(); } catch { return []; } }
-async function openBoundTask(reg, project, account=null) {
+function bindingObserved(reg, account, binding) {
+  const identity=reg.accounts?.[account]?.identity;
+  const observed=Object.values(reg.spaces||{}).filter(space=>space.identity===identity)
+    .flatMap(space=>space.projects||[]).map(project=>project.id);
+  if(!observed.length) return true;
+  const projectId=binding?.projectId||projectIdFromUrl(binding?.projectUrl||"");
+  const canonical=value=>String(value||"").match(/g-p-[0-9a-f]{32}/)?.[0]||null;
+  return canonical(projectId) && observed.some(value=>canonical(value)===canonical(projectId));
+}
+async function openBoundTask(reg, project, account=null, options={}) {
   const b=bindingFor(reg,project,account,true);
+  if(!bindingObserved(reg,b.account,b)) throw new Error(`PROJECT_NOT_OBSERVED_FOR_LOGIN: ${project} / ${b.account}; scan and bind the actual Project before UI work`);
   await assertWebAvailable(b.account);
-  const task=await taskSpace(b.spaceName);
+  let profileId=b.profileId||null, existingSpace=false;
+  if(typeof listTaskSpaces==="function") {
+    const identity=reg.accounts?.[b.account]?.identity;
+    const accountName=Object.values(reg.spaces||{}).find(space=>space.identity===identity&&space.accountName)?.accountName||reg.accounts?.[b.account]?.label||b.account;
+    const selected=SPACE_CATALOG.selectManagedSpace(b,accountName,await listTaskSpaces(),{pauseOnUserControl:!!options.pauseOnUserControl});
+    profileId=selected.profileId;
+    existingSpace=selected.existing;
+    if(selected.changed) { b.spaceName=selected.spaceName; b.spaceId=null; b.controlPage=null; }
+    if(selected.changed || b.profileId!==profileId) { b.profileId=profileId; await saveRegistry(reg); }
+  }
+  const task=await taskSpace(b.spaceName,!existingSpace&&profileId?{profileId}:undefined);
   const prior=taskAccounts.get(Number(task.spaceId));
   if(prior&&accountScope(reg,prior)!==accountScope(reg,b.account)) throw new Error("Space is bound to conflicting ChatGPT accounts");
   taskAccounts.set(Number(task.spaceId),b.account);
@@ -309,11 +357,55 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
   return null;
 }
 
+async function reclaimOrphanManagedPage(reg, task, binding) {
+  const rt=await loadRuntime();
+  const liveTasks=Object.values(rt.tasks||{}).filter(item=>activeTaskStatus(item.status));
+  const hasLiveTasks=liveTasks.some(item=>{
+    const chat=item.sessionId?reg.chats?.[item.sessionId]:null;
+    if(chat?.spaceName===binding.spaceName || (chat?.spaceId!=null && Number(chat.spaceId)===Number(task.spaceId))) return true;
+    const project=reg.projects?.[item.project];
+    const account=item.account||chat?.account||project?.activeAccount||reg.defaultAccount;
+    const taskBinding=project?.bindings?.[account];
+    return taskBinding?.spaceName===binding.spaceName ||
+      (taskBinding?.spaceId!=null && Number(taskBinding.spaceId)===Number(task.spaceId));
+  });
+  if(hasLiveTasks) return null;
+
+  const protectedPages=new Set();
+  for(const project of Object.values(reg.projects||{})) {
+    for(const candidateBinding of Object.values(project.bindings||{})) {
+      const sameSpace=candidateBinding?.spaceName===binding.spaceName ||
+        (candidateBinding?.spaceId!=null && Number(candidateBinding.spaceId)===Number(task.spaceId));
+      if(sameSpace && candidateBinding?.controlPage) protectedPages.add(candidateBinding.controlPage);
+    }
+  }
+  for(const chat of Object.values(reg.chats||{})) {
+    const sameSpace=chat?.spaceName===binding.spaceName ||
+      (chat?.spaceId!=null && Number(chat.spaceId)===Number(task.spaceId));
+    if(sameSpace && chat?.page) protectedPages.add(chat.page);
+  }
+
+  const pages=await task.pages().catch(()=>[]);
+  const tabs=await task.tabs().catch(()=>[]);
+  const candidates=orphanManagedPageCandidates(pages,tabs,{
+    hasLiveTasks:false,
+    protectedPageLabels:[...protectedPages],
+  });
+  for(const page of candidates) {
+    try {
+      await page.close();
+      return {page:page.label,reason:"orphan-managed"};
+    } catch {}
+  }
+  return null;
+}
+
 async function newManagedPage(reg, project, account, task, binding, excludeChatId=null) {
   try { return await task.newPage(); }
   catch(error) {
     if(!/page budget reached/i.test(String(error?.message||error))) throw error;
-    const reclaimed=await reclaimIdlePageSlot(reg,project,account,task,binding,excludeChatId);
+    const reclaimed=await reclaimIdlePageSlot(reg,project,account,task,binding,excludeChatId) ||
+      await reclaimOrphanManagedPage(reg,task,binding);
     if(!reclaimed) throw new Error(`Page budget reached in space "${binding.spaceName}" and no idle session page is safely reclaimable`);
     return await task.newPage();
   }
@@ -397,8 +489,8 @@ async function openConversationFromProject(page, binding, projectName, chatId) {
   return (await page.url()).includes("/c/"+chatId);
 }
 
-async function ensurePage(reg, chat) {
-  const {binding,task}=await openBoundTask(reg,chat.project,chat.account), pages=await pagesOf(task);
+async function ensurePage(reg, chat, options={}) {
+  const {binding,task}=await openBoundTask(reg,chat.project,chat.account,options), pages=await pagesOf(task);
   let page=pages.find(p=>p.label===chat.page) || null;
   if(!page) page=await newManagedPage(reg,chat.project,chat.account,task,binding,chat.id);
   chat.spaceName=binding.spaceName; chat.spaceId=task.spaceId; chat.lastUsedAt=new Date().toISOString();
@@ -544,6 +636,7 @@ function deliveryObserved(before, after) {
   if(!after) return false;
   if(after.messageCount>before.messageCount && after.lastUser) return true;
   if(after.lastUserId && after.lastUserId!==before.lastUserId) return true;
+  if(after.url && before?.url && after.url!==before.url && /\/c\/[0-9a-f-]+/i.test(after.url)) return true;
   return false;
 }
 
@@ -559,13 +652,33 @@ async function waitForDelivery(page, before, timeout=3000) {
   return latest||await state(page);
 }
 
+async function activateComposer(page) {
+  const point=await page.evaluate(() => {
+    const selector='div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]';
+    const items=[...document.querySelectorAll(selector)].filter(e=>{
+      const style=getComputedStyle(e);
+      return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none";
+    });
+    const e=items[items.length-1];
+    if(!e) return null;
+    const r=e.getBoundingClientRect();
+    return {x:r.left+r.width/2,y:r.top+r.height/2};
+  }).catch(()=>null);
+  if(point){
+    try { await page.mouse.click(point.x,point.y,{label:"activate composer"}); return; } catch {}
+  }
+  await page.focus(COMPOSER_SELECTOR);
+}
+
 async function triggerSend(page) {
   const hasSend=await page.evaluate(()=>!!document.querySelector('button[data-testid="send-button"]'));
   if(hasSend) {
     try { await page.click('button[data-testid="send-button"]'); return "click"; }
     catch {}
   }
-  await page.focus(COMPOSER_SELECTOR);
+  try { await page.press(COMPOSER_SELECTOR,"Enter"); return "enter"; }
+  catch {}
+  await activateComposer(page);
   await page.keyboard.press("Enter");
   return "enter";
 }
@@ -573,17 +686,21 @@ async function triggerSend(page) {
 async function sendMessage(page, msg) {
   await detectWebRateLimit(page,"send-before");
   const before=await state(page);
-  await page.focus(COMPOSER_SELECTOR);
-  await page.keyboard.press("ControlOrMeta+A");
-  await page.keyboard.press("Backspace");
-  await page.keyboard.insertText(msg);
+  assertComposerSafe(before);
+  try { await page.fill(COMPOSER_SELECTOR,msg); }
+  catch {
+    await activateComposer(page);
+    await page.keyboard.press("ControlOrMeta+A");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.insertText(msg);
+  }
   await page.waitForTimeout(80);
   const attempts=[];
   attempts.push(await triggerSend(page));
-  let after=await waitForDelivery(page,before,2200);
+  let after=await waitForDelivery(page,before,8000);
   if(!deliveryObserved(before,after) && String(after.composerText||"").trim()) {
     attempts.push(await triggerSend(page));
-    after=await waitForDelivery(page,before,2200);
+    after=await waitForDelivery(page,before,8000);
   }
   await detectWebRateLimit(page,"send-after");
   if(!deliveryObserved(before,after)) {
@@ -610,50 +727,65 @@ async function askMessage(page, msg, timeout=180000) {
 async function openModelMenu(page) {
   await detectWebRateLimit(page,"model-menu");
   await page.waitForFunction(() => [...document.querySelectorAll("form button")]
-    .some(x=>/\b(Instant|Medium|High|Extra High|Pro)\b/i.test((x.innerText||"").trim())), undefined, {timeout:15000});
-  const ok=await page.evaluate(() => {
-    document.querySelectorAll("[data-chat-bridge-model-button]").forEach(e=>e.removeAttribute("data-chat-bridge-model-button"));
+    .some(x=>{
+      const style=getComputedStyle(x);
+      return x.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" && !x.closest("[inert]") &&
+        /(Instant|Medium|High|Extra High|Pro)/i.test((x.innerText||"").trim());
+    }), undefined, {timeout:15000});
+  const label=await page.evaluate(() => {
     const form=document.querySelector("form");
-    const b=[...(form?.querySelectorAll("button")||[])].find(x=>/\b(Instant|Medium|High|Extra High|Pro)\b/i.test((x.innerText||"").trim()));
-    if(!b) return false;
-    b.setAttribute("data-chat-bridge-model-button","1");
-    return true;
+    const b=[...(form?.querySelectorAll("button")||[])].find(x=>{
+      const style=getComputedStyle(x);
+      return x.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" && !x.closest("[inert]") &&
+        /(Instant|Medium|High|Extra High|Pro)/i.test((x.innerText||"").trim());
+    });
+    return b?(b.innerText||"").trim():null;
   });
-  if(!ok) throw new Error("Model/effort button not found");
+  if(!label) throw new Error("Model/effort button not found");
   try {
-    await page.focus('button[data-chat-bridge-model-button="1"]');
-    await page.keyboard.press("Enter");
+    await page.click('loc=role:button[name="'+label+'"]');
   } catch {
     throw new Error("Model/effort button disappeared before menu open");
   }
-  await page.waitForFunction(()=>document.querySelectorAll('[role="menuitemradio"]').length>0,undefined,{timeout:5000});
+  await page.waitForFunction(()=>[...document.querySelectorAll('[role="menuitemradio"]')].some(e=>{
+    const style=getComputedStyle(e);
+    return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none";
+  }),undefined,{timeout:5000});
   await page.waitForTimeout(100);
 }
 async function setModel(page, model) {
   await page.keyboard.press("Escape");
   await openModelMenu(page);
-  const labels=await page.evaluate(()=>[...document.querySelectorAll('[role="menuitemradio"]')].map(e=>(e.innerText||"").trim()));
+  const labels=await page.evaluate(()=>[...document.querySelectorAll('[role="menuitemradio"]')].filter(e=>{
+    const style=getComputedStyle(e);
+    return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none";
+  }).map(e=>(e.innerText||"").trim()));
   try { model=selectModelLabel(labels,model); }
   catch(error){ await page.keyboard.press("Escape"); throw error; }
   const result=await page.evaluate((model)=>{
     document.querySelectorAll("[data-chat-bridge-model-option]").forEach(e=>e.removeAttribute("data-chat-bridge-model-option"));
-    const items=[...document.querySelectorAll('[role="menuitemradio"]')];
+    const items=[...document.querySelectorAll('[role="menuitemradio"]')].filter(e=>{
+      const style=getComputedStyle(e);
+      return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none";
+    });
     const x=items.find(e=>(e.innerText||"").trim().toLowerCase()===model.toLowerCase());
     if(!x) return {ok:false,available:items.map(e=>(e.innerText||"").trim())};
     x.setAttribute("data-chat-bridge-model-option","1");
-    return {ok:true};
+    const r=x.getBoundingClientRect();
+    return {ok:true,x:r.left+r.width/2,y:r.top+r.height/2};
   }, model);
   if(!result.ok){
     await page.keyboard.press("Escape");
     throw new Error("Model not found: "+model+"; available="+result.available.join(", "));
   }
-  await page.focus('[data-chat-bridge-model-option="1"]');
-  await page.keyboard.press("Enter");
+  await page.mouse.click(result.x,result.y,{label:"select model"});
   await page.waitForTimeout(250);
   await page.keyboard.press("Escape");
   await openModelMenu(page);
-  const checked=await page.evaluate((model)=>[...document.querySelectorAll('[role="menuitemradio"]')]
-    .some(e=>(e.innerText||"").trim().toLowerCase()===model.toLowerCase() && e.getAttribute("aria-checked")==="true"), model);
+  const checked=await page.evaluate((model)=>[...document.querySelectorAll('[role="menuitemradio"]')].filter(e=>{
+    const style=getComputedStyle(e);
+    return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none";
+  }).some(e=>(e.innerText||"").trim().toLowerCase()===model.toLowerCase() && e.getAttribute("aria-checked")==="true"), model);
   await page.keyboard.press("Escape");
   if(!checked) throw new Error("Model selection was not confirmed: "+model);
   return model;
@@ -697,6 +829,9 @@ async function modelSelectorAvailable(page) {
   return await page.evaluate(() => {
     const buttons=[...document.querySelectorAll("button")];
     return buttons.some(button=>{
+      const style=getComputedStyle(button);
+      if(button.getClientRects().length===0 || style.visibility==="hidden" || style.display==="none") return false;
+      if(button.closest('[data-message-author-role]')) return false;
       const label=((button.innerText||"")+" "+(button.getAttribute("aria-label")||"")).trim();
       return /\b(?:Latest|GPT[- ]?\d+(?:\.\d+)*(?:\s+(?:Sol|Terra))?)\b/i.test(label);
     });
@@ -837,15 +972,16 @@ async function notifyController(reg, task, message) {
   const failures=[];
   for(const target of targets) {
     try {
-      const controller=resolveChat(reg,target,task.project,task.account||null);
+      const controller=resolveControllerTarget(reg.chats,target,task.project,(task.replyToSessionRef||task.controllerSessionRef)?null:(task.account||null));
       if(controller.id===task.sessionId) {
         failures.push({target,reason:"target is task session"});
         continue;
       }
-      const {page}=await ensurePage(reg,controller);
-      await sendMessage(page,message);
-      delete task.watchdogPendingNotification;
-      return {sent:true,target,role:controller.role||controller.name,targets};
+      const operation=coordinated("callback",{taskId:task.taskId,targetRef:controller.id,message});
+      if(operation.status==="SENT") delete task.watchdogPendingNotification;
+      else task.watchdogPendingNotification=message;
+      return {sent:operation.status==="SENT",queued:operation.status==="QUEUED",operationId:operation.operationId,
+        status:operation.status,target,role:controller.role||controller.name,targets};
     } catch(error) {
       if(error?.code==="WEB_RATE_LIMITED") {
         task.watchdogPendingNotification=message;
@@ -887,7 +1023,7 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null) {
   try {
     const root=resolveChat(reg,candidate.rootRole,projectName,a);
     await assertWebAvailable(root.account||a);
-    const {page}=await ensurePage(reg,root);
+    const {page}=await ensurePage(reg,root,{pauseOnUserControl:true});
     const observed=await observeSession(root,page,null);
     if(observed.generating || !observed.inputReady || String(observed.composerText||"").trim()) {
       return {project:projectName,event:candidate.event,state:"ROOT_BUSY",eventKey:candidate.eventKey,
@@ -907,6 +1043,18 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null) {
       latestTaskId:candidate.latestTaskId,rootRole:candidate.rootRole,delivery};
   } catch(error) {
     const latest=await loadRuntime();
+    if(error?.code==="SPACE_IN_USER_CONTROL") {
+      latest.projects[projectName]={...(latest.projects[projectName]||{}),
+        pendingReconcileEvent:candidate,watchdogPausedForUserControl:true,
+        watchdogPausedAt:new Date().toISOString(),
+        watchdogPausedSpace:error.spaceName||null,
+        watchdogPausedOwnership:error.ownership||null};
+      delete latest.projects[projectName].lastReconcileError;
+      delete latest.projects[projectName].lastReconcileErrorAt;
+      await saveRuntime(latest);
+      return {project:projectName,event:candidate.event,state:"USER_CONTROLLED",paused:true,
+        spaceName:error.spaceName||null,ownership:error.ownership||null,eventKey:candidate.eventKey};
+    }
     latest.projects[projectName]={...(latest.projects[projectName]||{}),
       pendingReconcileEvent:candidate,lastReconcileError:String(error?.message||error),
       lastReconcileErrorAt:new Date().toISOString()};
@@ -959,10 +1107,39 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
   return {action:"RECOVERED",method,attempt:live.recoveryAttempts,detail};
 }
 
+async function clearUserControlPause(chat) {
+  const rt=await loadRuntime();
+  let changed=false;
+  for(const live of Object.values(rt.tasks||{})) {
+    const sameSession=live.sessionId===chat.id;
+    const sameRole=!live.sessionId && live.project===chat.project && live.role===chat.role &&
+      (live.account||chat.account)===chat.account;
+    if((sameSession||sameRole) && live.watchdogPausedForUserControl) {
+      delete live.watchdogPausedForUserControl;
+      delete live.watchdogPausedAt;
+      delete live.watchdogPausedSpace;
+      delete live.watchdogPausedOwnership;
+      live.updatedAt=new Date().toISOString();
+      changed=true;
+    }
+  }
+  const projectState=rt.projects?.[chat.project];
+  if(projectState?.watchdogPausedForUserControl) {
+    delete projectState.watchdogPausedForUserControl;
+    delete projectState.watchdogPausedAt;
+    delete projectState.watchdogPausedSpace;
+    delete projectState.watchdogPausedOwnership;
+    changed=true;
+  }
+  if(changed) await saveRuntime(rt);
+  return changed;
+}
+
 async function watchOnce(reg, project=null, account=null, options={}) {
   const rt=await loadRuntime(), results=[];
   const taskGapMs=Math.max(10000,Number(process.env.CHAT_BRIDGE_WATCH_TASK_GAP_MS||10000)||10000);
-  const tasks=Object.values(rt.tasks||{}).filter(t=>(activeTaskStatus(t.status)||(t.status==="BLOCKED"&&t.watchdogPendingNotification)) && (!project||t.project===project) &&
+  const tasks=Object.values(rt.tasks||{}).filter(t=>!t.watchdogPausedForUserControl &&
+    (activeTaskStatus(t.status)||(t.status==="BLOCKED"&&t.watchdogPendingNotification)) && (!project||t.project===project) &&
     (!account||(reg.chats[t.sessionId]?.account||t.account||reg.projects[t.project]?.activeAccount||reg.defaultAccount)===account));
   let lastVisitedAt=0;
   for(const task of tasks) {
@@ -983,7 +1160,7 @@ async function watchOnce(reg, project=null, account=null, options={}) {
         continue;
       }
       if(!task.sessionId) task.sessionId=chat.id;
-      const {page}=await ensurePage(reg,chat);
+      const {page}=await ensurePage(reg,chat,{pauseOnUserControl:true});
       const observed=await observeSession(chat,page,task);
       let recovery={action:"NONE"}, notification=null;
       if(options.autoRecover!==false && ["ERROR_RECOVERABLE","IDLE_INCOMPLETE","SUSPECT_STALL","BLOCKED"].includes(observed.sessionState)) {
@@ -1030,6 +1207,22 @@ async function watchOnce(reg, project=null, account=null, options={}) {
         quietForSec:observed.quietForSec,runningForSec:observed.runningForSec,recovery,notification});
     } catch(error) {
       if(error?.code==="WEB_RATE_LIMITED"){ results.push({taskId:task.taskId,account:error.account,role:task.role,state:"WEB_COOLDOWN",reason:"CHATGPT_RATE_LIMIT"}); continue; }
+      if(error?.code==="SPACE_IN_USER_CONTROL") {
+        const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
+        live.watchdogPausedForUserControl=true;
+        live.watchdogPausedAt=new Date().toISOString();
+        live.watchdogPausedSpace=error.spaceName||chat?.spaceName||null;
+        live.watchdogPausedOwnership=error.ownership||null;
+        live.watchErrorCount=0;
+        delete live.lastWatchError;
+        delete live.lastWatchErrorAt;
+        live.updatedAt=new Date().toISOString();
+        latest.tasks[live.taskId]=live;
+        await saveRuntime(latest);
+        results.push({taskId:task.taskId,role:task.role,sessionId:chat?.id||task.sessionId||null,
+          state:"USER_CONTROLLED",paused:true,spaceName:live.watchdogPausedSpace,ownership:live.watchdogPausedOwnership});
+        continue;
+      }
       const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
       live.watchErrorCount=Number(live.watchErrorCount||0)+1; live.lastWatchError=error.message; live.lastWatchErrorAt=new Date().toISOString();
       let notification=null;
@@ -1135,13 +1328,42 @@ async function pruneProjectSpace(reg, project, account=null) {
     kept:[...keep],detached,closed};
 }
 
+async function gcAgentSpaces(reg, confirm=false) {
+  if(typeof listTaskSpaces!=="function") throw new Error("Ego TaskSpace enumeration is unavailable");
+  const runtime=await loadRuntime();
+  const available=await listTaskSpaces();
+  const candidates=SPACE_CATALOG.agentSpaceGcCandidates(reg,runtime,available);
+  const summary=candidates.map(space=>({id:space.id,name:space.name,ownership:space.ownership,profileId:space.profileId||null}));
+  if(!confirm) return {ok:true,dryRun:true,candidates:summary};
+  const reclaimed=[], skipped=[];
+  for(const candidate of candidates) {
+    const fresh=(await listTaskSpaces()).find(space=>space.id===candidate.id&&space.name===candidate.name);
+    if(!fresh || fresh.ownership!=="agent") {
+      skipped.push({id:candidate.id,name:candidate.name,reason:"ownership_changed"});
+      continue;
+    }
+    const stillSafe=SPACE_CATALOG.agentSpaceGcCandidates(reg,await loadRuntime(),[fresh]);
+    if(!stillSafe.length) {
+      skipped.push({id:candidate.id,name:candidate.name,reason:"became_bound_or_live"});
+      continue;
+    }
+    const task=await taskSpace(fresh.id);
+    await task.finish({keep:[]});
+    reclaimed.push({id:fresh.id,name:fresh.name});
+  }
+  return {ok:true,dryRun:false,reclaimed,skipped};
+}
+
 const cmd=args[0] || "help";
 const reg=await loadRegistry();
 const project=opt("project",cmd==="watch"?null:reg.defaultProject);
 const accountArg=opt("account",null);
 
 if(cmd==="help"){
-  print("chat-bridge commands: init [--root-controller ROLE], policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, event list, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE], watch, read, status, send [--task ID --controller ROLE], ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune");
+  print("chat-bridge commands: init [--root-controller ROLE], policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, event list, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE], watch, read, status, send [--task ID --controller ROLE], ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune|gc|scan|map|restore|label");
+}
+else if(cmd==="topology"){
+  print(TOPOLOGY.topologyPreview(reg,await loadRuntime()));
 }
 else if(cmd==="init"){
   const p=project||args[1]; if(!p) throw new Error("project required");
@@ -1230,23 +1452,105 @@ else if(cmd==="account"){
     print({ok:true,account:a,scope:accountScope(reg,a),spaceName:binding.spaceName,identityVerified:true});
   } else throw new Error("account subcommand must be list, add, use, or identify");
 }
-else if(cmd==="space"){
-  const sub=args[1]||"show", p=project; if(!p) throw new Error("--project required");
-  const a=activeAccount(reg,p,accountArg), b=bindingFor(reg,p,a,true);
-  if(sub==="show") print({project:p,account:a,spaceName:b.spaceName,spaceId:b.spaceId,controlPage:b.controlPage});
-  else if(sub==="bind"){
-    const name=args[2]; if(!name) throw new Error("space name required");
-    b.spaceName=name; b.spaceId=null; b.controlPage=null;
-    for(const c of Object.values(reg.chats)) if(c.project===p&&c.account===a&&c.status==="active"){
-      c.spaceName=name; c.spaceId=null; c.page=null;
+else if(cmd==="space" && args[1]==="label"){
+  if(!SPACE_CATALOG) throw new Error("Space catalog module not loaded");
+  const name=opt("space",null), id=opt("project-id",null), label=opt("name",null);
+  const item=SPACE_CATALOG.recordProjectName(reg,name,id,label);
+  await saveRegistry(reg);
+  print({ok:true,space:name,projectId:id,name:item.name});
+}
+else if(cmd==="space" && ["scan","map","restore"].includes(args[1])){
+  if(!SPACE_CATALOG) throw new Error("Space catalog module not loaded");
+  const sub=args[1];
+  if(sub==="map") print(SPACE_CATALOG.spaceMap(reg));
+  else {
+    const requested=opt("space",null);
+    if(sub==="scan"&&!requested) throw new Error("space scan requires --space NAME");
+    const names=sub==="scan"?[requested]:requested?[requested]:Object.keys(reg.spaces);
+    const available=await listTaskSpaces();
+    const results=[];
+    for(const name of names){
+      const matches=available.filter(s=>s.name===name);
+      if(matches.length>1) throw new Error(`AMBIGUOUS_SPACE: ${name}`);
+      const info=matches[0];
+      if(!info) throw new Error(`SPACE_NOT_FOUND: ${name}; reopen the saved Ego Space first`);
+      if(info.ownership==="agentDelegatedToUser") throw new Error(`SPACE_IN_USER_CONTROL: ${name}`);
+      const claimed=info.ownership==="user";
+      const task=claimed?await claimTaskSpace(info.id):await taskSpace(info.id);
+      let adopted=null, probe=null, verified=false;
+      try {
+        let tabs=await task.tabs();
+        const tab=tabs.find(t=>t.url==="https://chatgpt.com/"||t.url==="https://chatgpt.com")||
+          tabs.find(t=>t.active&&t.url?.startsWith("https://chatgpt.com/"))||
+          tabs.find(t=>t.url?.startsWith("https://chatgpt.com/"));
+        let page;
+        if(tab){
+          page=tab.label?task.page(tab.label):await task.adopt(tab.page);
+          if(!tab.label) adopted=page.label;
+        } else if(sub==="restore" && reg.spaces[name]?.projects?.length){
+          page=probe=await task.newPage();
+          await page.goto(reg.spaces[name].projects[0].url);
+          tabs=[...tabs,{url:reg.spaces[name].projects[0].url}];
+        } else throw new Error(`No open ChatGPT tab in ${name}; login cannot be verified`);
+        const login=await page.evaluate(async()=>{
+          if(location.origin!=="https://chatgpt.com") throw new Error("ChatGPT origin required");
+          const response=await fetch("/api/auth/session",{credentials:"same-origin",signal:AbortSignal.timeout(5000)});
+          if(!response.ok) throw new Error(`ChatGPT login unavailable: ${response.status}`);
+          const user=(await response.json()).user;
+          if(!user?.id) throw new Error("ChatGPT login ID unavailable");
+          return {id:user.id,name:user.name||user.id};
+        });
+        if(sub==="scan"){
+          const item=SPACE_CATALOG.recordSpace(reg,{name,spaceId:task.spaceId,identity:login.id,
+            accountName:login.name,profileId:info.profileId,ownership:info.ownership,
+            urls:tabs.map(t=>t.url)});
+          await saveRegistry(reg);
+          results.push({space:name,account:item.account,accountName:item.accountName,
+            projectIds:item.projects.map(p=>p.id),observedAt:item.observedAt});
+        } else {
+          const item=reg.spaces[name];
+          if(!item) throw new Error(`SPACE_NOT_RECORDED: ${name}`);
+          if(item.identity!==login.id) throw new Error(`SPACE_ACCOUNT_CHANGED: ${name}`);
+          verified=true;
+          const opened=[];
+          for(const url of SPACE_CATALOG.missingProjectUrls(item,tabs.map(t=>t.url))){
+            const next=await task.newPage();
+            await next.goto(url);
+            opened.push(url);
+          }
+          results.push({space:name,account:item.account,verified:true,opened,alreadyOpen:item.projects.length-opened.length});
+        }
+      } finally {
+        if(probe&&!verified) await probe.close();
+        if(adopted) await task.release(adopted);
+        if(claimed) await task.finish({keep:"all"});
+      }
     }
-    await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:name,lastCommand:"space bind"});
-    print({ok:true,project:p,account:a,spaceName:name});
-  } else if(sub==="prune"){
-    const result=await pruneProjectSpace(reg,p,a);
-    await touchRuntime(p,{activeAccount:a,spaceName:b.spaceName,lastCommand:"space prune"});
-    print(result);
-  } else throw new Error("space subcommand must be show, bind, or prune");
+    print({ok:true,results});
+  }
+}
+else if(cmd==="space"){
+  const sub=args[1]||"show";
+  if(sub==="gc") {
+    print(await gcAgentSpaces(reg,args.includes("--confirm")));
+  } else {
+    const p=project; if(!p) throw new Error("--project required");
+    const a=activeAccount(reg,p,accountArg), b=bindingFor(reg,p,a,true);
+    if(sub==="show") print({project:p,account:a,spaceName:b.spaceName,spaceId:b.spaceId,controlPage:b.controlPage});
+    else if(sub==="bind"){
+      const name=args[2]; if(!name) throw new Error("space name required");
+      b.spaceName=name; b.spaceId=null; b.controlPage=null;
+      for(const c of Object.values(reg.chats)) if(c.project===p&&c.account===a&&c.status==="active"){
+        c.spaceName=name; c.spaceId=null; c.page=null;
+      }
+      await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:name,lastCommand:"space bind"});
+      print({ok:true,project:p,account:a,spaceName:name});
+    } else if(sub==="prune"){
+      const result=await pruneProjectSpace(reg,p,a);
+      await touchRuntime(p,{activeAccount:a,spaceName:b.spaceName,lastCommand:"space prune"});
+      print(result);
+    } else throw new Error("space subcommand must be show, bind, prune, or gc");
+  }
 }
 else if(cmd==="register"){
   const raw=opt("url")||opt("id")||args[1]; if(!raw) throw new Error("url/id required");
@@ -1314,11 +1618,23 @@ else if(cmd==="task"){
       replyTo:opt("reply-to",old.replyTo||null),
       escalationTo:opt("escalation-to",old.escalationTo||null),
     },rootController);
+    const callerRef=opt("caller-ref",old.controllerSessionRef||null);
+    const replyRef=opt("reply-to-session",old.replyToSessionRef||callerRef);
+    const baselineCountText=opt("baseline-assistant-count",null);
+    if(baselineCountText!==null && !/^\d+$/.test(baselineCountText)) throw new Error("baseline assistant count must be a nonnegative integer");
+    if(callerRef) resolveControllerTarget(reg.chats,callerRef,taskProject);
+    if(replyRef) resolveControllerTarget(reg.chats,replyRef,taskProject);
     const candidate={...old,...route,taskId,project:taskProject,role,
+      controllerSessionRef:callerRef,replyToSessionRef:replyRef,
       account:opt("account",old.account||taskAccount||null),sessionId,
       issue:opt("issue",old.issue||null),github:opt("github",old.github||null),status:opt("status",old.status||"RUNNING"),
       affinityKey:opt("affinity-key",old.affinityKey||null),
       completionMode:normalizeCompletionMode(opt("completion-mode",old.completionMode||"durable")),
+      originalMessage:opt("original-message",old.originalMessage||null),
+      baselineAssistantCount:baselineCountText!==null?Number(baselineCountText):old.baselineAssistantCount,
+      baselineAssistantHash:opt("baseline-assistant-hash",old.baselineAssistantHash||null),
+      baselineAssistantId:opt("baseline-assistant-id",old.baselineAssistantId||null),
+      dispatchedAt:opt("dispatched-at",old.dispatchedAt||null),
       stallThresholdSec:opt("stall-sec",old.stallThresholdSec||null)?Number(opt("stall-sec",old.stallThresholdSec||null)):null,
       updatedAt:new Date().toISOString()};
     candidate.createdAt ||= candidate.updatedAt;
@@ -1356,7 +1672,9 @@ else if(["archive","retire","delete","forget"].includes(cmd)){
 }
 else if(["read","status","send","ask","model","effort","stop","retry","recover","resend"].includes(cmd)){
   const key=args[1]; if(!key) throw new Error("chat key required");
-  const chat=resolveChat(reg,key,project,accountArg), {page,binding}=await ensurePage(reg,chat);
+  const chat=resolveChat(reg,key,project,accountArg);
+  if(["send","ask","retry","recover","resend"].includes(cmd)) await clearUserControlPause(chat);
+  const {page,binding}=await ensurePage(reg,chat);
   await touchRuntime(chat.project,{activeAccount:chat.account,spaceName:binding.spaceName,lastCommand:cmd,lastSession:chat.id});
   if(cmd==="read") print((await state(page)).lastAssistant);
   if(cmd==="status"){
@@ -1370,9 +1688,10 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
   if(cmd==="send"){
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
     const dispatchModel=await applyConfiguredSessionModel(page,chat);
-    const taskOpt=opt("task",null), taskId=taskOpt?assertTaskId(taskOpt):null; let tracked=null;
+    const taskOpt=opt("task",null), taskId=taskOpt?assertTaskId(taskOpt):null; let tracked=null, priorTask=null;
     if(taskId){
       const before=await state(page), rt=await loadRuntime(), old=rt.tasks[taskId]||{};
+      priorTask=rt.tasks[taskId]||null;
       const rootController=projectRecord(reg,chat.project).rootController;
       const route=controlRoute({
         ...old,
@@ -1380,7 +1699,12 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
         replyTo:opt("reply-to",old.replyTo||null),
         escalationTo:opt("escalation-to",old.escalationTo||null),
       },rootController);
+      const callerRef=opt("caller-ref",old.controllerSessionRef||null);
+      const replyRef=opt("reply-to-session",old.replyToSessionRef||callerRef);
+      if(callerRef) resolveControllerTarget(reg.chats,callerRef,chat.project);
+      if(replyRef) resolveControllerTarget(reg.chats,replyRef,chat.project);
       tracked={...old,...route,taskId,project:chat.project,role:chat.role,account:chat.account,sessionId:chat.id,status:"DISPATCHED",
+        controllerSessionRef:callerRef,replyToSessionRef:replyRef,
         affinityKey:opt("affinity-key",old.affinityKey||chat.affinityKey||null),
         completionMode:normalizeCompletionMode(opt("completion-mode",old.completionMode||"durable")),
         originalMessage:msg,baselineAssistantCount:before.assistantCount,baselineAssistantHash:hashText(before.lastAssistant||""),baselineAssistantId:before.lastAssistantId||null,
@@ -1397,8 +1721,16 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
     catch(error) {
       if(tracked){
         const rt=await loadRuntime(), live=rt.tasks[taskId];
-        live.status="BLOCKED"; live.blockedReason=String(error?.message||error); live.updatedAt=new Date().toISOString();
-        rt.tasks[taskId]=live; await saveRuntime(rt);
+        if(isPreSendDefer(error)){
+          if(live?.dispatchedAt===tracked.dispatchedAt){
+            if(priorTask) rt.tasks[taskId]=priorTask; else delete rt.tasks[taskId];
+            await saveRuntime(rt);
+          }
+        } else if(live){
+          live.status="BLOCKED"; live.blockedReason=String(error?.message||error); live.updatedAt=new Date().toISOString();
+          rt.tasks[taskId]=live;
+          await saveRuntime(rt);
+        }
       }
       throw error;
     }
@@ -1451,13 +1783,16 @@ else if(cmd==="new"){
       const observed=observedModel((await state(page)).mode);
       applied={model,effort:requestedEffort||observed.effort||null,observed,deferredUntilDispatch:true};
     }
+    const before=await state(page);
     await sendMessage(page,first); await page.waitForURL(/\/c\/[0-9a-f-]+/i,{timeout:30000});
     const url=await page.url(), id=convId(url), projectBase=url.includes("/g/g-p-")?url.replace(/\/c\/[^/]+.*$/,''):binding.projectBase;
     if(projectBase){binding.projectBase=projectBase;binding.projectUrl=projectBase+"/project";binding.projectId=projectIdFromUrl(projectBase);}
     reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model,effort:requestedEffort||applied.effort||null,affinityKey,
       spaceName:binding.spaceName,spaceId:task.spaceId,page:page.label,createdAt:new Date().toISOString()};
     await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:binding.spaceName,lastCommand:"new",lastSession:id});
-    print({...reg.chats[id],modelSelection:applied.observed});
+    print({...reg.chats[id],modelSelection:applied.observed,baselineAssistantCount:before.assistantCount,
+      baselineAssistantHash:hashText(before.lastAssistant||""),baselineAssistantId:before.lastAssistantId||null,
+      dispatchedAt:new Date().toISOString()});
   } catch (error) {
     await page.close().catch(()=>{}); throw error;
   }

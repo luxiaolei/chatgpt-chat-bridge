@@ -41,6 +41,14 @@ test("preflight stays asleep when project auto reconcile is disabled", async()=>
   assert.equal(run(config,state),"0");
 });
 
+test("preflight stays asleep while project reconcile is paused for user control", async()=>{
+  const {config,state}=await fixture(true,false);
+  const runtime=JSON.parse(await (await import("node:fs/promises")).readFile(path.join(state,"runtime.json"),"utf8"));
+  runtime.projects.P={watchdogPausedForUserControl:true,watchdogPausedSpace:"Manual"};
+  await writeFile(path.join(state,"runtime.json"),JSON.stringify(runtime));
+  assert.equal(run(config,state),"0");
+});
+
 test("UI pacing scope follows stable ChatGPT account identity", async()=>{
   const root=await mkdtemp(path.join(tmpdir(),"chat-bridge-scope-"));
   const config=path.join(root,"config"), state=path.join(root,"state");

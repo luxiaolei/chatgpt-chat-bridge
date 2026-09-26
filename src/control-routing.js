@@ -30,6 +30,8 @@
     };
   }
   function notificationTargets(task = {}, rootController = "conductor") {
+    const exact = clean(task.replyToSessionRef) || clean(task.controllerSessionRef);
+    if (exact) return [exact];
     const route = controlRoute(task, rootController);
     const ordered = [
       route.replyTo,
@@ -44,10 +46,21 @@
       return true;
     });
   }
+  function resolveControllerTarget(chats, target, project, account = null) {
+    const key = clean(target);
+    const active = (chat) => chat && chat.status !== "deleted" && chat.status !== "retired" && chat.project === project;
+    const direct = chats[key];
+    if (direct && direct.status !== "deleted" && direct.status !== "retired") return direct;
+    const matches = Object.values(chats).filter(chat => active(chat) && (!account || chat.account === account) &&
+      [chat.role, chat.name, chat.alias, chat.title].includes(key));
+    if (matches.length === 1) return matches[0];
+    throw new Error(`${matches.length ? "AMBIGUOUS_CONTROLLER" : "UNKNOWN_CONTROLLER"}: ${key}`);
+  }
 
   globalObject.__CHAT_BRIDGE_CONTROL__ = {
     cleanControlRole: clean,
     controlRoute,
     notificationTargets,
+    resolveControllerTarget,
   };
 })(globalThis);

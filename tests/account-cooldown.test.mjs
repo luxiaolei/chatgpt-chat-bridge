@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {mkdtemp, mkdir, writeFile, readFile, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import path from "node:path";
+globalThis.__CHAT_BRIDGE_STORE_PATH__=path.resolve("src/state-store.py");
+globalThis.__CHAT_BRIDGE_COORDINATOR_PATH__=path.resolve("src/coordinator.py");
 import {createHash} from "node:crypto";
 import {spawnSync} from "node:child_process";
 
@@ -85,6 +87,12 @@ test("account cooldown follows identity across projects and aliases; other login
     await writeFile(path.join(state,"runtime.json"),JSON.stringify({tasks}));
     assert.equal(run("watch",["watch","--account","b"]).stdout.trim(),"1");
     tasks.two.status="RUNNING";delete tasks.two.watchdogPendingNotification;
+    tasks.two.watchdogPausedForUserControl=true;
+    await writeFile(path.join(state,"runtime.json"),JSON.stringify({tasks}));
+    assert.equal(run("watch",["watch","--account","b"]).stdout.trim(),"0");
+    delete tasks.two.watchdogPausedForUserControl;
+    await writeFile(path.join(state,"runtime.json"),JSON.stringify({tasks}));
+    assert.equal(run("watch",["watch","--account","b"]).stdout.trim(),"1");
     assert.equal(run("clear",["cooldown","clear","--account","b","--confirm"]).status,0);
     assert.equal(status(["cooldown","status","--account","a"]).active,true);
     assert.equal(run("clear",["cooldown","clear","--account","alias","--confirm"]).status,0);
@@ -105,6 +113,7 @@ test("account cooldown follows identity across projects and aliases; other login
     // The persistent wrapper stays local when idle, then notices newly added work.
     await writeFile(fake,"#!/bin/sh\ncat >/dev/null\necho browser-entered\n",{mode:0o755});
     await rm(path.join(state,"ui-pacing.last"),{force:true});
+    await rm(path.join(state,"ui-pacing-"+scope("user-two")+".last"),{force:true});
     await writeFile(path.join(state,"runtime.json"),JSON.stringify({tasks:{one:tasks.one}}));
     const loop=spawnSync("python3",["-c",`
 import json, pathlib, runpy, sys
@@ -141,6 +150,7 @@ test("runtime stops a cooling identity before browser access and continues anoth
         bind:(id,a)=>taskAccounts.set(id,a),
         sender:(fn)=>{sendMessage=fn;},
         modelUI:(menu,snapshot)=>{openModelMenu=menu;state=snapshot;},
+        clearUserControlPause,
         override:(ensure,observe)=>{ensurePage=ensure;observeSession=observe;}};
     `)(callback=>callback(),async name=>({spaceId:name==="empty"?10:11,pages:async()=>name==="empty"?[]:[{label:"ready",url:async()=>"https://chatgpt.com/"}]}));
     assert.equal(api.accountScope(reg,"a"),scope("same"));
@@ -163,32 +173,31 @@ test("runtime stops a cooling identity before browser access and continues anoth
     assert.equal(runtime.tasks.a.watchErrorCount,undefined);
     assert.equal(runtime.tasks.alias.status,"RUNNING");
     await rm(path.join(state,"web-cooldowns",scope("same")+".json"));
-    tasks.a.watchErrorCount=2;
-    tasks.a.controller="controller";
-    reg.chats.controller={id:"controller",project:"A",account:"a",status:"active",role:"controller"};
-    await writeFile(path.join(state,"runtime.json"),JSON.stringify({tasks}));
-    visited.length=0;
-    api.override(async(_reg,chat)=>{
-      visited.push(chat.id);
-      if(chat.id==="a")throw new Error("broken page");
-      if(chat.id==="controller")throw Object.assign(new Error("controller cooling"),{code:"WEB_RATE_LIMITED",account:"a"});
-      return {page:{}};
-    },async()=>({sessionState:"RUNNING_QUIET"}));
-    const callbackScan=await api.watchOnce(reg);
-    assert.deepEqual(visited,["a","controller","alias","b"]);
-    assert.equal(callbackScan[0].notification.reason,"WEB_COOLDOWN");
-    assert.equal(JSON.parse(await readFile(path.join(state,"runtime.json"),"utf8")).tasks.a.status,"BLOCKED");
-    visited.length=0;
-    const delivered=[];
-    api.sender(async(_page,message)=>delivered.push(message));
-    api.override(async(_reg,chat)=>{visited.push(chat.id);return {page:{}};},async()=>({sessionState:"RUNNING_QUIET"}));
-    await api.watchOnce(reg);
-    assert.deepEqual(visited,["controller","alias","b"]);
-    assert.equal(delivered.length,1);
-    const afterDelivery=JSON.parse(await readFile(path.join(state,"runtime.json"),"utf8")).tasks.a;
-    assert.equal(afterDelivery.status,"BLOCKED");
-    assert.equal(afterDelivery.watchdogPendingNotification,undefined);
-    assert.ok(afterDelivery.watchdogNotifiedAt);
+
+    // A user-controlled Space pauses watchdog polling without turning the task into an error.
+    await writeFile(path.join(state,"runtime.json"),JSON.stringify({tasks:{
+      b:{taskId:"b",sessionId:"b",project:"B",account:"b",status:"RUNNING"}
+    }}));
+    let userControlVisits=0;
+    api.override(async()=>{
+      userControlVisits++;
+      const error=new Error("SPACE_IN_USER_CONTROL: Reality Agent");
+      error.code="SPACE_IN_USER_CONTROL";error.spaceName="Reality Agent";error.ownership="user";
+      throw error;
+    },async()=>({sessionState:"RUNNING_QUIET",recommendation:"WAIT",mode:"5.6 Pro"}));
+    const paused=await api.watchOnce(reg,"B","b",{autoRecover:false});
+    assert.equal(paused[0].state,"USER_CONTROLLED");
+    let pausedRuntime=JSON.parse(await readFile(path.join(state,"runtime.json"),"utf8"));
+    assert.equal(pausedRuntime.tasks.b.watchdogPausedForUserControl,true);
+    assert.equal(pausedRuntime.tasks.b.watchErrorCount,0);
+    assert.equal(pausedRuntime.tasks.b.status,"RUNNING");
+    assert.equal(userControlVisits,1);
+    assert.deepEqual(await api.watchOnce(reg,"B","b",{autoRecover:false}),[]);
+    assert.equal(userControlVisits,1);
+    assert.equal(await api.clearUserControlPause(reg.chats.b),true);
+    pausedRuntime=JSON.parse(await readFile(path.join(state,"runtime.json"),"utf8"));
+    assert.equal(pausedRuntime.tasks.b.watchdogPausedForUserControl,undefined);
+    // Callback delivery now belongs to the durable coordinator and is tested there.
     reg.projects.A.bindings.a={account:"a",spaceName:"empty",spaceId:10};
     reg.projects.B.bindings.a={account:"a",spaceName:"ready",spaceId:11};
     assert.equal((await api.accountPage(reg,"a")).label,"ready");

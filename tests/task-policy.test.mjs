@@ -7,6 +7,8 @@ const {
   assertTaskId,
   assertActiveTaskTarget,
   activeSessionConflict,
+  assertComposerSafe,
+  isPreSendDefer,
 } = globalThis.__CHAT_BRIDGE_TASK_POLICY__;
 
 test("stable task IDs are accepted", () => {
@@ -49,4 +51,16 @@ test("same task update and terminal prior task do not conflict", () => {
 test("blocked is terminal for watchdog/admission purposes", () => {
   assert.equal(activeTaskStatus("BLOCKED"), false);
   assert.equal(activeTaskStatus("AWAITING_DURABLE_UPDATE"), true);
+});
+
+test("busy or draft pre-send errors can restore the previous task record", () => {
+  assert.equal(isPreSendDefer(new Error("CHAT_BUSY")), true);
+  assert.equal(isPreSendDefer(new Error("USER_DRAFT_PRESENT")), true);
+  assert.equal(isPreSendDefer(new Error("DELIVERY_UNCONFIRMED")), false);
+});
+
+test('pending user draft and generation stop message dispatch before editing', () => {
+  assert.doesNotThrow(() => assertComposerSafe({ inputReady: true, generating: false, composerText: '' }));
+  assert.throws(() => assertComposerSafe({ inputReady: true, generating: false, composerText: 'my draft' }), /USER_DRAFT_PRESENT/);
+  assert.throws(() => assertComposerSafe({ inputReady: false, generating: true, composerText: '' }), /CHAT_BUSY/);
 });
