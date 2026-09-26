@@ -1124,6 +1124,10 @@ async function consolidateAccountSpace(reg, account, options={}) {
   if(!options.confirm) return preview;
   if(!safe) return {...preview,ok:false,status:"NOT_DRAINED"};
   const {task}=await accountManagedTask(reg,account,plan.profileId);
+  if(!coordinated("migration-check",{account}).safe) return {...preview,ok:false,status:"NOT_DRAINED_AFTER_RECHECK"};
+  for(const space of oldSpaces.filter(item=>!item.missing)) {
+    if((await (await taskSpace(space.spaceId)).tabs()).length) return {...preview,ok:false,status:"OLD_SPACE_REOPENED"};
+  }
   for(const item of affected) {
     const binding=reg.projects[item.project].bindings[item.account];
     binding.spaceName=plan.spaceName;binding.profileId=plan.profileId;binding.spaceId=task.spaceId;binding.controlPage=null;
@@ -1138,12 +1142,16 @@ async function consolidateAccountSpace(reg, account, options={}) {
     }
   }
   await saveRegistry(reg);
-  const closed=[];
+  const closed=[],skipped=[];
   for(const space of oldSpaces.filter(item=>!item.missing)) {
-    await (await taskSpace(space.spaceId)).finish({keep:[]});
+    const fresh=(await listTaskSpaces()).find(item=>item.id===space.spaceId&&item.name===space.name);
+    if(!fresh || fresh.ownership!=="agent" || fresh.profileId!==plan.profileId){ skipped.push(space.name); continue; }
+    const old=await taskSpace(space.spaceId);
+    if((await old.tabs()).length){ skipped.push(space.name); continue; }
+    await old.finish({keep:[]});
     closed.push(space.name);
   }
-  return {...preview,dryRun:false,spaceId:task.spaceId,oldSpacesClosed:closed,migrated:true};
+  return {...preview,dryRun:false,spaceId:task.spaceId,oldSpacesClosed:closed,oldSpacesSkipped:skipped,migrated:true};
 }
 
 async function createProjectViaUI(page, projectName) {
