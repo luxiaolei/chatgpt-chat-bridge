@@ -66,12 +66,12 @@ chat-bridge ask review-agent "Review PR #34" --project "My Project"
 chat-bridge new \
   --project "My Project" \
   --name implementation-agent \
-  --model "GPT-5.6 Sol" \
+  --model Latest \
   --effort High \
   --message "负责 Issue #12；完成后先更新 GitHub，再回调 conductor。"
 ```
 
-同一个逻辑 Project + ChatGPT 账号只绑定一个 Ego Space；新 Session 会在这个 Space 里 `newPage()` 新开 tab。Conversation ID/role 是长期身份，Ego page/tab 只是可回收的运行 attachment：当 managed page budget 已满时，bridge 可以自动 detach 最旧的安全空闲 Session，后续再按 conversation URL 重新 attach。controlPage、正在生成、绑定 active task、当前 active tab 或 composer 有草稿的 Session 都不会被回收。
+同一个已验证 ChatGPT 登录/Profile 默认只保留一个 Bridge-managed Ego Space；这个 Space 可以同时承载多个 Project 和多个 Session 的 tab。逻辑 role/controller 是长期身份；具体 Conversation ID 是可接替的一代会话，Space/page 只是运行 attachment。运行中的任务默认保持 attached；任务结果已经持久化为 `RESULT_RECORDED` 或进入终态后，超过安全 grace period 且页面为非 active、Bridge-managed、无生成/草稿/人工 ownership 时，Bridge 才会自动关 tab，后续按 conversation URL lazy reattach。增加同账号 Space 不等于增加额度或并发容量。
 
 ## 账号与 Space 绑定
 
@@ -150,7 +150,7 @@ Runtime state 可重建，**GitHub Issue / PR 仍然是最终事实源**。
 
 ## 模型版本与 Thinking Level
 
-新 Chat 默认 `Latest`（`GPT-6` 是当前别名），不会默认强制 Pro；未指定 Thinking Level 时保留页面默认档位。`5.6 Pro` / `5.5 Pro` 会选择对应旧版本并调到 Pro。也可用 `model AGENT Latest --effort High` 分别指定。模型不可用或匹配有歧义时明确报错，不静默替换。Latest 模型额度耗尽后，调用方可显式选择 `5.6 Pro`；模型额度与账号的网页访问限流分开处理。
+新 Chat 默认 `Latest`，不会默认强制 Pro；未指定 Thinking Level 时保留页面默认档位。Bridge 的 `GPT-6` / `GPT-6 Pro` 别名分别选择 `Latest` / `Latest + Pro`，但移动的 `Latest` 页面标签本身不能证明底层是固定的 GPT-6 版本。`5.6 Pro` / `5.5 Pro` 会选择对应旧版本并调到 Pro。也可用 `model AGENT Latest --effort High` 分别指定。模型不可用或匹配有歧义时明确报错，不静默替换。Latest 模型额度耗尽后，调用方可显式选择 `5.6 Pro`；模型额度与账号的网页访问限流分开处理。
 
 `status`、`send`、`ask`、`new`、`model`、`effort` 返回 `modelSelection`：页面实际模型、思考等级和原始文案；识别不出的字段为 null，不把配置冒充实际值。`status` 另外返回配置值。Pro 按滑块当前最右端选择，并核对页面显示。
 
@@ -235,13 +235,15 @@ skills/project-conductor/SKILL.md
 
 ## Chat 端连接本地
 
-### Remote Desktop Commander
+### ChatGPT Computer
 
-Chat 可以通过 Remote Desktop Commander 在连接的 Mac 上直接运行：
+本部署默认使用当前 ChatGPT 账号下**名称前缀为 `ChatGPT Computer`** 的授权连接；不同账号的后缀可能不同，不能写死具体插件名。调用前核实实际目标主机和 capabilities。Git/GitHub 写操作默认落到批准执行主机的本地 `git`/`gh` 身份。
 
 ```bash
 chat-bridge ...
 ```
+
+Remote Desktop Commander 不是默认通道，除非用户明确指定。
 
 ### Web / Local Codex
 

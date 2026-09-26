@@ -55,7 +55,7 @@ Conductor Chat ── chat-bridge ── Worker Chats
 - Ego Lite signed in to the ChatGPT account you want to use
 - `ego-browser` CLI available (Ego Lite's native agent runtime)
 - Python 3 for CLI argument encoding
-- Optional: Remote Desktop Commander or a local/Web Codex environment to invoke the CLI from Chat
+- Optional: an authorized ChatGPT Computer connection (recommended for this deployment) or a local/Web Codex environment to invoke the CLI from Chat
 
 The project intentionally has no npm runtime dependencies.
 
@@ -117,12 +117,12 @@ chat-bridge read review-agent --project "My Project"
 chat-bridge new \
   --project "My Project" \
   --name implementation-agent \
-  --model "GPT-5.6 Sol" \
+  --model Latest \
   --effort High \
   --message "You own implementation for GitHub issue #12. Update the issue/PR, then callback the owning controller."
 ```
 
-The bridge captures the real conversation ID and project-scoped URL. New sessions for the same logical project/account are opened as **new tabs inside the bound Ego Space**; they do not create a new Space per session. Conversation identity is long-lived, while the Ego page/tab attachment is recyclable: when the managed-page budget is full, the bridge may detach the oldest safe idle session and later reattach it by conversation URL. It never reclaims the control page, a generating session, a session with an active runtime task, the currently active tab, or a session whose composer contains a draft.
+The bridge captures the real conversation ID and project-scoped URL. Multiple Projects and sessions for one verified ChatGPT login/Profile normally share **one Bridge-managed Ego Space**. Logical role/controller identity is long-lived; each concrete conversation is a replaceable generation, while the Ego page/tab attachment is recyclable. A finished/result-recorded task may be detached after the safety grace period when its page is inactive, Bridge-managed, not generating, and has no draft/user ownership; running tasks remain attached by default. A new Space is not a concurrency mechanism.
 
 ## Project, account, and Space binding
 
@@ -194,7 +194,7 @@ chat-bridge task clear HZ-47-W4 --project "My Project"
 Normal model selection:
 
 ```bash
-chat-bridge model implementation-agent "GPT-5.6 Sol" --project "My Project"
+chat-bridge model implementation-agent Latest --project "My Project"
 chat-bridge effort implementation-agent "Extra High" --project "My Project"
 ```
 
@@ -204,7 +204,7 @@ Highest preset:
 chat-bridge model implementation-agent "GPT-6 Pro" --project "My Project"
 ```
 
-New chats default to `Latest`; this does not implicitly request Pro or change the UI's default thinking level. `GPT-6` is a current alias for Latest. `GPT-6 Pro` selects Latest plus Pro; `5.6 Pro` and `5.5 Pro` select those older versions plus Pro instead. You can also use `model AGENT Latest --effort High`. Unavailable or ambiguous versions fail explicitly. There is no automatic quota fallback: callers can explicitly choose `5.6 Pro` when Latest's model quota is exhausted. Model quota exhaustion is distinct from conversation-access rate limiting.
+New chats default to `Latest`; this does not implicitly request Pro or change the UI's default thinking level. The Bridge aliases `GPT-6` and `GPT-6 Pro` select Latest and Latest plus Pro, respectively; the moving `Latest` label alone does not verify an underlying fixed version. `5.6 Pro` and `5.5 Pro` select those older versions plus Pro instead. You can also use `model AGENT Latest --effort High`. Unavailable or ambiguous versions fail explicitly. There is no automatic quota fallback: callers can explicitly choose `5.6 Pro` when Latest's model quota is exhausted. Model quota exhaustion is distinct from conversation-access rate limiting.
 
 `status`, `send`, `ask`, `new`, `model` and `effort` include `modelSelection` with the UI-observed model, effort and raw text; unknown fields remain null. `status` reports configured values separately. Pro uses the slider's actual rightmost endpoint and confirms the displayed effort. Before every `send` or `ask`, the bridge re-applies the session's configured model and effort and confirms the UI selection, so a reattached conversation cannot silently inherit a lower default thinking level.
 
@@ -283,15 +283,15 @@ See [skills/project-conductor/SKILL.md](skills/project-conductor/SKILL.md) and [
 
 ## Calling from Chat
 
-### Remote Desktop Commander
+### ChatGPT Computer
 
-A Chat with Remote Desktop Commander access can execute:
+In this deployment, prefer an authorized plugin whose display name starts with `ChatGPT Computer`. The suffix differs by ChatGPT account, so verify the actual target host/capabilities rather than hard-coding the connector name. Repository writes use the approved host's local `git`/`gh` identity.
 
 ```bash
 chat-bridge ask research-agent "..." --project "My Project"
 ```
 
-on the connected computer running Ego Lite.
+Remote Desktop Commander is not the default transport unless explicitly requested.
 
 When a connected computer supplies `CHAT_BRIDGE_FROM_SPACE`, commands without `--account` use that Space's previously verified ChatGPT login and the matching Project binding. The Space label is only a lookup key, not account identity. If the source login has no binding for the requested Project, the command fails before opening another account's chat. Without source context, a Project bound to multiple distinct logins requires an explicit `--account`; an unqualified watchdog scan enters each eligible account's pacing lane separately.
 

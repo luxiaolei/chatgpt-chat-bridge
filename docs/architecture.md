@@ -78,17 +78,21 @@ A session record contains conversation identity plus routing metadata such as lo
 
 The runtime file contains reconstructable orchestration state such as active task IDs and recent project execution metadata. It must never outrank GitHub Issues/PRs as project truth.
 
-### Logical project → account → Space
+### Login/Profile → managed Space → Project/session tabs
 
-The control-plane hierarchy is:
+The target browser hierarchy is:
 
 ```text
-Logical Project
-  ├─ ChatGPT account binding A → one Ego Space → many tabs/sessions
-  └─ ChatGPT account binding B → one Ego Space → many tabs/sessions
+verified ChatGPT login/Profile
+  └─ one Bridge-managed Ego Space
+       ├─ Project A tabs/sessions
+       ├─ Project B tabs/sessions
+       └─ ...
 ```
 
-All new sessions for the same project/account are created with `task.newPage()` inside the bound Space. A normal session creation must not create a new Space. A separate Space should be created only for explicit Space tests, account isolation, or a deliberate rebind. `chat-bridge space prune --project NAME` closes stale tabs that are not the control tab or an active registered session. `chat-bridge space gc` is a dry-run lifecycle garbage collector for unbound idle `chat-bridge-agent-*` Spaces; only `ownership=agent` Spaces with no live task are candidates, and `--confirm` revalidates ownership/liveness before `finish({keep: []})`.
+A logical Project may still bind several accounts, and each account may expose a different real ChatGPT Project ID/URL. Those Project locations are routing/context records, not reasons to create more Spaces. `space consolidate` previews legacy project-specific bindings and migrates them only after a drained safety check. User/manual Spaces remain outside automated cleanup.
+
+Shared-Space cleanup is physical-Space-aware: protection is aggregated across every Project/control page/active task/session sharing the Space. Only inactive Bridge-managed pages with no generation, draft, active-task reference, or user ownership are reclaimable. Close failure leaves the attachment record intact. `space gc` is dry-run by default and revalidates agent ownership/liveness under the same UI pacing before `finish({keep: []})`.
 
 A ChatGPT conversation ID is independent of its Ego Space attachment. Rebinding a project/account to another Space preserves conversation identity and causes sessions to reattach in tabs in the new Space. Page labels are a bounded runtime pool, not durable session identity: if `task.newPage()` hits the Ego page budget, the bridge may reclaim an idle managed session page and set that session's registry `page` to null. The next use reattaches the same conversation by URL. The control page, active/generating pages, active-task sessions, active tab, and non-empty composer drafts are protected from reclamation.
 
@@ -151,7 +155,7 @@ The bridge separates:
 A normal configuration may be:
 
 ```text
-GPT-5.6 Sol + High
+Latest + High
 ```
 
 The `GPT-6 Pro` bridge preset is intentionally represented as:
@@ -179,23 +183,24 @@ Conductor
                     Worker Chat
 ```
 
-### Completion callback
+### Durable result, callback, and acceptance
 
 ```text
 Worker
-  │
-  ├─ update GitHub Issue / PR
-  │
-  └─ chat-bridge send <owning-controller> RESULT
-                                  │
-                                  ▼
-                             Conductor Chat
-                                  │
-                                  ▼
-                           next orchestration turn
+  ├─ update GitHub / authorized durable project state
+  └─ queue result
+          │
+          ▼
+   RESULT_RECORDED + persistent callback outbox
+          │
+          ▼
+   current owning controller
+          │
+          ├─ review durable evidence
+          └─ queue ack ACCEPTED / REJECTED / BLOCKED
 ```
 
-A callback should carry a stable `task_id` and GitHub URL.
+A worker result, callback `SENT`, and controller acceptance are distinct states. `RESULT_RECORDED` can release the finished worker Tab after the safety grace period; business `COMPLETE` requires the owning controller's accepted ACK.
 
 ## Synchronous vs asynchronous routing
 
@@ -234,10 +239,11 @@ Only the conductor should normally fan out new work. Worker-to-worker delegation
 
 Some worker tasks need local capabilities such as filesystem access, GUI automation, builds, or private browser state.
 
-Two supported patterns are:
+The preferred local pattern for this deployment is:
 
-- Chat → Remote Desktop Commander → local CLI/tools
-- Chat/Codex → local or Web Codex environment → local CLI/tools
+- Chat / Codex → an authorized plugin whose display name starts with `ChatGPT Computer` → verified execution host → local CLI/tools
+
+Plugin suffixes differ by ChatGPT account. Verify host/capabilities rather than matching a hard-coded connector name. Git/GitHub writes use the configured host's local `git`/`gh` identity. Remote Desktop Commander is not the default transport.
 
 For tasks that do not need local state, prefer direct Chat + GitHub work.
 

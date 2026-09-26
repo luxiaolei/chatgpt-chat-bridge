@@ -1,6 +1,6 @@
 (function installTaskPolicy(globalObject) {
   function activeTaskStatus(value = "") {
-    return !["COMPLETE", "FAILED", "CANCELLED", "BLOCKED"]
+    return !["COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "RESULT_RECORDED"]
       .includes(String(value || "").toUpperCase());
   }
 

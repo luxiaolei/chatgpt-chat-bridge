@@ -102,3 +102,22 @@ test('a stalled put waiting for stdin never holds the SQLite write lock', async 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+
+test("SQLite remains authoritative and get repairs a stale JSON projection", async()=>{
+  const root=await mkdtemp(path.join(tmpdir(),"bridge-store-repair-"));
+  const config=path.join(root,"config"), state=path.join(root,"state");
+  await mkdir(config); await mkdir(state);
+  await writeFile(path.join(config,"registry.json"),JSON.stringify({projects:{P:{name:"P"}}}));
+  await writeFile(path.join(state,"runtime.json"),JSON.stringify({tasks:{one:{status:"RUNNING"}}}));
+  try{
+    let r=spawnSync("python3",[script,"get",config,state,"runtime"],{encoding:"utf8"});
+    assert.equal(r.status,0,r.stderr);
+    const authoritative=JSON.parse(r.stdout);
+    await writeFile(path.join(state,"runtime.json"),JSON.stringify({tasks:{corrupt:{status:"BAD"}}}));
+    r=spawnSync("python3",[script,"get",config,state,"runtime"],{encoding:"utf8"});
+    assert.equal(r.status,0,r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout),authoritative);
+    assert.deepEqual(JSON.parse(await readFile(path.join(state,"runtime.json"),"utf8")),authoritative);
+  } finally { await rm(root,{recursive:true,force:true}); }
+});

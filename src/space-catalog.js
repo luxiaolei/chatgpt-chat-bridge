@@ -37,7 +37,7 @@ export function selectManagedSpace(binding,accountName,available=[],options={}) 
 }
 
 export function agentSpaceGcCandidates(reg,runtime,available=[]) {
-  const terminal=new Set(["COMPLETE","FAILED","CANCELLED","BLOCKED"]);
+  const terminal=new Set(["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"]);
   const bound=new Set();
   for(const project of Object.values(reg.projects||{}))
     for(const binding of Object.values(project.bindings||{}))

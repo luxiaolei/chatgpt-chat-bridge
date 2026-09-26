@@ -84,7 +84,7 @@ If recovery is exhausted, the watchdog notifies the task's control chain. If a d
 
 Keep one active session per logical role/project/account unless duplicate-role operation is explicitly required. Create a new session when the context is materially different, a workstream is long-lived, or a session is unhealthy/context-saturated. Retire the old session before replacement when practical.
 
-All sessions for one logical project/account live as tabs in one bound Ego Space. A new chat must not create a new Space.
+Multiple Projects and sessions for one verified ChatGPT login/Profile normally share one Bridge-managed Ego Space. A new chat must not create a new Space merely for a new role or Project. Context-saturated roles rotate to an ACKed successor conversation while preserving the logical role.
 
 ## Completion
 
