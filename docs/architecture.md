@@ -90,7 +90,7 @@ verified ChatGPT login/Profile
        └─ ...
 ```
 
-A logical Project may still bind several accounts, and each account may expose a different real ChatGPT Project ID/URL. Those Project locations are routing/context records, not reasons to create more Spaces. `space consolidate` previews legacy project-specific bindings and migrates them only after a drained safety check. User/manual Spaces remain outside automated cleanup.
+A logical Project may still bind several accounts, and each account may expose a different real ChatGPT Project ID/URL. Those Project locations are routing/context records, not reasons to create more Spaces. `space consolidate` previews legacy project-specific bindings and migrates only when every bound Project is paused/drained, all delivery and callback states are settled, bindings are valid, and legacy Agent Spaces are empty. It closes only those empty Agent Spaces. User/manual Spaces remain outside automated cleanup.
 
 Shared-Space cleanup is physical-Space-aware: protection is aggregated across every Project/control page/active task/session sharing the Space. Only inactive Bridge-managed pages with no generation, draft, active-task reference, or user ownership are reclaimable. Close failure leaves the attachment record intact. `space gc` is dry-run by default and revalidates agent ownership/liveness under the same UI pacing before `finish({keep: []})`.
 

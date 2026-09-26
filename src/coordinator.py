@@ -158,6 +158,10 @@ def connection(config, state, initialize=True):
         status TEXT NOT NULL, ack_payload TEXT, updated_at TEXT NOT NULL,
         PRIMARY KEY(event_id,target_ref)
     )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS reconciliation_attempts (
+        id TEXT PRIMARY KEY, operation_id TEXT NOT NULL, outcome TEXT NOT NULL,
+        reason TEXT NOT NULL, evidence TEXT, created_at TEXT NOT NULL
+    )""")
     db.execute("""CREATE TABLE IF NOT EXISTS logical_sessions (
         logical_ref TEXT PRIMARY KEY, project TEXT NOT NULL, role TEXT NOT NULL,
         current_session_ref TEXT, epoch INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL DEFAULT 'ACTIVE',
@@ -1418,6 +1422,77 @@ def parse_worker_receipt(completed):
     return None
 
 
+def reconcile_delivery(db, operation_id):
+    if os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID") or os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+        raise ValueError("RECONCILE_HOST_LOCAL_REQUIRED")
+    row = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+    if not row:
+        raise ValueError("UNKNOWN_OPERATION")
+    if row["status"] != "DELIVERY_UNKNOWN" or row["kind"] not in {"dispatch", "callback", "management"}:
+        raise ValueError("RECONCILE_REQUIRES_UNKNOWN_DELIVERY")
+    expected = hashlib.sha256(" ".join(row["message"].split()).encode()).hexdigest()
+    evidence, reason = None, "NO_SESSION_REFERENCE"
+    if row["session_ref"]:
+        bridge = os.environ.get("CHAT_BRIDGE_BIN") or str(pathlib.Path.home() / ".local/bin/chat-bridge")
+        command = [bridge, "evidence", row["session_ref"], "--project", row["project"],
+                   "--account", row["account_alias"], "--expected-hash", expected]
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True, timeout=120)
+            evidence = parse_worker_receipt(completed) if completed.returncode == 0 else None
+            reason = "MESSAGE_NOT_PROVEN" if evidence else "CHAT_READ_UNAVAILABLE"
+        except (OSError, subprocess.TimeoutExpired):
+            reason = "CHAT_READ_UNAVAILABLE"
+    reg = registry(db)
+    binding = ((reg.get("projects") or {}).get(row["project"]) or {}).get("bindings", {}).get(row["account_alias"]) or {}
+    expected_project = (re.search(r"g-p-[0-9a-f]{32}", binding.get("projectId") or binding.get("projectUrl") or "") or [None])[0]
+    observed_project = (re.search(r"/g/(g-p-[0-9a-f]{32})/", (evidence or {}).get("url") or "") or [None, None])[1]
+    observed_session = (re.search(r"/c/([^/?#]+)", (evidence or {}).get("url") or "") or [None, None])[1]
+    matches = (evidence or {}).get("matches") or []
+    proven = (bool(expected_project) and expected_project == observed_project
+              and observed_session == row["session_ref"]
+              and evidence.get("accountId") == row["account_id"]
+              and evidence.get("account") == row["account_alias"]
+              and evidence.get("project") == row["project"]
+              and evidence.get("sessionRef") == row["session_ref"]
+              and len(matches) == 1 and bool(matches[0].get("messageId"))
+              and matches[0].get("textHash") == expected and bool(evidence.get("observedAt")))
+    if evidence and not proven:
+        reason = "EVIDENCE_INCOMPLETE_OR_MISMATCHED"
+    if proven:
+        reason = "EXACT_USER_MESSAGE_IN_BOUND_CHAT"
+        evidence = {"accountId":evidence["accountId"],"projectId":observed_project,
+                    "sessionRef":row["session_ref"],"taskId":row["task_id"],"eventId":row["event_id"],
+                    "messageId":matches[0]["messageId"],"textHash":expected,
+                    "url":evidence["url"],"observedAt":evidence["observedAt"],
+                    "previousReason":row["reason"]}
+    else:
+        evidence = None  # Do not persist unrelated chat contents or an unverified receipt.
+    now = stamp()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        current = db.execute("SELECT status FROM operations WHERE id=?", (operation_id,)).fetchone()
+        if not current or current["status"] != "DELIVERY_UNKNOWN":
+            raise ValueError("OPERATION_CHANGED_DURING_RECONCILIATION")
+        outcome = "RECONCILED_DELIVERED" if proven else "STILL_UNKNOWN"
+        db.execute("INSERT INTO reconciliation_attempts VALUES (?,?,?,?,?,?)",
+                   (str(uuid.uuid4()),operation_id,outcome,reason,
+                    json.dumps(evidence,ensure_ascii=False) if evidence else None,now))
+        if proven:
+            db.execute("UPDATE operations SET status='SENT',reason='RECONCILED_FROM_CHAT_EVIDENCE',result=?,updated_at=? WHERE id=?",
+                       (json.dumps({"reconciliation":evidence},ensure_ascii=False),now,operation_id))
+            if row["kind"] == "management":
+                db.execute("UPDATE management_deliveries SET status='DELIVERED',updated_at=? WHERE operation_id=?",
+                           (now,operation_id))
+            if row["kind"] == "callback" and row["event_id"]:
+                db.execute("UPDATE task_results SET callback_status='DELIVERED',callback_delivered_at=? WHERE callback_operation_id=?",
+                           (now,operation_id))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {"operationId":operation_id,"kind":row["kind"],"outcome":outcome,"reason":reason,"evidence":evidence}
+
+
 def work_one(db):
     row = claim(db)
     if row is None:
@@ -1603,10 +1678,24 @@ def main():
                   and ((reg.get("accounts") or {}).get(task.get("account")) or {}).get("identity")==identity]
             pending=db.execute("""SELECT count(*) FROM operations WHERE account_id=?
                                   AND status IN ('QUEUED','DISPATCHING')""",(stable,)).fetchone()[0]
+            unknown=[row[0] for row in db.execute("""SELECT id FROM operations WHERE account_id=?
+                                  AND status='DELIVERY_UNKNOWN' ORDER BY created_at""",(stable,))]
+            unacked=[row[0] for row in db.execute("""SELECT r.event_id FROM task_results r
+                                  JOIN operations o ON o.id=r.callback_operation_id
+                                  WHERE o.account_id=? AND r.callback_status='DELIVERED'
+                                  AND r.acceptance_status IS NULL""",(stable,))]
+            invalid_bindings=[]
+            for name in projects:
+                for bound_alias in aliases:
+                    binding=((reg.get("projects") or {}).get(name) or {}).get("bindings",{}).get(bound_alias)
+                    if binding and (not binding.get("projectUrl") or not binding_observed(reg,bound_alias,binding)):
+                        invalid_bindings.append({"project":name,"account":bound_alias})
             controls={name:management_mode(db,name) for name in projects}
             runnable=[name for name,value in controls.items() if value["mode"]=="RUNNING"]
             value={"account":alias,"aliases":aliases,"projects":projects,"liveTasks":live,
-                   "pendingOperations":pending,"controls":controls,"safe":not live and not pending and not runnable}
+                   "pendingOperations":pending,"unknownOperations":unknown,"unacknowledgedCallbacks":unacked,
+                   "invalidBindings":invalid_bindings,"controls":controls,
+                   "safe":not live and not pending and not unknown and not unacked and not invalid_bindings and not runnable}
         elif command == "admission-check":
             project = (args[0] if args else "") or (registry(db).get("defaultProject") or "")
             if not project:
@@ -1700,6 +1789,10 @@ def main():
                 raise ValueError("UNKNOWN_CONTROL_COMMAND")
         elif command == "status":
             value = observed_response(db.execute("SELECT * FROM operations WHERE id=?", (args[0],)).fetchone(), runtime(db).get("tasks") or {})
+        elif command == "reconcile":
+            if len(args)!=2 or args[0]!="--operation":
+                raise ValueError("reconcile requires --operation ID")
+            value = reconcile_delivery(db,args[1])
         elif command == "cancel":
             db.execute("UPDATE operations SET status='CANCELLED',updated_at=? WHERE id=? AND status='QUEUED'", (stamp(), args[0]))
             db.commit()
