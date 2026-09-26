@@ -157,3 +157,34 @@ test("Project creation toggles Projects section when Add new project is covered"
   await create(page,"Demo");
   assert.deepEqual(clicks,['[data-chat-bridge-projects-toggle="1"]','[data-chat-bridge-create-project="1"]']);
 });
+
+test("sync ignores sidebar chats from other Projects and preserves existing attachments", async()=>{
+  const code=extract("syncProject","stopGeneration");
+  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  const a="g-p-"+"a".repeat(32), b="g-p-"+"b".repeat(32);
+  const one="11111111-1111-1111-1111-111111111111", two="22222222-2222-2222-2222-222222222222";
+  const otherAccount="33333333-3333-3333-3333-333333333333";
+  const targetUrl=`https://chatgpt.com/g/${a}-target/project`;
+  const reg={chats:{[one]:{project:"Target",spaceName:"original-space",spaceId:3,page:"p7"},
+    [two]:{project:"Other",spaceName:"other-space",spaceId:4,page:"p9"},
+    [otherAccount]:{project:"Target",account:"different-account"}}};
+  const binding={projectUrl:targetUrl,spaceName:"bound-space",spaceId:5};
+  const page={reload:async()=>{},waitForSelector:async()=>{},waitForTimeout:async()=>{},
+    evaluate:async()=>[
+      {title:"Target chat",url:`https://chatgpt.com/g/${a}-target/c/${one}`},
+      {title:"Other chat",url:`https://chatgpt.com/g/${b}-other/c/${two}`},
+      {title:"Shared chat",url:`https://chatgpt.com/g/${a}-target/c/${otherAccount}`}
+    ]};
+  let saved=0;
+  const sync=await new AsyncFunction("openProjectPage","detectWebRateLimit","projectIdFromUrl","saveRegistry","touchRuntime",
+    code+"; return syncProject;"
+  )(async()=>targetUrl,async()=>{},value=>String(value).match(/\/g\/(g-p-[^/]+)/)?.[1]||null,
+    async()=>{saved++;},async()=>{});
+  const found=await sync(reg,page,"Target","account",binding);
+  assert.deepEqual(found.map(x=>x.id),[one]);
+  assert.equal(reg.chats[one].spaceName,"original-space");
+  assert.equal(reg.chats[one].page,"p7");
+  assert.deepEqual(reg.chats[two],{project:"Other",spaceName:"other-space",spaceId:4,page:"p9"});
+  assert.deepEqual(reg.chats[otherAccount],{project:"Target",account:"different-account"});
+  assert.equal(saved,1);
+});
