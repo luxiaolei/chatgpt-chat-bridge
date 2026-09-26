@@ -1407,7 +1407,8 @@ def finish(db, row, status, reason=None, retry_after=0, result=None, session_ref
 
 
 def parse_worker_receipt(completed):
-    for stream in (completed.stdout or "", completed.stderr or ""):
+    streams = (completed.stderr or "", completed.stdout or "") if completed.returncode else (completed.stdout or "", completed.stderr or "")
+    for stream in streams:
         text = stream.strip()
         if not text:
             continue
@@ -1537,11 +1538,12 @@ def work_one(db):
         detail = receipt or {}
         if detail.get("code") in {"PACING_DEFERRED", "WEB_COOLDOWN_ACTIVE"}:
             return finish(db, row, "QUEUED", detail.get("reason"), max(1, float(detail.get("retryAfterSec", 10))))
-    combined = (completed.stderr or "") + "\n" + (completed.stdout or "")
-    if completed.returncode and any(token in combined for token in ("CHAT_BUSY", "USER_DRAFT_PRESENT", "SPACE_IN_USER_CONTROL")):
-        reason = "TARGET_USER_CONTROLLED" if "SPACE_IN_USER_CONTROL" in combined else "TARGET_BUSY_OR_DRAFT"
+    if completed.returncode and receipt and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("code") in {"CHAT_BUSY", "USER_DRAFT_PRESENT", "SPACE_IN_USER_CONTROL"}:
+        reason = "TARGET_USER_CONTROLLED" if receipt["code"] == "SPACE_IN_USER_CONTROL" else "TARGET_BUSY_OR_DRAFT"
         return finish(db, row, "QUEUED", reason, 30)
     if completed.returncode:
+        if receipt and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("ok") is False:
+            return finish(db, row, "FAILED_PRE_SEND", "PRE_SEND_" + str(receipt.get("code") or "ERROR")[:200])
         return finish(db, row, "DELIVERY_UNKNOWN", "WORKER_EXIT_" + str(completed.returncode))
     if receipt is None:
         return finish(db, row, "DELIVERY_UNKNOWN", "WORKER_RECEIPT_UNREADABLE")
@@ -1793,6 +1795,20 @@ def main():
             if len(args)!=2 or args[0]!="--operation":
                 raise ValueError("reconcile requires --operation ID")
             value = reconcile_delivery(db,args[1])
+        elif command == "retry":
+            if len(args)!=2 or args[0]!="--operation":
+                raise ValueError("retry requires --operation ID")
+            prior = db.execute("SELECT kind FROM operations WHERE id=? AND status='FAILED_PRE_SEND'", (args[1],)).fetchone()
+            changed = db.execute("UPDATE operations SET status='QUEUED',not_before=?,updated_at=? WHERE id=? AND status='FAILED_PRE_SEND'",
+                                 (time.time(),stamp(),args[1]))
+            if changed.rowcount != 1:
+                raise ValueError("RETRY_REQUIRES_PROVEN_PRE_SEND_FAILURE")
+            if prior["kind"] == "callback":
+                db.execute("UPDATE task_results SET callback_status='QUEUED' WHERE callback_operation_id=?", (args[1],))
+            if prior["kind"] == "management":
+                db.execute("UPDATE management_deliveries SET status='QUEUED',updated_at=? WHERE operation_id=?", (stamp(),args[1]))
+            db.commit()
+            value = response(db.execute("SELECT * FROM operations WHERE id=?", (args[1],)).fetchone())
         elif command == "cancel":
             db.execute("UPDATE operations SET status='CANCELLED',updated_at=? WHERE id=? AND status='QUEUED'", (stamp(), args[0]))
             db.commit()

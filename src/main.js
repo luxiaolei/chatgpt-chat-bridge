@@ -4,6 +4,7 @@ const pathMod = await import("node:path");
 const crypto = await import("node:crypto");
 const childProcess = await import("node:child_process");
 const args = globalThis.__CHAT_BRIDGE_ARGS__ || [];
+let sendAttempted=false;
 const HOME = os.homedir();
 const CONFIG_DIR = globalThis.__CHAT_BRIDGE_CONFIG_DIR__ || process.env.CHAT_BRIDGE_CONFIG_DIR || pathMod.join(HOME, ".config", "chat-bridge");
 const STATE_DIR = globalThis.__CHAT_BRIDGE_STATE_DIR__ || process.env.CHAT_BRIDGE_STATE_DIR || pathMod.join(HOME, ".local", "state", "chat-bridge");
@@ -821,6 +822,7 @@ async function sendMessage(page, msg) {
   }
   await page.waitForTimeout(80);
   const attempts=[];
+  sendAttempted=true;
   attempts.push(await triggerSend(page));
   let after=await waitForDelivery(page,before,8000);
   if(!deliveryObserved(before,after) && String(after.composerText||"").trim()) {
@@ -1847,9 +1849,14 @@ async function gcAgentSpaces(reg, confirm=false) {
 }
 
 const cmd=args[0] || "help";
-const reg=await loadRegistry();
+const reg=await loadRegistry().catch(error=>{
+  console.error?.(JSON.stringify({ok:false,deliveryStage:"PRE_SEND",
+    code:String(error?.code||error?.message||"BRIDGE_ERROR").slice(0,200)}));
+  throw error;
+});
 const project=opt("project",cmd==="watch"?null:reg.defaultProject);
 const accountArg=opt("account",null);
+try {
 
 if(cmd==="help"){
   print("chat-bridge commands: init [--root-controller ROLE], project ensure, policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, event list, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE], watch, read, status, send [--task ID --controller ROLE], ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune|gc|consolidate|scan|map|restore|label");
@@ -2367,7 +2374,13 @@ else if(cmd==="new"){
       baselineAssistantHash:hashText(before.lastAssistant||""),baselineAssistantId:before.lastAssistantId||null,
       dispatchedAt:new Date().toISOString()});
   } catch (error) {
-    await page.close().catch(()=>{}); throw error;
+    if(!sendAttempted) await page.close().catch(()=>{});
+    throw error;
   }
 }
 else throw new Error("Unknown command: "+cmd);
+} catch(error) {
+  console.error?.(JSON.stringify({ok:false,deliveryStage:sendAttempted?"SEND_ATTEMPTED":"PRE_SEND",
+    code:String(error?.code||error?.message||"BRIDGE_ERROR").slice(0,200)}));
+  throw error;
+}
