@@ -1329,15 +1329,22 @@ async function syncProject(reg, page, projectName, account, binding) {
     title:(a.innerText||"").trim().split("\n")[0],url:a.href
   })).filter(x=>x.title));
   const uniq=[], seen=new Set();
-  for(const x of chats){ const m=x.url.match(/\/c\/([0-9a-f-]+)/i); if(m&&!seen.has(m[1])){seen.add(m[1]);uniq.push({id:m[1],...x});} }
+  const projectId=projectIdFromUrl(projectUrl)?.match(/^g-p-[0-9a-f]{32}/i)?.[0];
+  if(!projectId) throw new Error("PROJECT_ID_NOT_CONFIRMED");
+  for(const x of chats){
+    const m=x.url.match(/\/c\/([0-9a-f-]+)/i);
+    if(!x.url.startsWith("https://chatgpt.com/g/")) continue;
+    if(projectIdFromUrl(x.url)?.match(/^g-p-[0-9a-f]{32}/i)?.[0]!==projectId) continue;
+    if(m&&reg.chats[m[1]]?.account&&reg.chats[m[1]].account!==account) continue;
+    if(m&&!seen.has(m[1])){seen.add(m[1]);uniq.push({id:m[1],...x});}
+  }
   const projectBase=projectUrl.replace(/\/project$/,'');
   binding.projectUrl=projectUrl; binding.projectBase=projectBase; binding.projectId=projectIdFromUrl(projectUrl);
   for(const x of uniq){
     const old=reg.chats[x.id]||{};
-    const attached=old.spaceName===binding.spaceName && old.spaceId!=null && binding.spaceId!=null && Number(old.spaceId)===Number(binding.spaceId);
     reg.chats[x.id]={...old,id:x.id,url:x.url,name:old.name||x.title,role:old.role||old.name||x.title,title:x.title,
       project:projectName,account,status:old.status||"active",model:old.model||null,effort:old.effort||null,
-      spaceName:binding.spaceName,spaceId:binding.spaceId??null,page:attached?(old.page||null):null};
+      spaceName:old.spaceName||binding.spaceName,spaceId:old.spaceId??binding.spaceId??null,page:old.page||null};
   }
   await saveRegistry(reg);
   await touchRuntime(projectName,{activeAccount:account,spaceName:binding.spaceName,lastCommand:"sync",chatCount:uniq.length});
