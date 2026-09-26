@@ -1,6 +1,6 @@
 # ChatBridge v0.9 acceptance and cutover record
 
-Updated 2026-09-26. Code baseline: PR #46 at `47b50aa`. This records observed evidence and the remaining release gates; it is not a production acceptance receipt. The canonical source checkout is `/Users/xlmini/Projects/chatgpt-chat-bridge`.
+Updated 2026-09-26. Code baseline: PR #46 at `c7e891e`. This records observed evidence and the remaining release gates; it is not a production acceptance receipt. The canonical source checkout is `/Users/xlmini/Projects/chatgpt-chat-bridge`.
 
 ## Evidence so far
 
@@ -13,7 +13,7 @@ Updated 2026-09-26. Code baseline: PR #46 at `47b50aa`. This records observed ev
 | Controller rotation | PASS for maintenance case | Checkpoint, successor Chat, ACK, atomic epoch switch and a late callback to the successor were observed. Hard context exhaustion was not induced in a real Chat. |
 | Management plane | PASS for one canary Project | Scoped pause blocked admission; drain, broadcast preview/send, controller ACK and resume worked. Global and multi-controller broadcast were not exercised. |
 | Terminal Tab lifecycle | PASS for one worker | A finished worker Tab detached after grace; a later task reused the same conversation in a new Tab. Detached-running behavior was not tested and remains disabled by default. |
-| Shared Space and multi-account | PARTIAL | Simulated protection tests pass. In the real canary Space, pruning Project A kept Project B's inactive control Tab, B's inactive active-task Tab, and A's active-session Tabs; it closed only a retired A Tab. The synthetic B task was then cleared. Draft/user ownership, A→B→A account route, and two-controller receipts remain untested. |
+| Shared Space and multi-account | PARTIAL | Simulated protection tests pass. In the real canary Space, pruning Project A kept Project B's inactive control Tab, B's inactive active-task Tab, and A's active-session Tabs; it closed only a retired A Tab. The synthetic B task was then cleared. A separate `qc-alpha` / Profile 2 managed Space was identity-verified. Its synthetic Project returned `NEEDS_PROJECT_SETUP`, then `READY created:true`, then `READY created:false` with the same ID `g-p-6ab79617a1c08191af3ce6039baff27a`. Task `CB09-QC-CROSS-001` went from the hzcodex controller to a qc-alpha worker, performed a read-only Computer check of the xlmini host and `package.json` (`0.9.0`), recorded result v1, delivered callback to the original controller, and received `ACCEPTED`; B reports `COMPLETE`. The worker's first result command reached the production Bridge and returned `RESULT_TASK_NOT_REGISTERED`; it then explicitly used the isolated canary config/state and succeeded. No duplicate dispatch or production task write followed. Draft/user ownership and two-controller receipts remain untested. |
 | Resource stability | PARTIAL | Ten read-only Ego client rounds: canary Tabs 4→4, orphan clients 0→0, global Renderer count 35→35. Ten rounds of actual Tab/session churn and CPU/latency measurements remain open. |
 | Isolated install/migration rehearsal | PASS locally | 22 staged runtime/CLI/Skill copies matched source hashes. Staged CLI read an empty isolated control plane. A consistent copy of production state opened under v0.9 with 5 projects and 116 tasks; registry/runtime documents were unchanged. |
 | Isolated coordinator restart | PASS for synthetic worker | A queued dispatch and then a queued callback survived daemon restarts and each sent once. A simulated crashed claim became `DELIVERY_UNKNOWN`; another restart made no additional fake send. Real Ego generation/recovery was not tested. |
@@ -25,7 +25,7 @@ The canary-only SQLite database was backed up before an older, invalid `SUPERSED
 
 1. Reconcile unknown sends using direct target-conversation evidence and retain the audit trail. Keep genuinely unresolved sends unknown and block duplicate task IDs.
 2. Extend the two-Project shared-Space canary to draft/user-ownership boundaries; do not prune any business Project or Manual Space.
-3. Exercise separate authorized accounts and controllers with send → operation → read/result → owning-controller ACK receipts. Verify each ChatGPT Computer connection's host and allowed paths; do not infer them from its display suffix.
+3. Exercise two independent controllers; the hzcodex → qc-alpha → hzcodex route and Computer host/path receipt are complete for one synthetic task. Keep isolated canary state explicit in Computer commands.
 4. Extend restart rehearsal to real Ego generation/result-recorded behavior in the isolated canary. Run ten actual Tab/session churn rounds with queue wait, UI lease, callback latency, Tabs, Renderer, CPU, and orphan-client trends.
 5. Classify the production BLOCKED/FAILED tasks by owner and decide which need reconciliation before each project can resume. Keep Issue #37 open until the release evidence is complete.
 
