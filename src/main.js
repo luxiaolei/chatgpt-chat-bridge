@@ -583,6 +583,25 @@ function hashText(v="") {
   return (h>>>0).toString(16).padStart(8,"0");
 }
 
+function normalizedEvidenceText(text) {
+  return String(text||"").replace(/\s+/g," ").trim()
+    .replace(/\s+(?:Show more|Show less|显示更多|收起)$/i,"").trim();
+}
+
+async function expandEvidenceMessages(page) {
+  for(let pass=0;pass<3;pass++) {
+    const expanded=await page.evaluate(()=>{
+      const buttons=[...document.querySelectorAll('button')].filter(button=>
+        /^(?:Show more|显示更多|展开)$/i.test((button.innerText||button.getAttribute('aria-label')||'').trim()) &&
+        button.closest('[data-message-author-role="user"], [data-chatgpt-search-unit-key$=":user"], [data-content-search-unit-key$=":user"]'));
+      for(const button of buttons) button.click();
+      return buttons.length;
+    });
+    if(!expanded) break;
+    await page.waitForTimeout(150);
+  }
+}
+
 async function state(page, includeUserMessages=false) {
   return await page.evaluate((includeUserMessages) => {
     const root=document.querySelector('main') || document.querySelector('[role="main"]') || document.body;
@@ -2165,6 +2184,10 @@ else if(["read","evidence","status","send","ask","model","effort","stop","retry"
   if(cmd==="evidence"){
     const expected=opt("expected-hash",null);
     if(!/^[0-9a-f]{64}$/.test(expected||"")) throw new Error("evidence requires --expected-hash SHA256");
+    await page.waitForFunction(()=>!!document.querySelector(
+      '[data-message-author-role="user"], [data-chatgpt-search-unit-key$=":user"], [data-content-search-unit-key$=":user"]'
+    ),undefined,{timeout:10000}).catch(()=>{});
+    await expandEvidenceMessages(page);
     const observed=await state(page,true);
     const login=await page.evaluate(async()=>{
       const response=await fetch("/api/auth/session",{credentials:"same-origin",signal:AbortSignal.timeout(5000)});
@@ -2172,9 +2195,8 @@ else if(["read","evidence","status","send","ask","model","effort","stop","retry"
       return (await response.json())?.user?.id||null;
     });
     if(login!==reg.accounts?.[chat.account]?.identity) throw new Error("EVIDENCE_ACCOUNT_MISMATCH");
-    const normalized=text=>String(text||"").replace(/\s+/g," ").trim();
     const matches=(observed.userMessages||[]).filter(message=>
-      crypto.createHash("sha256").update(normalized(message.text)).digest("hex")===expected);
+      crypto.createHash("sha256").update(normalizedEvidenceText(message.text)).digest("hex")===expected);
     print({ok:true,project:chat.project,account:chat.account,accountId:accountScope(reg,chat.account),
       sessionRef:chat.id,url:observed.url,observedAt:new Date().toISOString(),
       messageCount:observed.messageCount,matches:matches.map(message=>({messageId:message.id,textHash:expected}))});
