@@ -13,7 +13,7 @@ Updated 2026-09-26. Code baseline: PR #46 at `47b50aa`. This records observed ev
 | Controller rotation | PASS for maintenance case | Checkpoint, successor Chat, ACK, atomic epoch switch and a late callback to the successor were observed. Hard context exhaustion was not induced in a real Chat. |
 | Management plane | PASS for one canary Project | Scoped pause blocked admission; drain, broadcast preview/send, controller ACK and resume worked. Global and multi-controller broadcast were not exercised. |
 | Terminal Tab lifecycle | PASS for one worker | A finished worker Tab detached after grace; a later task reused the same conversation in a new Tab. Detached-running behavior was not tested and remains disabled by default. |
-| Shared Space and multi-account | PARTIAL | Simulated protection tests pass. In the real canary Space, pruning Project A kept Project B's inactive control Tab and A's active-session Tabs; it closed only a retired A Tab. No B active task/draft, A→B→A account route, or two-controller receipt was tested. |
+| Shared Space and multi-account | PARTIAL | Simulated protection tests pass. In the real canary Space, pruning Project A kept Project B's inactive control Tab, B's inactive active-task Tab, and A's active-session Tabs; it closed only a retired A Tab. The synthetic B task was then cleared. Draft/user ownership, A→B→A account route, and two-controller receipts remain untested. |
 | Resource stability | PARTIAL | Ten read-only Ego client rounds: canary Tabs 4→4, orphan clients 0→0, global Renderer count 35→35. Ten rounds of actual Tab/session churn and CPU/latency measurements remain open. |
 | Isolated install/migration rehearsal | PASS locally | 22 staged runtime/CLI/Skill copies matched source hashes. Staged CLI read an empty isolated control plane. A consistent copy of production state opened under v0.9 with 5 projects and 116 tasks; registry/runtime documents were unchanged. |
 | Production cutover | BLOCKED | No production binaries, launchd services, database, or Spaces were changed. The state snapshot has 13 BLOCKED and 1 FAILED tasks; three projects report `NEEDS_REVIEW`. Canary also reports `NEEDS_REVIEW` for one unknown dispatch. |
@@ -23,7 +23,7 @@ The canary-only SQLite database was backed up before an older, invalid `SUPERSED
 ## Remaining release gates
 
 1. Reconcile unknown sends using direct target-conversation evidence and retain the audit trail. Keep genuinely unresolved sends unknown and block duplicate task IDs.
-2. Extend the two-Project shared-Space canary to a B active task and draft/user-ownership boundary; do not prune any business Project or Manual Space.
+2. Extend the two-Project shared-Space canary to draft/user-ownership boundaries; do not prune any business Project or Manual Space.
 3. Exercise separate authorized accounts and controllers with send → operation → read/result → owning-controller ACK receipts. Verify each ChatGPT Computer connection's host and allowed paths; do not infer them from its display suffix.
 4. Rehearse isolated restart at pre-send, uncertain-send, result-recorded, and callback-pending points. Run ten actual Tab/session churn rounds with queue wait, UI lease, callback latency, Tabs, Renderer, CPU, and orphan-client trends.
 5. Classify the production BLOCKED/FAILED tasks by owner and decide which need reconciliation before each project can resume. Keep Issue #37 open until the release evidence is complete.
