@@ -420,3 +420,19 @@ test("control status distinguishes no work, in progress, awaiting ACK and comple
     assert.equal(final.completion.knownComplete,true);
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
+
+test("unresolved unknown delivery rejects a new submit for the same task id", async()=>{
+  const f=await fixture();
+  try{
+    let r=f.call("submit",[],{requestId:"u1",callerRef:"controller",role:"worker",taskId:"T-BLOCK",message:"one"});
+    assert.equal(r.status,0,r.stderr);
+    const first=JSON.parse(r.stdout);
+    const sql=spawnSync("python3",["-c",
+      "import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute(\"update operations set status='DELIVERY_UNKNOWN' where id=?\",(sys.argv[2],));db.commit()",
+      path.join(f.state,"bridge.sqlite3"),first.operationId],{encoding:"utf8"});
+    assert.equal(sql.status,0,sql.stderr);
+    r=f.call("submit",[],{requestId:"u2",callerRef:"controller",role:"worker",taskId:"T-BLOCK",message:"retry"});
+    assert.equal(r.status,2);
+    assert.match(r.stderr,/TASK_DELIVERY_UNKNOWN_RECONCILE_REQUIRED/);
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});

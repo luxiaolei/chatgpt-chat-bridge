@@ -63,14 +63,17 @@ test("managed Space is one per verified login/Profile and user ownership is a ha
   const task={spaceId:5};
   let available=[{id:5,name:"chat-bridge-agent-a",profileId:"P1",ownership:"agent"}];
   let calls=[];
-  const fn=await new AsyncFunction("listTaskSpaces","taskSpace","slug","crypto",
+  const taskAccounts=new Map();
+  const accountScope=(reg,account)=>reg.accounts[account].identity;
+  const fn=await new AsyncFunction("listTaskSpaces","taskSpace","slug","crypto","taskAccounts","accountScope",
     code+"; return accountManagedTask;"
-  )(async()=>available,async(...args)=>{calls.push(args);return task;},slug,crypto);
+  )(async()=>available,async(...args)=>{calls.push(args);return task;},slug,crypto,taskAccounts,accountScope);
 
   const reg={accounts:{a:{identity:"one",label:"A"}},spaces:{m:{identity:"one",accountName:"A",profileId:"P1"}}};
   const result=await fn(reg,"a");
   assert.equal(result.spaceName,"chat-bridge-agent-a"); assert.equal(result.profileId,"P1");
   assert.equal(calls[0][0],"chat-bridge-agent-a");
+  assert.equal(taskAccounts.get(5),"a");
 
   available=[{id:5,name:"chat-bridge-agent-a",profileId:"P1",ownership:"user"}];
   await assert.rejects(()=>fn(reg,"a"),error=>error?.code==="SPACE_IN_USER_CONTROL");
@@ -85,17 +88,33 @@ test("managed Space is one per verified login/Profile and user ownership is a ha
   assert.match(explicit.spaceName,/^chat-bridge-agent-a-[a-f0-9]{8}$/);
 });
 
+test("Project creation UI recognizes the current Add new project aria label", ()=>{
+  assert.match(source,/add new project/i);
+});
+
 test("Project creation UI requires one create control and one confirmation", async()=>{
   const code=extract("createProjectViaUI","ensureProjectLocation");
   const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
-  let evalCount=0, focused=[], pressed=[];
+  let evalCount=0, focused=[], pressed=[], filled=[], clicks=[];
   const page={
     goto:async url=>assert.equal(url,"https://chatgpt.com/"),
     waitForTimeout:async()=>{},
-    evaluate:async()=> (++evalCount===1?{count:1}:{field:true,buttons:1}),
+    evaluate:async()=>{
+      evalCount++;
+      if(evalCount===1) return {count:1,actionable:true};
+      if(evalCount===2) return true;
+      return true;
+    },
+    waitForSelector:async(sel,opts)=>{
+      assert.equal(opts.state,"visible");
+      assert.ok(sel==='[role="dialog"]' || sel.includes('[role="dialog"] input'));
+      return true;
+    },
+    fill:async(sel,value)=>{filled.push([sel,value]);},
+    waitForFunction:async()=>true,
     focus:async sel=>focused.push(sel),
-    keyboard:{press:async key=>pressed.push(key)},
-    click:async()=>assert.fail("keyboard path should work"),
+    keyboard:{press:async key=>pressed.push(key),insertText:async()=>{}},
+    click:async sel=>clicks.push(sel),
     waitForURL:async re=>assert.ok(re.test("/g/g-p-"+ "a".repeat(32)+"/project")),
     url:async()=> "https://chatgpt.com/g/g-p-"+ "a".repeat(32)+"-demo/project"
   };
@@ -103,5 +122,38 @@ test("Project creation UI requires one create control and one confirmation", asy
     code+"; return createProjectViaUI;"
   )(async()=>{},async()=>true);
   const url=await create(page,"Demo");
-  assert.match(url,/g-p-/); assert.equal(focused.length,2); assert.deepEqual(pressed,["Enter","Enter"]);
+  assert.match(url,/g-p-/);
+  assert.deepEqual(filled,[['[data-chat-bridge-project-name="1"]',"Demo"]]);
+  assert.deepEqual(clicks,['[data-chat-bridge-create-project="1"]']);
+  assert.equal(focused.length,1); assert.deepEqual(pressed,["Enter"]);
+});
+
+test("Project creation toggles Projects section when Add new project is covered", async()=>{
+  const code=extract("createProjectViaUI","ensureProjectLocation");
+  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  let evalCount=0, clicks=[];
+  const page={
+    goto:async()=>{}, waitForTimeout:async()=>{},
+    evaluate:async()=>{
+      evalCount++;
+      if(evalCount===1) return {count:1,actionable:false};
+      if(evalCount===2) return true;
+      if(evalCount===3) return {count:1,actionable:true};
+      if(evalCount===4) return true;
+      return true;
+    },
+    click:async sel=>clicks.push(sel),
+    waitForSelector:async()=>true,
+    fill:async()=>{},
+    waitForFunction:async()=>true,
+    focus:async()=>{},
+    keyboard:{press:async()=>{},insertText:async()=>{}},
+    waitForURL:async()=>{},
+    url:async()=> "https://chatgpt.com/g/g-p-"+ "b".repeat(32)+"-demo/project"
+  };
+  const create=await new AsyncFunction("detectWebRateLimit","waitForProjectReady",
+    code+"; return createProjectViaUI;"
+  )(async()=>{},async()=>true);
+  await create(page,"Demo");
+  assert.deepEqual(clicks,['[data-chat-bridge-projects-toggle="1"]','[data-chat-bridge-create-project="1"]']);
 });

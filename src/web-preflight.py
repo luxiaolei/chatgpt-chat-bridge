@@ -99,6 +99,30 @@ def reconcile_pending(reg, runtime, project, now=None):
     return True
 
 
+def terminal_detach_candidates(reg, runtime):
+    grace = max(30, float(os.environ.get("CHAT_BRIDGE_TERMINAL_TAB_GRACE_SEC", "180")))
+    now = datetime.now(timezone.utc)
+    candidates = set()
+    tasks = runtime.get("tasks", {})
+    for task in tasks.values():
+        if str(task.get("status") or "").upper() not in {"COMPLETE", "FAILED", "CANCELLED", "RESULT_RECORDED"}:
+            continue
+        if task.get("watchdogPausedForUserControl") or task.get("watchdogPendingNotification") or task.get("externalResponsePending"):
+            continue
+        chat = reg.get("chats", {}).get(task.get("sessionId"), {})
+        if not chat.get("page") or chat.get("status", "active") != "active":
+            continue
+        try:
+            updated = datetime.fromisoformat(str(task.get("updatedAt") or task.get("stateUpdatedAt") or task.get("createdAt")).replace("Z", "+00:00"))
+            if (now - updated).total_seconds() < grace:
+                continue
+        except (ValueError, TypeError):
+            continue
+        candidates.add((task.get("project"), task_account(reg, task)))
+    # ponytail: active or drafted terminal tabs may be rechecked each scan; add a retry stamp if this becomes costly.
+    return candidates
+
+
 def run(action, config, state, args):
     if action == "loop":
         script, *args = args
@@ -170,6 +194,8 @@ def run(action, config, state, args):
         for name in ([project] if project else reg.get("projects", {})):
             if name and reconcile_pending(reg, runtime, name):
                 lifecycle_rows.append((name, project_account(reg, name)))
+        lifecycle_rows.extend((name, account) for name, account in terminal_detach_candidates(reg, runtime)
+                              if (not project or name == project) and (name, account) not in lifecycle_rows)
 
         def wait_for_lane(account):
             stamp_path = state / ("ui-pacing-" + scope(reg, account) + ".last")
@@ -244,6 +270,11 @@ def run(action, config, state, args):
                     print("1")
                     return
         if "--skip-lifecycle" not in args:
+            if any((not project or name == project) and (not explicit or a == explicit) and
+                   not cooldown(reg, state, a)["active"]
+                   for name, a in terminal_detach_candidates(reg, runtime)):
+                print("1")
+                return
             projects = [project] if project else list(reg.get("projects", {}).keys())
             for p in projects:
                 if not p:

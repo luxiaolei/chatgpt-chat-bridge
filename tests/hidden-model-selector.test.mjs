@@ -15,19 +15,22 @@ async function runtimeApi(mode="Extra High", selectorAvailable=false){
     '\nlet reapplyCalls=0;'+
     '\nstate=async()=>({mode:testMode});'+
     '\napplyModelSpec=async(_page,model,effort)=>{ reapplyCalls+=1; return {model,effort,observed:{model,effort,raw:model+" "+effort}}; };'+
-    '\nreturn {applyConfiguredSessionModel,modelSelectorAvailable,calls:()=>reapplyCalls,page:{evaluate:async()=>selectorVisible}};'
+    '\nconst reg={};saveRegistry=async()=>{};'+
+    '\nreturn {applyConfiguredSessionModel,applyDispatchModel,modelSelectorAvailable,calls:()=>reapplyCalls,page:{evaluate:async()=>selectorVisible}};'
   )(callback=>callback(),async()=>({}),mode,selectorAvailable);
 }
 
 test("hidden model selector with matching effort skips forced model reapply",async()=>{
   const api=await runtimeApi("Extra High",false);
-  const result=await api.applyConfiguredSessionModel(api.page,{model:"GPT-5.6 Sol",effort:"Extra High"});
+  const chat={model:"GPT-5.6 Sol",effort:"Extra High"};
+  const result=await api.applyDispatchModel(api.page,chat);
   assert.equal(api.calls(),0);
   assert.equal(result.model,"GPT-5.6 Sol");
   assert.equal(result.effort,"Extra High");
   assert.equal(result.reapplied,false);
   assert.equal(result.uiModelUnverifiable,true);
   assert.equal(result.observed.model,null);
+  assert.equal(chat.resourceVerifiedAt,undefined);
 });
 
 test("visible model selector retains strict model reapply",async()=>{

@@ -201,7 +201,7 @@ async function rateLimitSnapshot(page,{dismiss=false}={}) {
     }
     const texts=rateDialogs.map(n=>(n.innerText||n.textContent||"").trim()).filter(Boolean);
     const body=document.body ? document.body.cloneNode(true) : null;
-    body?.querySelectorAll('[data-message-author-role], [role="dialog"], [role="alertdialog"], [role="alert"], [data-state="open"], script, style, template').forEach(node=>node.remove());
+    body?.querySelectorAll('[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key], [role="dialog"], [role="alertdialog"], [role="alert"], [data-state="open"], script, style, template').forEach(node=>node.remove());
     const bodyText=(body?.textContent||"").trim();
     return {candidates:bodyText ? [...texts,bodyText] : texts,dismissed};
   }).catch(()=>({candidates:[],dismissed:0}));
@@ -516,11 +516,9 @@ async function waitForProjectReady(page, projectName, timeout=15000) {
     await detectWebRateLimit(page,"project-ready");
     const ready=await page.evaluate((projectName)=>{
       const composer=!!document.querySelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]');
-      const effort=[...(document.querySelector("form")?.querySelectorAll("button")||[])].some(button=>
-        /^(Instant|Medium|High|Extra High|Pro)$/i.test((button.innerText||"").trim()));
       const loading=/Loading project/i.test(document.body?.innerText||"");
       const title=(document.title||"").toLowerCase();
-      return composer && effort && !loading && title.includes(String(projectName||"").toLowerCase());
+      return composer && !loading && title.includes(String(projectName||"").toLowerCase());
     },projectName).catch(()=>false);
     if(ready) return true;
     await page.waitForTimeout(250);
@@ -588,6 +586,7 @@ function hashText(v="") {
 async function state(page) {
   return await page.evaluate(() => {
     const root=document.querySelector('main') || document.querySelector('[role="main"]') || document.body;
+    const messageSelector='[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]';
     if(!globalThis.__CHAT_BRIDGE_WATCH || globalThis.__CHAT_BRIDGE_WATCH.root!==root) {
       try { globalThis.__CHAT_BRIDGE_WATCH?.observer?.disconnect?.(); } catch {}
       const watch={root,seq:0,lastMutationAt:Date.now(),startedAt:Date.now(),observer:null};
@@ -595,17 +594,46 @@ async function state(page) {
         let meaningful=false;
         for(const r of records) {
           const t=r.target?.nodeType===Node.ELEMENT_NODE?r.target:r.target?.parentElement;
-          if(t?.closest?.('[data-message-author-role]') || t?.closest?.('[role="alert"], [data-testid*="error" i]') ||
+          if(t?.closest?.(messageSelector) || t?.closest?.('[role="alert"], [data-testid*="error" i]') ||
              t?.matches?.('button[data-testid="send-button"], button[data-testid*="stop" i]')) { meaningful=true; break; }
         }
         if(meaningful){ watch.seq+=1; watch.lastMutationAt=Date.now(); }
       });
-      try { watch.observer.observe(root,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:["aria-label","aria-disabled","disabled","data-testid","data-state"]}); } catch {}
+      try { watch.observer.observe(root,{subtree:true,childList:true,characterData:true,attributes:true,
+        attributeFilter:["aria-label","aria-disabled","disabled","data-testid","data-state","data-content-search-unit-key","data-chatgpt-search-message-ids"]}); } catch {}
       globalThis.__CHAT_BRIDGE_WATCH=watch;
     }
-    const ms=[...document.querySelectorAll('[data-message-author-role]')].map(e=>({
+    const legacy=[...document.querySelectorAll('[data-message-author-role]')].map(e=>({
       role:e.getAttribute('data-message-author-role'), id:e.getAttribute('data-message-id')||null, text:(e.innerText||'').trim()
     }));
+    let ms=legacy;
+    if(!ms.length) {
+      const richUnits=[...document.querySelectorAll(
+        '[data-chatgpt-search-unit-key$=":user"], [data-chatgpt-search-unit-key$=":assistant"]'
+      )];
+      const units=richUnits.length?richUnits:[...document.querySelectorAll(
+        '[data-content-search-unit-key$=":user"], [data-content-search-unit-key$=":assistant"]'
+      )];
+      const seen=new Set();
+      ms=[];
+      for(const unit of units) {
+        const key=unit.getAttribute('data-chatgpt-search-unit-key')||unit.getAttribute('data-content-search-unit-key')||'';
+        const role=/:assistant$/.test(key)?'assistant':/:user$/.test(key)?'user':null;
+        if(!role) continue;
+        const ids=(unit.getAttribute('data-chatgpt-search-message-ids')||'').trim().split(/\s+/).filter(Boolean);
+        const selected=unit.querySelector('[data-chatgpt-selection-message-id]')?.getAttribute('data-chatgpt-selection-message-id')||null;
+        const id=ids[0]||selected||null;
+        const dedupe=id?(role+':'+id):(role+':'+key);
+        if(seen.has(dedupe)) continue;
+        seen.add(dedupe);
+        const content=role==='user'
+          ? (unit.querySelector('[data-user-message-bubble="true"]')||unit)
+          : (unit.querySelector('[data-markdown-text-style="assistant-message"]')||unit.querySelector('[data-chatgpt-selection-message-id]')||unit);
+        let text=(content.innerText||content.textContent||'').trim();
+        text=text.replace(/^(?:You said:|ChatGPT said:)\s*/i,'').trim();
+        ms.push({role,id,text});
+      }
+    }
     const buttons=[...document.querySelectorAll('button')];
     const norm=b=>((b.getAttribute('aria-label')||'')+' '+(b.getAttribute('data-testid')||'')+' '+(b.innerText||'')).trim();
     const stop=buttons.find(b=>/\bstop\b/i.test(norm(b)) || /stop/i.test(b.getAttribute('data-testid')||''));
@@ -618,14 +646,21 @@ async function state(page) {
     const errorWords=["something went wrong","error generating","network error","unable to load conversation","try again later",
       "context too long","maximum context length","conversation is too long","maximum length for this conversation","reached the maximum"];
     const knownErrors=[...document.querySelectorAll('main div, main span, main p, [role="main"] div, [role="main"] span, [role="main"] p')]
-      .filter(x=>!x.closest('[data-message-author-role]')).map(x=>(x.innerText||'').trim()).filter(v=>v && v.length<300)
+      .filter(x=>!x.closest(messageSelector)).map(x=>(x.innerText||'').trim()).filter(v=>v && v.length<300)
       .filter(v=>errorWords.some(k=>v.toLowerCase().includes(k))).filter((v,i,a)=>a.indexOf(v)===i).slice(-5);
     const form=document.querySelector('form');
     const composerEl=document.querySelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]');
     const composer=!!composerEl;
     const composerText=(composerEl?.innerText||composerEl?.textContent||"").trim();
-    const mode=[...(form?.querySelectorAll('button')||[])].map(b=>(b.innerText||'').trim())
-      .find(t=>/\b(Instant|Medium|High|Extra High|Pro)\b/i.test(t)) || null;
+    const visibleButton=b=>{
+      const style=getComputedStyle(b);
+      return b.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" && !b.closest(messageSelector);
+    };
+    const allButtons=[...document.querySelectorAll('button')].filter(visibleButton);
+    const modeButton=allButtons.find(b=>/select chatgpt model/i.test(b.getAttribute('aria-label')||'')) ||
+      [...(form?.querySelectorAll('button')||[])].filter(visibleButton)
+        .find(b=>/\b(Instant|Medium|High|Extra High|Pro)\b/i.test((b.innerText||"").trim()));
+    const mode=modeButton?(modeButton.innerText||modeButton.getAttribute('aria-label')||"").trim():null;
     const lastAssistantMsg=[...ms].reverse().find(x=>x.role==='assistant')||null;
     const lastUserMsg=[...ms].reverse().find(x=>x.role==='user')||null;
     const lastAssistant=lastAssistantMsg?.text||null, lastUser=lastUserMsg?.text||null;
@@ -785,7 +820,7 @@ async function askMessage(page, msg, timeout=180000) {
   const before=await state(page);
   await sendMessage(page,msg);
   await page.waitForFunction((n) => {
-    const a=[...document.querySelectorAll('[data-message-author-role="assistant"]')];
+    const a=[...document.querySelectorAll('[data-message-author-role="assistant"], [data-chatgpt-search-unit-key$=":assistant"], [data-content-search-unit-key$=":assistant"]')];
     const stop=[...document.querySelectorAll("button")].some(b =>
       /stop/i.test((b.getAttribute("aria-label")||"")+" "+(b.innerText||"")) ||
       /stop/i.test(b.getAttribute("data-testid")||""));
@@ -796,27 +831,35 @@ async function askMessage(page, msg, timeout=180000) {
 
 async function openModelMenu(page) {
   await detectWebRateLimit(page,"model-menu");
-  await page.waitForFunction(() => [...document.querySelectorAll("form button")]
-    .some(x=>{
+  const ready=await page.waitForFunction(() => {
+    const visible=x=>{
       const style=getComputedStyle(x);
-      return x.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" && !x.closest("[inert]") &&
-        /(Instant|Medium|High|Extra High|Pro)/i.test((x.innerText||"").trim());
-    }), undefined, {timeout:15000});
-  const label=await page.evaluate(() => {
-    const form=document.querySelector("form");
-    const b=[...(form?.querySelectorAll("button")||[])].find(x=>{
+      return x.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
+        !x.closest("[inert]") && !x.closest("[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]");
+    };
+    const buttons=[...document.querySelectorAll("button")].filter(visible);
+    return buttons.some(x=>/select chatgpt model/i.test(x.getAttribute("aria-label")||"")) ||
+      buttons.some(x=>/\b(Instant|Medium|High|Extra High|Pro)\b/i.test((x.innerText||"").trim()));
+  }, undefined, {timeout:15000}).then(()=>true).catch(()=>false);
+  if(!ready) throw new Error("Model/effort button not found");
+  const marked=await page.evaluate(() => {
+    const visible=x=>{
       const style=getComputedStyle(x);
-      return x.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" && !x.closest("[inert]") &&
-        /(Instant|Medium|High|Extra High|Pro)/i.test((x.innerText||"").trim());
-    });
-    return b?(b.innerText||"").trim():null;
+      return x.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
+        !x.closest("[inert]") && !x.closest("[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]");
+    };
+    document.querySelectorAll("[data-chat-bridge-model-button]").forEach(e=>e.removeAttribute("data-chat-bridge-model-button"));
+    const buttons=[...document.querySelectorAll("button")].filter(visible);
+    const preferred=buttons.filter(x=>/select chatgpt model/i.test(x.getAttribute("aria-label")||""));
+    const fallback=buttons.filter(x=>/\b(Instant|Medium|High|Extra High|Pro)\b/i.test((x.innerText||"").trim()));
+    const items=preferred.length?preferred:fallback;
+    if(items.length!==1) return {count:items.length};
+    items[0].setAttribute("data-chat-bridge-model-button","1");
+    return {count:1};
   });
-  if(!label) throw new Error("Model/effort button not found");
-  try {
-    await page.click('loc=role:button[name="'+label+'"]');
-  } catch {
-    throw new Error("Model/effort button disappeared before menu open");
-  }
+  if(marked.count!==1) throw new Error("Model/effort button "+(marked.count?"ambiguous":"not found"));
+  try { await page.click('[data-chat-bridge-model-button="1"]'); }
+  catch { throw new Error("Model/effort button disappeared before menu open"); }
   await page.waitForFunction(()=>[...document.querySelectorAll('[role="menuitemradio"]')].some(e=>{
     const style=getComputedStyle(e);
     return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none";
@@ -901,9 +944,10 @@ async function modelSelectorAvailable(page) {
     return buttons.some(button=>{
       const style=getComputedStyle(button);
       if(button.getClientRects().length===0 || style.visibility==="hidden" || style.display==="none") return false;
-      if(button.closest('[data-message-author-role]')) return false;
+      if(button.closest('[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]')) return false;
       const label=((button.innerText||"")+" "+(button.getAttribute("aria-label")||"")).trim();
-      return /\b(?:Latest|GPT[- ]?\d+(?:\.\d+)*(?:\s+(?:Sol|Terra))?)\b/i.test(label);
+      return /select chatgpt model/i.test(button.getAttribute("aria-label")||"") ||
+        /\b(?:Latest|GPT[- ]?\d+(?:\.\d+)*(?:\s+(?:Sol|Terra))?)\b/i.test(label);
     });
   }).catch(()=>false);
 }
@@ -941,15 +985,21 @@ async function applyDispatchModel(page, chat, requestedModel=null, requestedEffo
   const model=requestedModel || chat.model || null;
   const effort=requestedEffort || chat.effort || null;
   let selection=null;
-  if(model) selection=await applyModelSpec(page,model,effort);
+  if(!requestedModel && !requestedEffort) selection=await applyConfiguredSessionModel(page,chat);
+  else if(model) selection=await applyModelSpec(page,model,effort);
   else if(effort) {
     await setEffort(page,effort);
     const observed=observedModel((await state(page)).mode);
     selection={model:null,effort:observed.effort||effort,observed,reapplied:true};
-  } else selection=await applyConfiguredSessionModel(page,chat);
+  }
   if(requestedModel) chat.model=requestedModel;
   if(requestedEffort) chat.effort=requestedEffort;
-  if(requestedModel || requestedEffort) await saveRegistry(reg);
+  if(selection && !selection.uiModelUnverifiable) {
+    chat.verifiedModel=selection.model||selection.observed?.model||chat.verifiedModel||null;
+    chat.verifiedEffort=selection.effort||selection.observed?.effort||chat.verifiedEffort||null;
+    chat.resourceVerifiedAt=new Date().toISOString();
+  }
+  if(requestedModel || requestedEffort || selection) await saveRegistry(reg);
   return selection;
 }
 
@@ -1027,6 +1077,9 @@ async function accountManagedTask(reg, account, preferredProfileId=null) {
   }
   if(existing?.profileId && existing.profileId!==profileId) throw new Error("SPACE_PROFILE_MISMATCH: "+name);
   const task=await taskSpace(name,!existing?{profileId}:undefined);
+  const prior=taskAccounts.get(Number(task.spaceId));
+  if(prior&&accountScope(reg,prior)!==accountScope(reg,account)) throw new Error("Space is bound to conflicting ChatGPT accounts");
+  taskAccounts.set(Number(task.spaceId),account);
   return {task,spaceName:name,profileId,accountName};
 }
 
@@ -1070,45 +1123,85 @@ async function createProjectViaUI(page, projectName) {
   await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000});
   await page.waitForTimeout(600);
   await detectWebRateLimit(page,"project-create-home");
-  const marked=await page.evaluate(()=>{
+  const hasCreateControl=await page.waitForFunction(()=>{
+    return [...document.querySelectorAll("button,a")].some(el=>{
+      const text=((el.innerText||"")+" "+(el.getAttribute("aria-label")||"")).trim();
+      return /^(new project|create project|add project|add new project|新建项目|创建项目)$/i.test(text);
+    });
+  },undefined,{timeout:15000}).then(()=>true).catch(()=>false);
+  if(!hasCreateControl) throw new Error("PROJECT_CREATE_CONTROL_NOT_FOUND");
+  const markCreate=async()=>await page.evaluate(()=>{
     document.querySelectorAll("[data-chat-bridge-create-project]").forEach(e=>e.removeAttribute("data-chat-bridge-create-project"));
     const candidates=[...document.querySelectorAll("button,a")].filter(el=>{
       const text=((el.innerText||"")+" "+(el.getAttribute("aria-label")||"")).trim();
       const style=getComputedStyle(el);
       return el.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
-        /^(new project|create project|add project|新建项目|创建项目)$/i.test(text);
+        /^(new project|create project|add project|add new project|新建项目|创建项目)$/i.test(text);
     });
-    if(candidates.length!==1) return {count:candidates.length};
-    candidates[0].setAttribute("data-chat-bridge-create-project","1");
-    return {count:1};
+    if(candidates.length!==1) return {count:candidates.length,actionable:false};
+    const control=candidates[0], rect=control.getBoundingClientRect();
+    const hit=document.elementFromPoint(rect.left+rect.width/2,rect.top+rect.height/2);
+    const actionable=!!hit && (hit===control || control.contains(hit));
+    control.setAttribute("data-chat-bridge-create-project","1");
+    return {count:1,actionable};
   });
+  let marked=await markCreate();
   if(marked.count!==1) throw new Error("PROJECT_CREATE_CONTROL_"+(marked.count?"AMBIGUOUS":"NOT_FOUND"));
-  try { await page.focus('[data-chat-bridge-create-project="1"]'); await page.keyboard.press("Enter"); }
-  catch { await page.click('[data-chat-bridge-create-project="1"]'); }
-  await page.waitForTimeout(400);
-  const prepared=await page.evaluate((name)=>{
-    const dialog=document.querySelector('[role="dialog"]')||document.body;
-    const fields=[...dialog.querySelectorAll('input,textarea')].filter(el=>{
-      const style=getComputedStyle(el);
-      return el.getClientRects().length>0&&style.visibility!=="hidden"&&style.display!=="none";
+  if(!marked.actionable) {
+    const toggle=await page.evaluate(()=>{
+      document.querySelectorAll("[data-chat-bridge-projects-toggle]").forEach(e=>e.removeAttribute("data-chat-bridge-projects-toggle"));
+      const controls=[...document.querySelectorAll("button")].filter(el=>{
+        const style=getComputedStyle(el);
+        return el.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
+          /^(projects|项目)$/i.test((el.innerText||"").trim());
+      });
+      if(controls.length!==1) return false;
+      controls[0].setAttribute("data-chat-bridge-projects-toggle","1");
+      return true;
     });
+    if(!toggle) throw new Error("PROJECTS_TOGGLE_NOT_FOUND");
+    await page.click('[data-chat-bridge-projects-toggle="1"]');
+    await page.waitForTimeout(250);
+    marked=await markCreate();
+    if(marked.count!==1 || !marked.actionable) throw new Error("PROJECT_CREATE_CONTROL_NOT_ACTIONABLE");
+  }
+  await page.click('[data-chat-bridge-create-project="1"]');
+  await page.waitForSelector('[role="dialog"]',{state:"visible",timeout:5000});
+  await page.waitForSelector('[role="dialog"] input[type="text"], [role="dialog"] input:not([type]), [role="dialog"] textarea',{state:"visible",timeout:5000});
+  const fieldReady=await page.evaluate(()=>{
+    const dialogs=[...document.querySelectorAll('[role="dialog"]')];
+    const dialog=dialogs[dialogs.length-1];
+    if(!dialog) return false;
+    document.querySelectorAll("[data-chat-bridge-project-name]").forEach(e=>e.removeAttribute("data-chat-bridge-project-name"));
+    const fields=[...dialog.querySelectorAll('input[type="text"],input:not([type]),textarea')];
     const field=fields.find(el=>/project|项目/i.test((el.getAttribute("placeholder")||"")+" "+(el.getAttribute("aria-label")||"")))||fields[0];
-    if(!field) return {field:false,buttons:0};
-    const setter=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(field),"value")?.set;
-    if(setter) setter.call(field,name); else field.value=name;
-    field.dispatchEvent(new Event("input",{bubbles:true}));
-    field.dispatchEvent(new Event("change",{bubbles:true}));
+    if(!field) return false;
+    field.setAttribute("data-chat-bridge-project-name","1");
+    return true;
+  });
+  if(!fieldReady) throw new Error("PROJECT_CREATE_NAME_FIELD_NOT_FOUND");
+  try { await page.fill('[data-chat-bridge-project-name="1"]',projectName); }
+  catch {
+    await page.focus('[data-chat-bridge-project-name="1"]');
+    await page.keyboard.press("ControlOrMeta+A");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.insertText(projectName);
+  }
+  const confirmReady=await page.waitForFunction(()=>{
+    const visible=el=>{const style=getComputedStyle(el);return el.getClientRects().length>0&&style.visibility!=="hidden"&&style.display!=="none";};
+    const dialogs=[...document.querySelectorAll('[role="dialog"]')].filter(visible);
+    const dialog=dialogs[dialogs.length-1];
+    if(!dialog) return false;
     document.querySelectorAll("[data-chat-bridge-confirm-project]").forEach(e=>e.removeAttribute("data-chat-bridge-confirm-project"));
     const buttons=[...dialog.querySelectorAll("button")].filter(el=>{
-      const style=getComputedStyle(el);
       const text=((el.innerText||"")+" "+(el.getAttribute("aria-label")||"")).trim();
-      return !el.disabled&&el.getAttribute("aria-disabled")!=="true"&&el.getClientRects().length>0&&
-        style.visibility!=="hidden"&&style.display!=="none"&&/^(create|create project|创建|创建项目)$/i.test(text);
+      return visible(el)&&!el.disabled&&el.getAttribute("aria-disabled")!=="true"&&/^(create|create project|创建|创建项目)$/i.test(text);
     });
-    if(buttons.length===1) buttons[0].setAttribute("data-chat-bridge-confirm-project","1");
-    return {field:true,buttons:buttons.length};
-  },projectName);
-  if(!prepared.field || prepared.buttons!==1) throw new Error("PROJECT_CREATE_DIALOG_NOT_READY");
+    if(buttons.length!==1) return false;
+    buttons[0].setAttribute("data-chat-bridge-confirm-project","1");
+    return true;
+  },undefined,{timeout:5000}).then(()=>true).catch(()=>false);
+  if(!confirmReady) throw new Error("PROJECT_CREATE_DIALOG_NOT_READY");
   try { await page.focus('[data-chat-bridge-confirm-project="1"]'); await page.keyboard.press("Enter"); }
   catch { await page.click('[data-chat-bridge-confirm-project="1"]'); }
   await page.waitForURL(/\/g\/g-p-[^/]+\/project/,{timeout:20000});
@@ -2039,7 +2132,10 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
     const taskId=opt("task",null);
     const linked=taskId?rt.tasks[taskId]:Object.values(rt.tasks||{}).filter(t=>activeTaskStatus(t.status) && t.project===chat.project && (t.sessionId===chat.id || (!t.sessionId&&t.role===chat.role))).sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")))[0];
     const observed=await observeSession(chat,page,linked||null);
-    print({...observed,modelSelection:observedModel(observed.mode),configuredModel:chat.model||null,configuredEffort:chat.effort||null,project:chat.project||null,account:chat.account,status:chat.status,
+    const foldedSelection=observedModel(observed.mode);
+    print({...observed,modelSelection:foldedSelection,verifiedResourceSelection:{
+      model:chat.verifiedModel||null,effort:chat.verifiedEffort||null,verifiedAt:chat.resourceVerifiedAt||null
+    },configuredModel:chat.model||null,configuredEffort:chat.effort||null,project:chat.project||null,account:chat.account,status:chat.status,
       spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page,task:linked?{taskId:linked.taskId,status:linked.status,completionMode:linked.completionMode||"durable",affinityKey:linked.affinityKey||null,controller:linked.controller||null,replyTo:linked.replyTo||null,escalationTo:linked.escalationTo||null,recoveryAttempts:linked.recoveryAttempts||0}:null});
   }
   if(cmd==="send"){
@@ -2099,19 +2195,46 @@ else if(["read","status","send","ask","model","effort","stop","retry","recover",
     await page.waitForTimeout(250);
     const observed=await observeSession(chat,page,tracked);
     if(tracked){ const rt=await loadRuntime(), live=rt.tasks[taskId]; live.status=observed.generating?"RUNNING":"DISPATCHED"; live.blockedReason=null; live.updatedAt=new Date().toISOString(); rt.tasks[taskId]=live; await saveRuntime(rt); }
-    print({ok:true,delivered:true,delivery,chat:chat.name,taskId:taskId||null,state:observed.sessionState,modelSelection:observedModel(observed.mode),dispatchModel});
+    print({ok:true,delivered:true,delivery,chat:chat.name,taskId:taskId||null,state:observed.sessionState,
+      modelSelection:dispatchModel?{
+        model:dispatchModel.model||dispatchModel.observed?.model||null,
+        effort:dispatchModel.effort||dispatchModel.observed?.effort||null,
+        raw:dispatchModel.observed?.raw||observed.mode||null,
+        verified:!dispatchModel.uiModelUnverifiable,
+      }:observedModel(observed.mode),dispatchModel});
   }
   if(cmd==="ask"){
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
-    const dispatchModel=await applyConfiguredSessionModel(page,chat);
+    const dispatchModel=await applyDispatchModel(page,chat,null,null);
     const st=await askMessage(page,msg,Number(opt("timeout","180000")));
-    print({chat:chat.name,response:st.lastAssistant,modelSelection:observedModel(st.mode),dispatchModel});
+    print({chat:chat.name,response:st.lastAssistant,modelSelection:dispatchModel?{
+      model:dispatchModel.model||dispatchModel.observed?.model||null,
+      effort:dispatchModel.effort||dispatchModel.observed?.effort||null,
+      raw:dispatchModel.observed?.raw||st.mode||null,
+      verified:!dispatchModel.uiModelUnverifiable,
+    }:observedModel(st.mode),dispatchModel});
   }
   if(cmd==="model"){
     const m=positionals(2).join(" "); if(!m) throw new Error("model required"); const applied=await applyModelSpec(page,m,opt("effort",null));
-    chat.model=applied.model;chat.effort=applied.effort;await saveRegistry(reg);print({ok:true,chat:chat.name,model:chat.model,effort:chat.effort||null,modelSelection:applied.observed});
+    chat.model=applied.model;chat.effort=applied.effort;
+    chat.verifiedModel=applied.model||applied.observed?.model||null;
+    chat.verifiedEffort=applied.effort||applied.observed?.effort||null;
+    chat.resourceVerifiedAt=new Date().toISOString();
+    await saveRegistry(reg);
+    print({ok:true,chat:chat.name,model:chat.model,effort:chat.effort||null,modelSelection:{
+      model:chat.verifiedModel,effort:chat.verifiedEffort,raw:applied.observed?.raw||null,verified:true
+    }});
   }
-  if(cmd==="effort"){const e=positionals(2).join(" ");if(!e)throw new Error("effort required");await setEffort(page,e);chat.effort=e;await saveRegistry(reg);print({ok:true,chat:chat.name,effort:e,modelSelection:observedModel((await state(page)).mode)});}
+  if(cmd==="effort"){
+    const e=positionals(2).join(" ");if(!e)throw new Error("effort required");
+    await setEffort(page,e);chat.effort=e;chat.verifiedEffort=e;
+    chat.resourceVerifiedAt=new Date().toISOString();
+    await saveRegistry(reg);
+    const folded=observedModel((await state(page)).mode);
+    print({ok:true,chat:chat.name,effort:e,modelSelection:{
+      model:chat.verifiedModel||folded.model||null,effort:e,raw:folded.raw||null,verified:true
+    }});
+  }
   if(cmd==="stop") print(await stopGeneration(page));
   if(cmd==="retry") print(await nativeRetry(page));
   if(cmd==="recover"){
@@ -2150,9 +2273,16 @@ else if(cmd==="new"){
     const url=await page.url(), id=convId(url), projectBase=url.includes("/g/g-p-")?url.replace(/\/c\/[^/]+.*$/,''):binding.projectBase;
     if(projectBase){binding.projectBase=projectBase;binding.projectUrl=projectBase+"/project";binding.projectId=projectIdFromUrl(projectBase);}
     reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model,effort:requestedEffort||applied.effort||null,affinityKey,workgroupId,
+      verifiedModel:applied.model||applied.observed?.model||null,verifiedEffort:applied.effort||applied.observed?.effort||null,
+      resourceVerifiedAt:new Date().toISOString(),
       spaceName:binding.spaceName,spaceId:task.spaceId,pageSpaceId:task.spaceId,page:page.label,attachmentEpoch:1,createdAt:new Date().toISOString()};
     await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:binding.spaceName,lastCommand:"new",lastSession:id});
-    print({...reg.chats[id],modelSelection:applied.observed,baselineAssistantCount:before.assistantCount,
+    print({...reg.chats[id],modelSelection:{
+      model:applied.model||applied.observed?.model||null,
+      effort:applied.effort||applied.observed?.effort||null,
+      raw:applied.observed?.raw||null,
+      verified:true,
+    },baselineAssistantCount:before.assistantCount,
       baselineAssistantHash:hashText(before.lastAssistant||""),baselineAssistantId:before.lastAssistantId||null,
       dispatchedAt:new Date().toISOString()});
   } catch (error) {

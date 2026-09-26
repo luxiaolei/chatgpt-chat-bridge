@@ -424,6 +424,10 @@ def submit(db, payload):
         task_id = str(payload.get("taskId") or "Q-" + operation_id)
         if not task_id or len(task_id) > 128 or not all(ch.isalnum() or ch in "._:-" for ch in task_id):
             raise ValueError("INVALID_TASK_ID")
+        prior_unknown=db.execute("""SELECT id FROM operations WHERE kind='dispatch' AND task_id=? AND status='DELIVERY_UNKNOWN'
+                                    ORDER BY created_at DESC LIMIT 1""",(task_id,)).fetchone()
+        if prior_unknown:
+            raise ValueError("TASK_DELIVERY_UNKNOWN_RECONCILE_REQUIRED:"+prior_unknown["id"])
         message = original_message + control_footer(task_id, caller, role, requested_model, requested_effort, policy_version)
         now = stamp()
         db.execute("""INSERT INTO operations(

@@ -41,6 +41,21 @@ test("preflight stays asleep when project auto reconcile is disabled", async()=>
   assert.equal(run(config,state),"0");
 });
 
+test("preflight wakes for an aged terminal agent tab and sleeps after detach", async()=>{
+  const {config,state}=await fixture(false,false);
+  const fs=await import("node:fs/promises");
+  const registry=JSON.parse(await fs.readFile(path.join(config,"registry.json"),"utf8"));
+  const runtime=JSON.parse(await fs.readFile(path.join(state,"runtime.json"),"utf8"));
+  registry.chats.worker={id:"worker",project:"P",account:"default",status:"active",page:"p2"};
+  runtime.tasks.A.sessionId="worker";
+  await fs.writeFile(path.join(config,"registry.json"),JSON.stringify(registry));
+  await fs.writeFile(path.join(state,"runtime.json"),JSON.stringify(runtime));
+  assert.equal(run(config,state),"1");
+  registry.chats.worker.page=null;
+  await fs.writeFile(path.join(config,"registry.json"),JSON.stringify(registry));
+  assert.equal(run(config,state),"0");
+});
+
 test("preflight stays asleep while project reconcile is paused for user control", async()=>{
   const {config,state}=await fixture(true,false);
   const runtime=JSON.parse(await (await import("node:fs/promises")).readFile(path.join(state,"runtime.json"),"utf8"));

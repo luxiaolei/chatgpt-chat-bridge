@@ -96,7 +96,6 @@ if grep -q 'notifyConductor' "$ROOT/src/main.js"; then
   echo "watchdog must not hard-code conductor routing" >&2
   exit 1
 fi
-echo "static checks passed"
 grep -q 'waitForProjectReady' "$ROOT/src/main.js"
 grep -q 'openConversationFromProject' "$ROOT/src/main.js"
 grep -q 'CONVERSATION_REATTACH_FAILED' "$ROOT/src/main.js"
@@ -110,3 +109,9 @@ grep -q 'PACE_SCOPE=' "$ROOT/bin/chat-bridge"
 grep -q 'ACCOUNT=' "$ROOT/scripts/install-watchdog.sh"
 
 grep -q 'deferrableModelUiError' "$ROOT/src/main.js"
+grep -q 'data-chatgpt-search-unit-key' "$ROOT/src/main.js"
+grep -q 'data-user-message-bubble' "$ROOT/src/main.js"
+grep -q 'data-markdown-text-style="assistant-message"' "$ROOT/src/main.js"
+grep -qi 'select chatgpt model' "$ROOT/src/main.js"
+grep -q 'add new project' "$ROOT/src/main.js"
+echo "static checks passed"
