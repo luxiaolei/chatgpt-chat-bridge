@@ -29,7 +29,7 @@ async function fixture({twoAccounts=false}={}) {
   await writeFile(fake,`#!/bin/sh
 printf '%s\n' "$*" >> "${log}"
 if [ -n "$CHAT_BRIDGE_TEST_FAIL_STAGE" ]; then
-  printf '{"ok":false,"deliveryStage":"%s","code":"SIMULATED"}\\n' "$CHAT_BRIDGE_TEST_FAIL_STAGE" >&2
+  printf '[error] {"ok":false,"deliveryStage":"%s","code":"SIMULATED"}\\n' "$CHAT_BRIDGE_TEST_FAIL_STAGE" >&2
   exit 1
 fi
 if [ "$1" = "new" ]; then
@@ -137,7 +137,9 @@ test("only a proven pre-send failure can be retried; attempted delivery stays un
     assert.equal(parse(f.call("work-one")).status,"SENT");
 
     const second=parse(f.call("submit",[],{requestId:"attempt-1",callerRef:"controller",role:"worker-b",taskId:"ATTEMPT-1",message:"two"}));
-    assert.equal(parse(f.call("work-one",[],null,{CHAT_BRIDGE_TEST_FAIL_STAGE:"SEND_ATTEMPTED"})).status,"DELIVERY_UNKNOWN");
+    const attempted=parse(f.call("work-one",[],null,{CHAT_BRIDGE_TEST_FAIL_STAGE:"SEND_ATTEMPTED"}));
+    assert.equal(attempted.status,"DELIVERY_UNKNOWN");
+    assert.equal(attempted.reason,"SEND_ATTEMPTED_SIMULATED");
     const retry=f.call("retry",["--operation",second.operationId]);
     assert.equal(retry.status,2);
     assert.match(retry.stderr,/RETRY_REQUIRES_PROVEN_PRE_SEND_FAILURE/);

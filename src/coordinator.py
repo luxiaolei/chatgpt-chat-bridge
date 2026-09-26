@@ -1415,7 +1415,7 @@ def parse_worker_receipt(completed):
         candidates = [text, *reversed([line.strip() for line in text.splitlines() if line.strip()])]
         for candidate in candidates:
             try:
-                value = json.loads(candidate)
+                value = json.loads(candidate.removeprefix("[error] "))
             except ValueError:
                 continue
             if isinstance(value, dict):
@@ -1544,6 +1544,8 @@ def work_one(db):
     if completed.returncode:
         if receipt and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("ok") is False:
             return finish(db, row, "FAILED_PRE_SEND", "PRE_SEND_" + str(receipt.get("code") or "ERROR")[:200])
+        if receipt and receipt.get("deliveryStage") == "SEND_ATTEMPTED":
+            return finish(db, row, "DELIVERY_UNKNOWN", "SEND_ATTEMPTED_" + str(receipt.get("code") or "ERROR")[:200])
         return finish(db, row, "DELIVERY_UNKNOWN", "WORKER_EXIT_" + str(completed.returncode))
     if receipt is None:
         return finish(db, row, "DELIVERY_UNKNOWN", "WORKER_RECEIPT_UNREADABLE")
