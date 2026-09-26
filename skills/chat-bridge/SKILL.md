@@ -217,11 +217,10 @@ Model choice and Thinking Level are independent controls.
 
 In the current ChatGPT Web deployment used by this Bridge:
 
-- `Latest` is the moving current-model choice and currently resolves to **GPT-6**.
+- `Latest` is a moving model choice; its underlying version is not verified by the UI label alone.
 - Thinking Level is the slider: `Instant → Medium → High → Extra High → Pro`.
 - `Pro` is the rightmost slider position.
-- Therefore `Latest + Pro` is the **GPT-6 Pro** path.
-- The Bridge preset `GPT-6 Pro` is shorthand for `Latest + Pro`.
+- The Bridge preset `GPT-6 Pro` selects `Latest + Pro`; the observed UI choice must be reported as `Latest`, not as a verified fixed GPT-6 version.
 
 New sessions default to `Latest`. They do **not** force `Pro`; if effort is omitted the page default is preserved.
 

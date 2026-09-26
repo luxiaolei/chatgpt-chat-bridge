@@ -421,17 +421,29 @@ test("control status distinguishes no work, in progress, awaiting ACK and comple
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
-test("unresolved unknown delivery rejects a new submit for the same task id", async()=>{
+test("a task id cannot be dispatched twice, including when prior delivery is unknown", async()=>{
   const f=await fixture();
   try{
     let r=f.call("submit",[],{requestId:"u1",callerRef:"controller",role:"worker",taskId:"T-BLOCK",message:"one"});
     assert.equal(r.status,0,r.stderr);
     const first=JSON.parse(r.stdout);
+    r=f.call("submit",[],{requestId:"u2",callerRef:"controller",role:"worker",taskId:"T-BLOCK",message:"duplicate"});
+    assert.equal(r.status,2);
+    assert.match(r.stderr,/TASK_ID_ALREADY_DISPATCHED/);
     const sql=spawnSync("python3",["-c",
       "import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute(\"update operations set status='DELIVERY_UNKNOWN' where id=?\",(sys.argv[2],));db.commit()",
       path.join(f.state,"bridge.sqlite3"),first.operationId],{encoding:"utf8"});
     assert.equal(sql.status,0,sql.stderr);
-    r=f.call("submit",[],{requestId:"u2",callerRef:"controller",role:"worker",taskId:"T-BLOCK",message:"retry"});
+    r=f.call("submit",[],{requestId:"u3",callerRef:"controller",role:"worker",taskId:"T-BLOCK",message:"retry"});
+    assert.equal(r.status,2);
+    assert.match(r.stderr,/TASK_DELIVERY_UNKNOWN_RECONCILE_REQUIRED/);
+    const old=spawnSync("python3",["-c",
+      "import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute(\"update operations set status='SUPERSEDED' where id=?\",(sys.argv[2],));db.commit()",
+      path.join(f.state,"bridge.sqlite3"),first.operationId],{encoding:"utf8"});
+    assert.equal(old.status,0,old.stderr);
+    r=f.call("control",["status","--project","P"]);
+    assert.equal(JSON.parse(r.stdout).projects[0].completion.state,"NEEDS_REVIEW");
+    r=f.call("submit",[],{requestId:"u4",callerRef:"controller",role:"worker",taskId:"T-BLOCK",message:"retry"});
     assert.equal(r.status,2);
     assert.match(r.stderr,/TASK_DELIVERY_UNKNOWN_RECONCILE_REQUIRED/);
   } finally { await rm(f.root,{recursive:true,force:true}); }

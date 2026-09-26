@@ -325,6 +325,19 @@ def submit(db, payload):
         if mode["mode"] in {"PAUSED", "DRAINING"}:
             raise ValueError("ADMISSION_" + mode["mode"])
 
+        operation_id = str(uuid.uuid4())
+        task_id = str(payload.get("taskId") or "Q-" + operation_id)
+        if not task_id or len(task_id) > 128 or not all(ch.isalnum() or ch in "._:-" for ch in task_id):
+            raise ValueError("INVALID_TASK_ID")
+        prior_task = db.execute("""SELECT id,status FROM operations WHERE kind='dispatch' AND task_id=?
+                                   AND status!='CANCELLED'
+                                   ORDER BY CASE WHEN status IN ('DELIVERY_UNKNOWN','SUPERSEDED') THEN 0 ELSE 1 END,
+                                            created_at DESC LIMIT 1""", (task_id,)).fetchone()
+        if prior_task:
+            if prior_task["status"] in {"DELIVERY_UNKNOWN", "SUPERSEDED"}:
+                raise ValueError("TASK_DELIVERY_UNKNOWN_RECONCILE_REQUIRED:" + prior_task["id"])
+            raise ValueError("TASK_ID_ALREADY_DISPATCHED:" + prior_task["id"])
+
         target = str(payload.get("sessionRef") or "").strip() or None
         role = str(payload.get("role") or "").strip()
         target_chat = (reg.get("chats") or {}).get(target) if target else None
@@ -420,14 +433,6 @@ def submit(db, payload):
         if not binding_execution_ready(project_record,bindings[alias]):
             raise ValueError("TARGET_PROJECT_CONTENT_NOT_READY")
 
-        operation_id = str(uuid.uuid4())
-        task_id = str(payload.get("taskId") or "Q-" + operation_id)
-        if not task_id or len(task_id) > 128 or not all(ch.isalnum() or ch in "._:-" for ch in task_id):
-            raise ValueError("INVALID_TASK_ID")
-        prior_unknown=db.execute("""SELECT id FROM operations WHERE kind='dispatch' AND task_id=? AND status='DELIVERY_UNKNOWN'
-                                    ORDER BY created_at DESC LIMIT 1""",(task_id,)).fetchone()
-        if prior_unknown:
-            raise ValueError("TASK_DELIVERY_UNKNOWN_RECONCILE_REQUIRED:"+prior_unknown["id"])
         message = original_message + control_footer(task_id, caller, role, requested_model, requested_effort, policy_version)
         now = stamp()
         db.execute("""INSERT INTO operations(
@@ -999,7 +1004,8 @@ def control_status(db, project=None):
                                    if kind in {"dispatch","rotation","stop"} and status in {"QUEUED","DISPATCHING"})
         pending_callback_ops = sum(n for (kind,status),n in operation_counts.items()
                                    if kind=="callback" and status in {"QUEUED","DISPATCHING"})
-        unknown_ops = sum(n for (kind,status),n in operation_counts.items() if status=="DELIVERY_UNKNOWN")
+        unknown_ops = sum(n for (kind,status),n in operation_counts.items()
+                          if status in {"DELIVERY_UNKNOWN", "SUPERSEDED"})
         active_tasks = sum(count for status,count in task_counts.items() if status not in TERMINAL)
         blocked = task_counts.get("BLOCKED",0)
         failed = task_counts.get("FAILED",0)

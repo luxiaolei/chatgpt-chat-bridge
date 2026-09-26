@@ -153,11 +153,10 @@ Treat **model** and **Thinking Level** as two separate controls.
 
 For the current ChatGPT Web deployment used by this Bridge:
 
-- `Latest` is the moving current-model choice and currently resolves to **GPT-6**.
+- `Latest` is a moving model choice; its underlying version is not verified by the UI label alone.
 - Thinking is the independent slider: `Instant → Medium → High → Extra High → Pro`.
 - `Pro` is the rightmost Thinking position.
-- Therefore **`Latest + Pro` is the GPT-6 Pro path** used by Chat Bridge.
-- `GPT-6 Pro` in Bridge commands is a convenience preset for `model=Latest, effort=Pro`; it is not a separate account/Space routing decision.
+- `GPT-6 Pro` in Bridge commands is a convenience preset for `model=Latest, effort=Pro`; report the observed UI choice as `Latest`, not as a verified fixed GPT-6 version. It is not a separate account/Space routing decision.
 
 New sessions should default to `Latest` unless a task explicitly requires an older pinned model. If effort is omitted, the page default is preserved; controllers should set effort deliberately when task quality matters.
 
@@ -166,7 +165,7 @@ Recommended policy:
 - Routine lookup, routing, status checks: `Latest + Instant/Medium`.
 - Normal implementation, debugging, scoped research: `Latest + High`.
 - Architecture, difficult review, ambiguous debugging: `Latest + Extra High`.
-- Highest-stakes synthesis, hard cross-system reasoning, final critical review: `Latest + Pro` (GPT-6 Pro).
+- Highest-stakes synthesis, hard cross-system reasoning, final critical review: `Latest + Pro`.
 
 When creating or configuring a worker, prefer explicit model/effort when deterministic allocation matters:
 

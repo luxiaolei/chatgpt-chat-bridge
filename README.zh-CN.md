@@ -150,7 +150,7 @@ Runtime state 可重建，**GitHub Issue / PR 仍然是最终事实源**。
 
 ## 模型版本与 Thinking Level
 
-新 Chat 默认 `Latest`（`GPT-6` 是当前别名），不会默认强制 Pro；未指定 Thinking Level 时保留页面默认档位。`5.6 Pro` / `5.5 Pro` 会选择对应旧版本并调到 Pro。也可用 `model AGENT Latest --effort High` 分别指定。模型不可用或匹配有歧义时明确报错，不静默替换。Latest 模型额度耗尽后，调用方可显式选择 `5.6 Pro`；模型额度与账号的网页访问限流分开处理。
+新 Chat 默认 `Latest`，不会默认强制 Pro；未指定 Thinking Level 时保留页面默认档位。Bridge 的 `GPT-6` / `GPT-6 Pro` 别名分别选择 `Latest` / `Latest + Pro`，但移动的 `Latest` 页面标签本身不能证明底层是固定的 GPT-6 版本。`5.6 Pro` / `5.5 Pro` 会选择对应旧版本并调到 Pro。也可用 `model AGENT Latest --effort High` 分别指定。模型不可用或匹配有歧义时明确报错，不静默替换。Latest 模型额度耗尽后，调用方可显式选择 `5.6 Pro`；模型额度与账号的网页访问限流分开处理。
 
 `status`、`send`、`ask`、`new`、`model`、`effort` 返回 `modelSelection`：页面实际模型、思考等级和原始文案；识别不出的字段为 null，不把配置冒充实际值。`status` 另外返回配置值。Pro 按滑块当前最右端选择，并核对页面显示。
 
