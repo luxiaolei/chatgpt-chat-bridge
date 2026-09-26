@@ -2,21 +2,38 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import crypto from "node:crypto";
 
 const source=await readFile(path.resolve("src/main.js"),"utf8");
 const start=source.indexOf("async function consolidateAccountSpace");
 const end=source.indexOf("\nasync function createProjectViaUI",start);
 const code=source.slice(start,end);
 
+test("canonical plan reuses an existing managed Space despite a changed display name", async()=>{
+  const begin=source.indexOf("function managedSpacePlan");
+  const stop=source.indexOf("\nasync function accountManagedTask",begin);
+  const plan=await new Function("crypto","slug",source.slice(begin,stop)+";return managedSpacePlan;")(
+    crypto,text=>text.toLowerCase().replace(/\W+/g,"-"));
+  const reg={accounts:{a:{identity:"same"}},spaces:{
+    old:{name:"Social- Agent",identity:"same",profileId:"P2",ownership:"agent",accountName:"alpha lu"},
+    canonical:{name:"chat-bridge-agent-qc-alpha",identity:"same",profileId:"P2",ownership:"agent",accountName:"alpha lu"}
+  }};
+  assert.equal(plan(reg,"a").spaceName,"chat-bridge-agent-qc-alpha");
+});
+
 test("Space consolidation is dry-run by default and migrates only after drained check", async()=>{
   const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
-  let safe=true,saves=0;
+  let safe=true,saves=0,tabCount=0;
   const managedSpacePlan=()=>({identity:"same",profileId:"P1",spaceName:"chat-bridge-agent-a"});
   const coordinated=()=>({safe,liveTasks:[],pendingOperations:0,controls:{}});
   const accountManagedTask=async()=>({task:{spaceId:99},spaceName:"chat-bridge-agent-a",profileId:"P1"});
   const saveRegistry=async()=>{saves++};
+  const listTaskSpaces=async()=>[{name:"old-a",id:1,ownership:"agent",profileId:"P1"},
+    {name:"old-b",id:2,ownership:"agent",profileId:"P1"}];
+  const taskSpace=async()=>({tabs:async()=>Array.from({length:tabCount},()=>({label:null})),finish:async()=>({})});
   const consolidate=await new AsyncFunction("managedSpacePlan","coordinated","accountManagedTask","saveRegistry",
-    code+";return consolidateAccountSpace;")(managedSpacePlan,coordinated,accountManagedTask,saveRegistry);
+    "listTaskSpaces","taskSpace",code+";return consolidateAccountSpace;")(
+      managedSpacePlan,coordinated,accountManagedTask,saveRegistry,listTaskSpaces,taskSpace);
 
   const base=()=>({
     defaultAccount:"a",
@@ -34,6 +51,12 @@ test("Space consolidation is dry-run by default and migrates only after drained 
   const dry=await consolidate(reg,"a",{});
   assert.equal(dry.dryRun,true); assert.equal(dry.affected.length,2); assert.equal(saves,0);
   assert.equal(reg.projects.A.bindings.a.spaceName,"old-a");
+  assert.equal(dry.safe,true); assert.equal(dry.oldSpaces.length,2);
+
+  tabCount=1;
+  const occupied=await consolidate(reg,"a",{confirm:true});
+  assert.equal(occupied.status,"NOT_DRAINED"); assert.equal(saves,0);
+  tabCount=0;
 
   safe=false;
   const blocked=await consolidate(reg,"a",{confirm:true});
@@ -45,5 +68,5 @@ test("Space consolidation is dry-run by default and migrates only after drained 
   assert.equal(reg.projects.A.bindings.a.spaceName,"chat-bridge-agent-a");
   assert.equal(reg.projects.B.bindings.alias.spaceName,"chat-bridge-agent-a");
   assert.equal(reg.chats.ca.page,null); assert.equal(reg.chats.cb.page,null);
-  assert.deepEqual(new Set(done.oldSpaces),new Set(["old-a","old-b"]));
+  assert.deepEqual(new Set(done.oldSpacesClosed),new Set(["old-a","old-b"]));
 });

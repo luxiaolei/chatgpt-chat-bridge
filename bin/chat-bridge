@@ -104,7 +104,7 @@ fi
 
 ORIGIN_ROUTED=0
 case "$CMD" in
-  send|ask|new|read|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete|projects|discover|list|event|task|project)
+  send|ask|new|read|evidence|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete|projects|discover|list|event|task|project)
     ORIGIN_ROUTED=1 ;;
   space)
     [[ "$SUB" == "show" || "$SUB" == "prune" || "$SUB" == "consolidate" ]] && ORIGIN_ROUTED=1 ;;
@@ -150,7 +150,7 @@ fi
 TOUCH_UI=0
 HEAVY_UI=0
 case "$CMD" in
-  projects|sync|discover|read|status|send|ask|model|effort|stop|retry|recover|resend|new|archive|retire|delete|watch)
+  projects|sync|discover|read|evidence|status|send|ask|model|effort|stop|retry|recover|resend|new|archive|retire|delete|watch)
     TOUCH_UI=1
     ;;
   space)

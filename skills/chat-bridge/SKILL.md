@@ -95,7 +95,7 @@ chat-bridge space consolidate --account secondary
 chat-bridge space consolidate --account secondary --confirm
 ```
 
-`project ensure` reuses a real accessible ChatGPT Project when possible. Creating one requires both `--create` and `--confirm`; it does not log in, share a Project, or copy private files. `space consolidate` is dry-run by default and only migrates legacy bindings after the account is drained. A verified login/Profile normally uses one Bridge-managed `chat-bridge-agent-*` Space across Projects. Human-owned Spaces remain outside automated cleanup.
+`project ensure` reuses a real accessible ChatGPT Project when possible. Creating one requires both `--create` and `--confirm`; it does not log in, share a Project, or copy private files. `space consolidate` is dry-run by default and migrates only after bound Projects are paused/drained, unknown deliveries and callbacks are cleared, and legacy Agent Spaces have no open Tabs or drafts. It closes only emptied Agent Spaces; human-owned Spaces remain outside automated cleanup. A verified login/Profile normally uses one Bridge-managed `chat-bridge-agent-*` Space across Projects.
 
 Treat `spaceName` as the stable binding and numeric `spaceId` as a runtime cache. Account bindings do not perform credential login; the bound Ego Space must already have access to the intended ChatGPT account/project.
 
@@ -155,7 +155,7 @@ chat-bridge queue ack --task TASK_ID --result-version 1 \
 
 Only an accepted result becomes `COMPLETE`; rejected/blocked results remain visible for follow-up.
 
-The queue returns a durable operation ID. `QUEUED` is not delivery; `SENT` confirms only the ChatGPT user message, not task completion. `DELIVERY_UNKNOWN` requires a read/reconciliation before any retry. Start the local worker with `~/.local/share/chatgpt-chat-bridge/install-coordinator.sh` after installing Bridge; `queue work-one` processes one claim manually. A controller without a known `callerRef` must supply an explicit Project to the direct `send` command instead of guessing its source Project.
+The queue returns a durable operation ID. `QUEUED` is not delivery; `SENT` confirms only the ChatGPT user message, not task completion. For `DELIVERY_UNKNOWN`, use the host-local `chat-bridge queue reconcile --operation OPERATION_ID`. It reads the bound Chat without sending, matches the exact user message, account, Project, conversation and message ID, and audits the attempt. Proven delivery becomes `SENT`; inconclusive delivery stays `DELIVERY_UNKNOWN` and must not be blindly resent. This covers dispatch, callback, and management operations. Start the local worker with `~/.local/share/chatgpt-chat-bridge/install-coordinator.sh` after installing Bridge; `queue work-one` processes one claim manually. A controller without a known `callerRef` must supply an explicit Project to the direct `send` command instead of guessing its source Project.
 
 ### Automatic dispatch boundary
 

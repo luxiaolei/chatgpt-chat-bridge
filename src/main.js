@@ -583,8 +583,8 @@ function hashText(v="") {
   return (h>>>0).toString(16).padStart(8,"0");
 }
 
-async function state(page) {
-  return await page.evaluate(() => {
+async function state(page, includeUserMessages=false) {
+  return await page.evaluate((includeUserMessages) => {
     const root=document.querySelector('main') || document.querySelector('[role="main"]') || document.body;
     const messageSelector='[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]';
     if(!globalThis.__CHAT_BRIDGE_WATCH || globalThis.__CHAT_BRIDGE_WATCH.root!==root) {
@@ -672,13 +672,14 @@ async function state(page) {
       errorTexts:[...alerts,...knownErrors].filter((v,i,a)=>a.indexOf(v)===i),
       online:navigator.onLine,visibility:document.visibilityState,
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,
+      userMessages:includeUserMessages?ms.filter(x=>x.role==='user'):undefined,
       messageCount:ms.length,assistantCount:ms.filter(x=>x.role==='assistant').length,
       assistantChars:lastAssistant?.length||0,
       mutationSeq:globalThis.__CHAT_BRIDGE_WATCH.seq,
       mutationLastAt:new Date(globalThis.__CHAT_BRIDGE_WATCH.lastMutationAt).toISOString(),
       observerStartedAt:new Date(globalThis.__CHAT_BRIDGE_WATCH.startedAt).toISOString()
     };
-  });
+  },includeUserMessages);
 }
 
 function classifySnapshot(raw, heartbeat, task=null, effort=null) {
@@ -1057,7 +1058,10 @@ function managedSpacePlan(reg, account, preferredProfileId=null) {
   const source=observedSpaces.find(space=>space.profileId===profileId)||observedSpaces[0];
   const accountName=source.accountName||reg.accounts?.[account]?.label||account;
   const profileSuffix=profileIds.length>1?"-"+crypto.createHash("sha256").update(String(profileId)).digest("hex").slice(0,8):"";
-  const spaceName="chat-bridge-agent-"+slug(accountName)+profileSuffix;
+  const canonical=observedSpaces.filter(space=>space.profileId===profileId&&space.ownership==="agent"&&
+    String(space.name||"").startsWith("chat-bridge-agent-"));
+  if(canonical.length>1) throw new Error("AMBIGUOUS_CANONICAL_SPACE");
+  const spaceName=canonical[0]?.name||"chat-bridge-agent-"+slug(accountName)+profileSuffix;
   return {identity,profileId,profileIds,accountName,spaceName};
 }
 
@@ -1094,29 +1098,60 @@ async function consolidateAccountSpace(reg, account, options={}) {
       if(binding) affected.push({project:projectName,account:alias,from:binding.spaceName||null,to:plan.spaceName});
     }
   }
-  const preview={ok:true,dryRun:!options.confirm,account,aliases,profileId:plan.profileId,spaceName:plan.spaceName,affected};
-  if(!options.confirm) return preview;
   const migration=coordinated("migration-check",{account});
-  if(!migration.safe) return {...preview,ok:false,status:"NOT_DRAINED",migration};
+  const oldNames=[...new Set([
+    ...affected.map(item=>item.from),
+    ...Object.values(reg.chats||{}).filter(chat=>aliases.includes(chat.account)).map(chat=>chat.spaceName)
+  ].filter(name=>name&&name!==plan.spaceName))];
+  const available=typeof listTaskSpaces==="function"?await listTaskSpaces():[];
+  const oldSpaces=[];
+  for(const name of oldNames) {
+    const matches=available.filter(space=>space.name===name);
+    if(matches.length>1) throw new Error("AMBIGUOUS_SPACE: "+name);
+    const info=matches[0];
+    if(!info){ oldSpaces.push({name,missing:true}); continue; }
+    const record={name,spaceId:info.id,ownership:info.ownership,profileId:info.profileId,tabs:0};
+    if(info.ownership==="agent"&&info.profileId===plan.profileId) {
+      const task=await taskSpace(info.id), tabs=await task.tabs();
+      record.tabs=tabs.length;
+    }
+    oldSpaces.push(record);
+  }
+  const safe=migration.safe&&oldSpaces.every(space=>space.missing ||
+    (space.ownership==="agent"&&space.profileId===plan.profileId&&space.tabs===0));
+  const preview={ok:true,dryRun:!options.confirm,account,aliases,profileId:plan.profileId,spaceName:plan.spaceName,
+    affected,migration,oldSpaces,safe};
+  if(!options.confirm) return preview;
+  if(!safe) return {...preview,ok:false,status:"NOT_DRAINED"};
   const {task}=await accountManagedTask(reg,account,plan.profileId);
-  const oldSpaces=new Set();
+  if(!coordinated("migration-check",{account}).safe) return {...preview,ok:false,status:"NOT_DRAINED_AFTER_RECHECK"};
+  for(const space of oldSpaces.filter(item=>!item.missing)) {
+    if((await (await taskSpace(space.spaceId)).tabs()).length) return {...preview,ok:false,status:"OLD_SPACE_REOPENED"};
+  }
   for(const item of affected) {
     const binding=reg.projects[item.project].bindings[item.account];
-    if(binding.spaceName && binding.spaceName!==plan.spaceName) oldSpaces.add(binding.spaceName);
     binding.spaceName=plan.spaceName;binding.profileId=plan.profileId;binding.spaceId=task.spaceId;binding.controlPage=null;
   }
   for(const chat of Object.values(reg.chats||{})) {
     if(!aliases.includes(chat.account)) continue;
     const binding=reg.projects?.[chat.project]?.bindings?.[chat.account];
     if(!binding || binding.spaceName!==plan.spaceName) continue;
-    if(chat.spaceName && chat.spaceName!==plan.spaceName) oldSpaces.add(chat.spaceName);
     chat.spaceName=plan.spaceName;chat.spaceId=task.spaceId;chat.pageSpaceId=task.spaceId;
     if(chat.page) {
       chat.page=null;chat.detachedAt=new Date().toISOString();chat.attachmentEpoch=Number(chat.attachmentEpoch||0)+1;
     }
   }
   await saveRegistry(reg);
-  return {...preview,dryRun:false,spaceId:task.spaceId,oldSpaces:[...oldSpaces],migrated:true};
+  const closed=[],skipped=[];
+  for(const space of oldSpaces.filter(item=>!item.missing)) {
+    const fresh=(await listTaskSpaces()).find(item=>item.id===space.spaceId&&item.name===space.name);
+    if(!fresh || fresh.ownership!=="agent" || fresh.profileId!==plan.profileId){ skipped.push(space.name); continue; }
+    const old=await taskSpace(space.spaceId);
+    if((await old.tabs()).length){ skipped.push(space.name); continue; }
+    await old.finish({keep:[]});
+    closed.push(space.name);
+  }
+  return {...preview,dryRun:false,spaceId:task.spaceId,oldSpacesClosed:closed,oldSpacesSkipped:skipped,migrated:true};
 }
 
 async function createProjectViaUI(page, projectName) {
@@ -2119,14 +2154,31 @@ else if(["archive","retire","delete","forget"].includes(cmd)){
     print({ok:true,chat:chat.name,id:chat.id,status:chat.status});
   }
 }
-else if(["read","status","send","ask","model","effort","stop","retry","recover","resend"].includes(cmd)){
+else if(["read","evidence","status","send","ask","model","effort","stop","retry","recover","resend"].includes(cmd)){
   const key=args[1]; if(!key) throw new Error("chat key required");
   const chat=resolveChat(reg,key,project,accountArg);
-  const background=args.includes("--background");
+  const background=args.includes("--background")||cmd==="evidence";
   if(["send","ask","retry","recover","resend"].includes(cmd) && !background) await clearUserControlPause(chat);
   const {page,binding}=await ensurePage(reg,chat,{pauseOnUserControl:background});
   await touchRuntime(chat.project,{activeAccount:chat.account,spaceName:binding.spaceName,lastCommand:cmd,lastSession:chat.id});
   if(cmd==="read") print((await state(page)).lastAssistant);
+  if(cmd==="evidence"){
+    const expected=opt("expected-hash",null);
+    if(!/^[0-9a-f]{64}$/.test(expected||"")) throw new Error("evidence requires --expected-hash SHA256");
+    const observed=await state(page,true);
+    const login=await page.evaluate(async()=>{
+      const response=await fetch("/api/auth/session",{credentials:"same-origin",signal:AbortSignal.timeout(5000)});
+      if(!response.ok) throw new Error("EVIDENCE_LOGIN_UNAVAILABLE");
+      return (await response.json())?.user?.id||null;
+    });
+    if(login!==reg.accounts?.[chat.account]?.identity) throw new Error("EVIDENCE_ACCOUNT_MISMATCH");
+    const normalized=text=>String(text||"").replace(/\s+/g," ").trim();
+    const matches=(observed.userMessages||[]).filter(message=>
+      crypto.createHash("sha256").update(normalized(message.text)).digest("hex")===expected);
+    print({ok:true,project:chat.project,account:chat.account,accountId:accountScope(reg,chat.account),
+      sessionRef:chat.id,url:observed.url,observedAt:new Date().toISOString(),
+      messageCount:observed.messageCount,matches:matches.map(message=>({messageId:message.id,textHash:expected}))});
+  }
   if(cmd==="status"){
     const rt=await loadRuntime();
     const taskId=opt("task",null);

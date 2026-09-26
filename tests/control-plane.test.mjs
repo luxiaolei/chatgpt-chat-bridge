@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 const coordinator = path.resolve("src/coordinator.py");
 
@@ -39,12 +40,14 @@ elif [ "$1" = "task" ]; then
   printf '{"ok":true}\\n'
 elif [ "$1" = "stop" ]; then
   printf '{"stopped":true}\\n'
+elif [ "$1" = "evidence" ]; then
+  printf '%s\\n' "$CHAT_BRIDGE_TEST_EVIDENCE"
 fi
 `,{mode:0o755});
   const call=(command,args=[],payload=null,env={})=>{
     const result=spawnSync("python3",[coordinator,command,config,state,...args],{
       input:payload?JSON.stringify(payload):undefined,encoding:"utf8",
-      env:{...process.env,CHAT_BRIDGE_BIN:fake,...env}
+      env:{...process.env,CHAT_BRIDGE_FROM_ACCOUNT_ID:"",CHAT_BRIDGE_FROM_SPACE:"",CHAT_BRIDGE_BIN:fake,...env}
     });
     return result;
   };
@@ -102,6 +105,47 @@ test("worker receipt may be machine JSON on stderr without becoming unknown", as
     r=f.call("work-one",[],null,{CHAT_BRIDGE_TEST_STDERR_RECEIPT:"1"});
     assert.equal(r.status,0,r.stderr);
     assert.equal(JSON.parse(r.stdout).status,"SENT");
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test("unknown dispatch, callback and management require exact bound Chat evidence and leave an audit", async()=>{
+  const f=await fixture();
+  try{
+    const parse=r=>{ assert.equal(r.status,0,r.stderr); return JSON.parse(r.stdout); };
+    const dispatch=parse(f.call("submit",[],{requestId:"reconcile-d",callerRef:"controller",sessionRef:"controller",message:"synthetic dispatch",taskId:"reconcile-task"}));
+    const callback=parse(f.call("result",["--task","reconcile-task","--summary","synthetic result","--status","COMPLETE"])).callback;
+    const management=parse(f.call("control",["broadcast","--project","P","--kind","RELOAD","--message","synthetic reload","--event","reconcile-event","--confirm"])).deliveries[0];
+    const operations=[dispatch,callback,management];
+    for(const op of operations){
+      const updated=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute(\"UPDATE operations SET status='DELIVERY_UNKNOWN',reason='LOST_RECEIPT' WHERE id=?\",(sys.argv[2],)); d.commit()",path.join(f.state,"bridge.sqlite3"),op.operationId],{encoding:"utf8"});
+      assert.equal(updated.status,0,updated.stderr);
+    }
+    parse(f.call("control",["pause","--project","P","--confirm"]));
+    const blockedMigration=parse(f.call("migration-check",[],{account:"a"}));
+    assert.equal(blockedMigration.safe,false);
+    assert.equal(blockedMigration.unknownOperations.length,3);
+    const accountId=createHash("sha256").update("identity:one").digest("hex");
+    const evidence=(op,messageId,hash)=>JSON.stringify({ok:true,project:"P",account:"a",accountId,sessionRef:"controller",
+      url:"https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/c/controller",observedAt:"2026-09-26T12:00:00Z",
+      matches:[{messageId,textHash:hash}]});
+    const messageOf=id=>spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('SELECT message FROM operations WHERE id=?',(sys.argv[2],)).fetchone()[0])",path.join(f.state,"bridge.sqlite3"),id],{encoding:"utf8"}).stdout.trim();
+    for(const [index,op] of operations.entries()){
+      const hash=createHash("sha256").update(messageOf(op.operationId).replace(/\s+/g," ").trim()).digest("hex");
+      const env={CHAT_BRIDGE_TEST_EVIDENCE:evidence(op,"message-"+index,index===0?"0".repeat(64):hash)};
+      let outcome=parse(f.call("reconcile",["--operation",op.operationId],null,env));
+      if(index===0){
+        assert.equal(outcome.outcome,"STILL_UNKNOWN");
+        assert.equal(parse(f.call("status",[op.operationId])).status,"DELIVERY_UNKNOWN");
+        env.CHAT_BRIDGE_TEST_EVIDENCE=evidence(op,"message-"+index,hash);
+        outcome=parse(f.call("reconcile",["--operation",op.operationId],null,env));
+      }
+      assert.equal(outcome.outcome,"RECONCILED_DELIVERED");
+      assert.equal(parse(f.call("status",[op.operationId])).status,"SENT");
+      assert.equal(outcome.evidence.messageId,"message-"+index);
+    }
+    const audit=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('SELECT count(*) FROM reconciliation_attempts').fetchone()[0]); print(d.execute(\"SELECT status FROM management_deliveries WHERE event_id='reconcile-event'\").fetchone()[0]); print(d.execute(\"SELECT callback_status FROM task_results WHERE task_id='reconcile-task'\").fetchone()[0])",path.join(f.state,"bridge.sqlite3")],{encoding:"utf8"});
+    assert.equal(audit.status,0,audit.stderr);
+    assert.equal(audit.stdout.trim(),"4\nDELIVERED\nDELIVERED");
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
