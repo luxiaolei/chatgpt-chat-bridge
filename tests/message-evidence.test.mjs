@@ -7,6 +7,21 @@ const start=source.indexOf("function normalizedEvidenceText");
 const end=source.indexOf("\nasync function state",start);
 const {normalize,expand}=new Function(source.slice(start,end)+
   ";return {normalize:normalizedEvidenceText,expand:expandEvidenceMessages};")();
+const readyStart=source.indexOf("async function waitForConversationReady");
+const readyEnd=source.indexOf("\nasync function waitForProjectReady",readyStart);
+const ready=new Function("detectWebRateLimit","COMPOSER_SELECTOR",source.slice(readyStart,readyEnd)+
+  ";return waitForConversationReady;")(async()=>{},"composer");
+
+test("existing conversation waits for message history after composer appears",async()=>{
+  let reads=0, waits=0;
+  await ready({
+    waitForSelector:async()=>true,
+    evaluate:async()=>++reads===2,
+    waitForTimeout:async()=>{waits++;},
+  },1000);
+  assert.equal(reads,2);
+  assert.equal(waits,1);
+});
 
 test("evidence expands only user messages and strips UI disclosure labels",async()=>{
   const message="[RESULT]\ntask_id: CB09-1\nsummary: done";

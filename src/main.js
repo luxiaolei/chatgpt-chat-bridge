@@ -505,7 +505,10 @@ async function waitForConversationReady(page, timeout=15000) {
     await detectWebRateLimit(page,"conversation-ready");
     const ok=await page.waitForSelector(COMPOSER_SELECTOR,{state:"visible",timeout:1000})
       .then(()=>true).catch(()=>false);
-    if(ok) return true;
+    if(ok && await page.evaluate(()=>[...document.querySelectorAll(
+      '[data-message-author-role], [data-content-search-unit-key$=":user"], [data-content-search-unit-key$=":assistant"], [data-chatgpt-search-unit-key$=":user"], [data-chatgpt-search-unit-key$=":assistant"]'
+    )].some(e=>(e.innerText||e.textContent||"").trim())).catch(()=>false)) return true;
+    await page.waitForTimeout(250);
   }
   await detectWebRateLimit(page,"conversation-ready-timeout");
   throw new Error("Conversation UI did not become ready before timeout");
@@ -548,7 +551,7 @@ async function openConversationFromProject(page, binding, projectName, chatId) {
   }
   try {
     await page.waitForFunction((chatId)=>location.pathname.includes("/c/"+chatId),chatId,{timeout:12000});
-    await waitForConversationReady(page,12000);
+    await waitForConversationReady(page,20000);
   } catch {
     return false;
   }
@@ -563,7 +566,7 @@ async function ensurePage(reg, chat, options={}) {
   let attached=false;
   try {
     if((await page.url())!==chat.url) await page.goto(chat.url,{waitUntil:"load",timeout:20000});
-    await waitForConversationReady(page,12000);
+    await waitForConversationReady(page,20000);
     attached=(await page.url()).includes("/c/"+chat.id);
   } catch {}
   if(!attached) attached=await openConversationFromProject(page,binding,chat.project,chat.id);
