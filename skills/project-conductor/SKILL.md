@@ -82,7 +82,7 @@ Use `ask` only when the conductor needs the result synchronously.
 
 Create, reuse, and retire project Chats deliberately.
 
-Use one verified managed Agent Space per login/Profile when practical, with tabs for multiple Projects and sessions; never take over the user's manual Space. Treat conversation ID/role as the long-lived session identity, the actual ChatGPT Project ID as the project location, and page labels/Space ID as runtime attachments. When the Ego page budget is full, the bridge may detach a safe idle session tab and later reattach that conversation automatically; active tasks, generating sessions, active tabs, drafts, and the control page are protected. Use `chat-bridge space prune --project "PROJECT"` only for stale untracked tabs after tests or session churn.
+Use one verified managed Agent Space per login/Profile when practical, with tabs for multiple Projects and sessions; never take over the user's manual Space. Treat the logical role/controller as the long-lived identity; a concrete conversation ID is one replaceable generation. The actual ChatGPT Project ID is the project location, and page labels/Space ID are runtime attachments. When the Ego page budget is full, the bridge may detach a safe idle session tab and later reattach that conversation automatically; active tasks, generating sessions, active tabs, drafts, and the control page are protected. Use `chat-bridge space prune --project "PROJECT"` only for stale untracked tabs after tests or session churn.
 
 Create a session when:
 - a workstream has a distinct long-lived context,

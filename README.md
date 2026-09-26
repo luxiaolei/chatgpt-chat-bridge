@@ -122,7 +122,7 @@ chat-bridge new \
   --message "You own implementation for GitHub issue #12. Update the issue/PR, then callback the owning controller."
 ```
 
-The bridge captures the real conversation ID and project-scoped URL. Multiple Projects and sessions for one verified ChatGPT login/Profile normally share **one Bridge-managed Ego Space**. Conversation identity is long-lived, while the Ego page/tab attachment is recyclable. A finished/result-recorded task may be detached after the safety grace period when its page is inactive, Bridge-managed, not generating, and has no draft/user ownership; running tasks remain attached by default. A new Space is not a concurrency mechanism.
+The bridge captures the real conversation ID and project-scoped URL. Multiple Projects and sessions for one verified ChatGPT login/Profile normally share **one Bridge-managed Ego Space**. Logical role/controller identity is long-lived; each concrete conversation is a replaceable generation, while the Ego page/tab attachment is recyclable. A finished/result-recorded task may be detached after the safety grace period when its page is inactive, Bridge-managed, not generating, and has no draft/user ownership; running tasks remain attached by default. A new Space is not a concurrency mechanism.
 
 ## Project, account, and Space binding
 

@@ -71,7 +71,7 @@ chat-bridge new \
   --message "负责 Issue #12；完成后先更新 GitHub，再回调 conductor。"
 ```
 
-同一个已验证 ChatGPT 登录/Profile 默认只保留一个 Bridge-managed Ego Space；这个 Space 可以同时承载多个 Project 和多个 Session 的 tab。Conversation ID/逻辑 role 是长期身份，Space/page 只是运行 attachment。运行中的任务默认保持 attached；任务结果已经持久化为 `RESULT_RECORDED` 或进入终态后，超过安全 grace period 且页面为非 active、Bridge-managed、无生成/草稿/人工 ownership 时，Bridge 才会自动关 tab，后续按 conversation URL lazy reattach。增加同账号 Space 不等于增加额度或并发容量。
+同一个已验证 ChatGPT 登录/Profile 默认只保留一个 Bridge-managed Ego Space；这个 Space 可以同时承载多个 Project 和多个 Session 的 tab。逻辑 role/controller 是长期身份；具体 Conversation ID 是可接替的一代会话，Space/page 只是运行 attachment。运行中的任务默认保持 attached；任务结果已经持久化为 `RESULT_RECORDED` 或进入终态后，超过安全 grace period 且页面为非 active、Bridge-managed、无生成/草稿/人工 ownership 时，Bridge 才会自动关 tab，后续按 conversation URL lazy reattach。增加同账号 Space 不等于增加额度或并发容量。
 
 ## 账号与 Space 绑定
 
