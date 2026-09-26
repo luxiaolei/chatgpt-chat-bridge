@@ -1,6 +1,6 @@
 # ChatBridge v0.9 acceptance and cutover record
 
-Updated 2026-09-26. Code baseline: PR #46 at `c7e891e`. This records observed evidence and the remaining release gates; it is not a production acceptance receipt. The canonical source checkout is `/Users/xlmini/Projects/chatgpt-chat-bridge`.
+Updated 2026-09-26. Code baseline: PR #46 head `5ae6ccf`, merged as `4fba293`. This records observed release evidence and remaining acceptance work. The canonical source checkout is `/Users/xlmini/Projects/chatgpt-chat-bridge`.
 
 ## Evidence so far
 
@@ -17,19 +17,27 @@ Updated 2026-09-26. Code baseline: PR #46 at `c7e891e`. This records observed ev
 | Resource stability | PARTIAL | Ten read-only Ego client rounds: canary Tabs 4→4, orphan clients 0→0, global Renderer count 35→35. Ten rounds of actual Tab/session churn and CPU/latency measurements remain open. |
 | Isolated install/migration rehearsal | PASS locally | 22 staged runtime/CLI/Skill copies matched source hashes. Staged CLI read an empty isolated control plane. A consistent copy of production state opened under v0.9 with 5 projects and 116 tasks; registry/runtime documents were unchanged. |
 | Isolated coordinator restart | PASS for synthetic worker | A queued dispatch and then a queued callback survived daemon restarts and each sent once. A simulated crashed claim became `DELIVERY_UNKNOWN`; another restart made no additional fake send. Real Ego generation/recovery was not tested. |
-| Production cutover | BLOCKED | No production binaries, launchd services, database, or Spaces were changed. The state snapshot has 13 BLOCKED and 1 FAILED tasks; three projects report `NEEDS_REVIEW`. Canary also reports `NEEDS_REVIEW` for one unknown dispatch. |
+| Production cutover | PASS for runtime and HZ OS admission | The v0.9 CLI/runtime/Skills were installed and all 26 copied files matched source hashes. One coordinator and the 60-second watchdog are loaded under launchd. The pre-cutover 117 tasks and 10 historical HZ OS `DELIVERY_UNKNOWN` operations were preserved. Synthetic production task `CB09-PROD-SMOKE-001` completed dispatch → Computer read → result → callback → controller `ACCEPTED`. HZ OS root accepted the host-local installation attestation and approved admission of new, distinct tasks; HZ OS is `RUNNING`. Other business scopes remain paused pending their own controller/owner readiness. |
 
 The canary-only SQLite database was backed up before an older, invalid `SUPERSEDED` classification was restored to `DELIVERY_UNKNOWN`. A later dispatch of the same synthetic task ID succeeded before the new guard was added; that success cannot prove the earlier send did not happen. The first callback had an unknown original send receipt, but its exact synthetic message was observed in the target conversation; a local UI text hash and conversation reference were retained. The earlier database reason relied only on controller ACK, so a general evidence-backed reconciliation/audit path remains open. No further retry was made after the ambiguity was identified.
 
-## Remaining release gates
+## Open acceptance work
 
 1. Reconcile unknown sends using direct target-conversation evidence and retain the audit trail. Keep genuinely unresolved sends unknown and block duplicate task IDs.
 2. Extend the two-Project shared-Space canary to draft/user-ownership boundaries; do not prune any business Project or Manual Space.
 3. Exercise two independent controllers; the hzcodex → qc-alpha → hzcodex route and Computer host/path receipt are complete for one synthetic task. Keep isolated canary state explicit in Computer commands.
 4. Extend restart rehearsal to real Ego generation/result-recorded behavior in the isolated canary. Run ten actual Tab/session churn rounds with queue wait, UI lease, callback latency, Tabs, Renderer, CPU, and orphan-client trends.
-5. Classify the production BLOCKED/FAILED tasks by owner and decide which need reconciliation before each project can resume. Keep Issue #37 open until the release evidence is complete.
+5. Reconcile 13 pre-existing BLOCKED and one FAILED production task with their owners. HZ OS root approved only new, distinct work; its 10 historical unknown deliveries stay quarantined. Social Agent has an unsent controller draft and one upgrade-notice `DELIVERY_UNKNOWN`, so its pause remains. Chat routing, Quant Company, and AGI Game remain paused without a verified post-upgrade controller receipt. Keep Issue #37 open for these scopes and the untested capabilities above.
 
-## Production cutover sequence, after the gates pass
+## Production release receipt
+
+At cutover, the authoritative production state had 117 tasks (102 COMPLETE, 1 CANCELLED, 13 BLOCKED, 1 FAILED), no active task or queued/dispatched operation, and SQLite `quick_check=ok`. A private consistent backup of the database, projections, installed CLI/runtime/Skills, and launchd plists is at `/Users/xlmini/.codex/backups/chatbridge-v09-production-20260926T100015Z`; its `cutover-final` subdirectory was captured after the global drain and service stop. The old coordinator/watchdog were stopped through launchd, `scripts/install.sh` installed v0.9, and the two intended launchd services were restarted. The installed `coordinator.py` SHA-256 is `85bf75cbf4bb99a08b2111daa2ca2b40b07b3ef40bc1c3d3167cb854a3360b12`; installed `main.js` is `0601ce2b510cf8acfa978530a9ab22fdeaabed7fc119027aa8989c62132da786`. All 26 installer copies matched the tested source; post-install `npm run check && npm test` passed (127/127, static, pacing/cooldown).
+
+The global drain was lifted only after project-level pauses were persisted. The existing synthetic ChatGPT Project was verified in the hzcodex managed Space; the production test controller and worker showed `Latest + Medium`. The worker read only `package.json` through ChatGPT Computer, recorded result v1 in production state, and the owning controller accepted the delivered callback. The synthetic project was parked again. HZ OS controller events `CB09-PROD-RELOAD-HZ-20260926` and `CB09-PROD-RELEASE-HZ-20260926` were delivered and acknowledged. The controller verified source hashes and accepted the host-local installed-file receipt, explicitly distinguishing it from independent installed-path access, which remains disallowed by the Computer plugin. Its second ACK approved admission only for genuinely new, deduplicated HZ OS work; the HZ OS project pause was then lifted. No historical unknown operation was resent.
+
+The Social Agent upgrade notification returned `DELIVERY_UNKNOWN` after its controller page was observed with an unsent draft. The event text was not visible in the inspected conversation, but absence in one UI read is not a confirmed non-delivery receipt. It was not resent. The Social Agent pause remains until the draft and unknown delivery are reconciled. Current resource snapshot: managed canary Spaces 11/12 had 6/2 tabs, 37 Ego renderers, and two PPID 1 `ego-browser nodejs` clients of unknown ownership; no client was killed. Ten actual Tab/session churn rounds and real Ego restart recovery remain unverified.
+
+## Cutover and rollback sequence
 
 1. Fix the PR commit, installed runtime and Skill hashes, target accounts/projects, controller list, and rollback owner. Confirm no uncontrolled concurrent writer is active.
 2. Take a consistent SQLite backup, plus registry/runtime projections, current installed runtime/CLI/Skills, launchd plists and service status. Preserve any new outbox/task records created after this point.
