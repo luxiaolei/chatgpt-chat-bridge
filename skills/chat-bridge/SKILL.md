@@ -157,6 +157,8 @@ Only an accepted result becomes `COMPLETE`; rejected/blocked results remain visi
 
 The queue returns a durable operation ID. `QUEUED` is not delivery; `SENT` confirms only the ChatGPT user message, not task completion. For `DELIVERY_UNKNOWN`, use the host-local `chat-bridge queue reconcile --operation OPERATION_ID`. It reads the bound Chat without sending, matches the exact user message, account, Project, conversation and message ID, and audits the attempt. Proven delivery becomes `SENT`; inconclusive delivery stays `DELIVERY_UNKNOWN` and must not be blindly resent. This covers dispatch, callback, and management operations. Start the local worker with `~/.local/share/chatgpt-chat-bridge/install-coordinator.sh` after installing Bridge; `queue work-one` processes one claim manually. A controller without a known `callerRef` must supply an explicit Project to the direct `send` command instead of guessing its source Project.
 
+A worker failure proven to occur before the send control was triggered becomes `FAILED_PRE_SEND` with its error code. That operation can be manually retried with `chat-bridge queue retry --operation OPERATION_ID`. A failure after a send attempt remains `DELIVERY_UNKNOWN` and cannot use this retry path.
+
 ### Automatic dispatch boundary
 
 For controller-driven work, prefer `queue submit` with `callerRef + role`.
