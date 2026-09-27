@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {mkdtemp, writeFile, rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import path from "node:path";
-import {createRuntime, createTurnEventStream} from "../src/runtime.js";
+import {createRuntime, createTurnEventStream, createToolResultStream} from "../src/runtime.js";
 
 test("runtime exposes a typed stream probe without pretending CLI polling is streaming", async () => {
   const bridge = createRuntime({bin: process.execPath});
@@ -49,6 +49,38 @@ test("turn event stream enforces correlation, sequence, terminal state, and assi
   assert.equal(stream.push({requestId: "r1", turnId: "t1", sequence: 3, type: "terminal", terminal: {status: "completed"}}).ok, true);
   assert.equal(stream.push({requestId: "r1", turnId: "t1", sequence: 4, type: "delta", assistantMessageId: "a2", delta: "late"}).error.code, "EVENT_AFTER_TERMINAL");
   assert.equal(stream.push({requestId: "r1", turnId: "other", sequence: 5, type: "progress", progress: {state: "running"}}).error.code, "TURN_CORRELATION_MISMATCH");
+});
+
+test("tool result boundary binds IDs/schema/name and emits duplicate, stale, and error receipts", () => {
+  const stream = createToolResultStream({requestId: "r1", turnId: "t1", toolCallId: "call1", toolName: "lookup", schemaId: "lookup.v1"});
+  assert.equal(stream.push({requestId: "r1", turnId: "t1", toolCallId: "call1", sequence: 1, type: "progress", progress: {state: "running"}}).ok, true);
+  assert.equal(stream.push({requestId: "r1", turnId: "t1", toolCallId: "call1", sequence: 1, type: "progress", progress: {state: "old"}}).error.code, "STALE_TOOL_RESULT");
+  assert.equal(stream.push({requestId: "r1", turnId: "t1", toolCallId: "call1", sequence: 3, type: "result", resultId: "res1", toolName: "lookup", schemaId: "lookup.v1", result: {value: 1}}).error.code, "TOOL_SEQUENCE_GAP");
+  assert.equal(stream.push({requestId: "r1", turnId: "t1", toolCallId: "call1", sequence: 2, type: "result", resultId: "res1", toolName: "lookup", schemaId: "lookup.v1", result: {value: 1}}).ok, true);
+  assert.equal(stream.push({requestId: "r1", turnId: "t1", toolCallId: "call1", sequence: 3, type: "result", resultId: "res1", toolName: "lookup", schemaId: "lookup.v1", result: {value: 1}}).error.code, "DUPLICATE_TOOL_RESULT");
+  const wrongBinding = createToolResultStream({requestId: "r1", turnId: "t1", toolCallId: "call1", toolName: "lookup", schemaId: "lookup.v1"});
+  assert.equal(wrongBinding.push({requestId: "r1", turnId: "t1", toolCallId: "call1", sequence: 1, type: "result", resultId: "res2", toolName: "other", schemaId: "lookup.v1", result: {}}).error.code, "TOOL_BINDING_MISMATCH");
+  const error = createToolResultStream({requestId: "r1", turnId: "t1", toolCallId: "call2", toolName: "lookup", schemaId: "lookup.v1"});
+  assert.equal(error.push({requestId: "r1", turnId: "t1", toolCallId: "call2", sequence: 1, type: "error", resultId: "res3", toolName: "lookup", schemaId: "lookup.v1", error: {code: "TOOL_FAILED", message: "upstream"}}).ok, true);
+  assert.equal(error.push({requestId: "r1", turnId: "t1", toolCallId: "call2", sequence: 2, type: "result", resultId: "res4", toolName: "lookup", schemaId: "lookup.v1", result: {}}).error.code, "TOOL_RESULT_AFTER_TERMINAL");
+});
+
+test("tool result capability stays unsupported and never executes a host command", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bridge-runtime-tool-"));
+  const fake = path.join(dir, "bridge");
+  const marker = path.join(dir, "invoked");
+  await writeFile(fake, `#!/bin/sh\ntouch "${marker}"\nexit 0\n`, {mode: 0o755});
+  try {
+    const bridge = createRuntime({bin: fake});
+    assert.deepEqual(await bridge.probe({capability: "toolResults"}), {
+      ok: true, capability: "toolResults", supported: false,
+      transport: "cli-subprocess", reason: "NO_NATIVE_TOOL_EVENT_TRANSPORT"
+    });
+    const result = await bridge.submitToolResult({requestId: "r1", turnId: "t1", toolCallId: "call1", resultId: "res1"});
+    assert.equal(result.error.code, "UNSUPPORTED");
+    assert.equal(result.error.capability, "toolResults");
+    await assert.rejects(import("node:fs/promises").then(({access}) => access(marker)), {code: "ENOENT"});
+  } finally { await rm(dir, {recursive: true, force: true}); }
 });
 
 test("timeout and stop receipts distinguish local process from remote generation", async () => {

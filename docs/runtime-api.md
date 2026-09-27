@@ -29,6 +29,10 @@ await bridge.attach({project: "Project", target: "worker"});
 
 `probe({capability:"imageParts"})` returns `NO_SAFE_LOCAL_IMAGE_UPLOAD`. `sendParts` is a boundary only: it rejects remote URLs with `IMAGE_REMOTE_URL_FORBIDDEN`, rejects base64/data fields with `IMAGE_DATA_FORBIDDEN`, and returns typed `UNSUPPORTED` for local image paths without invoking the CLI. The current Ego Browser surface used by ChatBridge exposes no verified file chooser or `setInputFiles` path, so no image is fetched or inserted into a text prompt. A future implementation must remain limited to one bounded local image plus text and require a dedicated canary before enabling the capability.
 
+## External tool result boundary
+
+`probe({capability:"toolResults"})` returns `NO_NATIVE_TOOL_EVENT_TRANSPORT`. `createToolResultStream({requestId, turnId, toolCallId, toolName, schemaId})` validates caller-produced `progress`, `result`, and `error` receipts. Result/error events must include matching request, turn, tool-call, result, tool name, and schema IDs with contiguous sequence numbers. Duplicate result IDs return `DUPLICATE_TOOL_RESULT`; stale or skipped sequences return `STALE_TOOL_RESULT` or `TOOL_SEQUENCE_GAP`; binding mismatches return `TOOL_BINDING_MISMATCH`; malformed failures return typed `INVALID_TOOL_*` errors. `submitToolResult` remains `UNSUPPORTED`. The caller executes the tool; ChatBridge never runs a host command and never prompt-emulates a tool success.
+
 ## Turn event boundary
 
 `createTurnEventStream({requestId, turnId, assistantMessageId})` validates events for a future incremental transport. Each event must carry the same `requestId`, `turnId`, and a contiguous positive `sequence`, with `type` equal to `delta`, `progress`, or `terminal`. A configured assistant baseline is required for delta freshness; a different assistant message returns `STALE_ASSISTANT_CONTENT`. Duplicate, skipped, mismatched, or post-terminal events return typed errors. This validator does not create events from polling and does not claim that the current CLI can stream.

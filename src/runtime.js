@@ -65,6 +65,41 @@ function createTurnEventStream({requestId, turnId, assistantMessageId = null} = 
   });
 }
 
+function createToolResultStream({requestId, turnId, toolCallId, toolName, schemaId} = {}) {
+  for (const [name, value] of Object.entries({requestId, turnId, toolCallId, toolName, schemaId})) {
+    if (typeof value !== "string" || !value) throw new TypeError(`${name} is required`);
+  }
+  let lastSequence = 0;
+  let terminal = false;
+  const seenResultIds = new Set();
+  return Object.freeze({
+    push(event = {}) {
+      if (event.requestId !== requestId || event.turnId !== turnId || event.toolCallId !== toolCallId) return errorResponse("TOOL_RESULT_CORRELATION_MISMATCH", "tool result does not match request, turn, or tool call", {requestId, turnId, toolCallId});
+      if (event.resultId && seenResultIds.has(event.resultId)) return errorResponse("DUPLICATE_TOOL_RESULT", "tool result ID was already accepted", {requestId, turnId, toolCallId, resultId: event.resultId});
+      if (terminal) return errorResponse("TOOL_RESULT_AFTER_TERMINAL", "tool result arrived after terminal result", {requestId, turnId, toolCallId, sequence: event.sequence ?? null});
+      if (!Number.isInteger(event.sequence) || event.sequence < 1) return errorResponse("INVALID_TOOL_SEQUENCE", "sequence must be a positive integer", {requestId, turnId, toolCallId});
+      if (event.sequence <= lastSequence) return errorResponse("STALE_TOOL_RESULT", "tool result sequence is stale", {requestId, turnId, toolCallId, sequence: event.sequence, lastSequence});
+      if (event.sequence !== lastSequence + 1) return errorResponse("TOOL_SEQUENCE_GAP", "tool result sequence has a gap", {requestId, turnId, toolCallId, sequence: event.sequence, expected: lastSequence + 1});
+      if (!["progress", "result", "error"].includes(event.type)) return errorResponse("INVALID_TOOL_RESULT_TYPE", "type must be progress, result, or error", {requestId, turnId, toolCallId, sequence: event.sequence});
+      if (event.type === "progress") {
+        if (!event.progress || typeof event.progress !== "object") return errorResponse("INVALID_TOOL_PROGRESS", "progress events require an object", {requestId, turnId, toolCallId, sequence: event.sequence});
+      } else {
+        if (event.toolName !== toolName || event.schemaId !== schemaId) return errorResponse("TOOL_BINDING_MISMATCH", "tool result name or schema does not match the tool call", {requestId, turnId, toolCallId, expectedToolName: toolName, expectedSchemaId: schemaId});
+        if (typeof event.resultId !== "string" || !event.resultId) return errorResponse("INVALID_TOOL_RESULT_ID", "result and error events require resultId", {requestId, turnId, toolCallId, sequence: event.sequence});
+        if (event.type === "result" && !Object.hasOwn(event, "result")) return errorResponse("INVALID_TOOL_RESULT", "result events require result", {requestId, turnId, toolCallId, sequence: event.sequence});
+        if (event.type === "error" && (!event.error || typeof event.error !== "object" || typeof event.error.code !== "string" || typeof event.error.message !== "string")) return errorResponse("INVALID_TOOL_ERROR", "error events require error.code and error.message", {requestId, turnId, toolCallId, sequence: event.sequence});
+      }
+      lastSequence = event.sequence;
+      if (event.type !== "progress") {
+        terminal = true;
+        seenResultIds.add(event.resultId);
+      }
+      return {ok: true, event: {...event}};
+    },
+    state() { return {requestId, turnId, toolCallId, toolName, schemaId, lastSequence, terminal, resultIds: [...seenResultIds]}; },
+  });
+}
+
 function run(binary, args, {env, timeoutMs = DEFAULT_TIMEOUT_MS} = {}) {
   return new Promise((resolve) => {
     const child = spawn(binary, args, {env, stdio: ["ignore", "pipe", "pipe"]});
@@ -177,11 +212,12 @@ export function createRuntime({bin = new URL("../bin/chat-bridge", import.meta.u
     ask: (input) => session("ask", input),
     attach: (input) => session("status", {...input, background: true}),
     sendParts,
+    submitToolResult: async () => unsupported("toolResults"),
     stream: async () => unsupported("stream"),
     toolResults: async () => unsupported("toolResults"),
     multimodal: async () => unsupported("multimodal"),
   });
 }
 
-export {createTurnEventStream};
+export {createTurnEventStream, createToolResultStream};
 export const runtime = createRuntime();
