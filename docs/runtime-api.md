@@ -14,6 +14,11 @@ await bridge.read({project: "Project", target: "worker"});
 await bridge.status({project: "Project", target: "worker", task: "T-1"});
 await bridge.stop({project: "Project", target: "worker"});
 await bridge.ask({project: "Project", target: "worker", message: "final answer", timeout: 180000});
+await bridge.stream({project: "Project", target: "worker", message: "incremental answer", requestId: "req-1", turnId: "turn-1"});
+await bridge.askParts({project: "Project", target: "worker", parts: [
+  {type: "text", text: "describe this image"},
+  {type: "image", path: "/absolute/path/photo.png", mimeType: "image/png"},
+]});
 await bridge.attach({project: "Project", target: "worker"});
 ```
 
@@ -27,15 +32,15 @@ Each facade call owns one bounded CLI child. The facade does not create a second
 
 ## Capabilities and limits
 
-`capabilities` reports `resolveRoute`, `send`, `read`, `status`, `stop`, `ask`, and `attach` as supported. `stream`, `imageParts`, `toolResults`, and `multimodal` are false. `probe({capability:"stream"})` returns `{supported:false, transport:"cli-subprocess", reason:"NO_INCREMENTAL_TRANSPORT"}`. The CLI's status polling is never emitted as SSE.
+`capabilities` reports `resolveRoute`, `send`, `read`, `status`, `stop`, `ask`, `attach`, `stream`, `imageParts`, and image-text `multimodal` as supported. `toolResults` remains false because ChatGPT Web has not exposed a native external-tool event transport. `stream` is observed-incremental: deltas are sampled from the current assistant DOM while generation is active, carry request/turn/sequence IDs, and end with a terminal event; the facade never splits a completed final response into fake chunks.
 
 ## Image parts
 
-`probe({capability:"imageParts"})` returns `NO_SAFE_LOCAL_IMAGE_UPLOAD`. `sendParts` is a boundary only: it rejects remote URLs with `IMAGE_REMOTE_URL_FORBIDDEN`, rejects base64/data fields with `IMAGE_DATA_FORBIDDEN`, and returns typed `UNSUPPORTED` for local image paths without invoking the CLI. The current Ego Browser surface used by ChatBridge exposes no verified file chooser or `setInputFiles` path, so no image is fetched or inserted into a text prompt. A future implementation must remain limited to one bounded local image plus text and require a dedicated canary before enabling the capability.
+`probe({capability:"imageParts"})` reports `mode:"local-file-upload"`. `sendParts` and `askParts` accept one absolute local PNG, JPEG, or WebP plus text, enforce a 10 MiB limit and file-byte MIME validation, reject remote URLs/base64, upload through Ego Browser's native `setInputFiles` path, and return the normal delivery/final-response receipt. The verified internal canary used the existing hzcodex ChatGPT Web Gateway session and returned `IMAGE_UPLOAD_OK` and `IMAGE_ASK_OK`.
 
 ## External tool result boundary
 
-`probe({capability:"toolResults"})` returns `NO_NATIVE_TOOL_EVENT_TRANSPORT`. `createToolResultStream({requestId, turnId, toolCallId, toolName, schemaId})` validates caller-produced `progress`, `result`, and `error` receipts. Result/error events must include matching request, turn, tool-call, result, tool name, and schema IDs with contiguous sequence numbers. Duplicate result IDs return `DUPLICATE_TOOL_RESULT`; stale or skipped sequences return `STALE_TOOL_RESULT` or `TOOL_SEQUENCE_GAP`; binding mismatches return `TOOL_BINDING_MISMATCH`; malformed failures return typed `INVALID_TOOL_*` errors. `submitToolResult` remains `UNSUPPORTED`. The caller executes the tool; ChatBridge never runs a host command and never prompt-emulates a tool success.
+`probe({capability:"toolResults"})` still returns `NO_NATIVE_TOOL_EVENT_TRANSPORT`. `createToolResultStream({requestId, turnId, toolCallId, toolName, schemaId})` validates caller-produced `progress`, `result`, and `error` receipts. Result/error events must include matching request, turn, tool-call, result, tool name, and schema IDs with contiguous sequence numbers. Duplicate result IDs return `DUPLICATE_TOOL_RESULT`; stale or skipped sequences return `STALE_TOOL_RESULT` or `TOOL_SEQUENCE_GAP`; binding mismatches return `TOOL_BINDING_MISMATCH`; malformed failures return typed `INVALID_TOOL_*` errors. `submitToolResult` remains `UNSUPPORTED` until the browser exposes a real native tool-call event to bind against. The caller executes the tool; ChatBridge never runs a host command and never prompt-emulates a tool success.
 
 ## Turn event boundary
 

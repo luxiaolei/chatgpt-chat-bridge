@@ -5,39 +5,57 @@ import {tmpdir} from "node:os";
 import path from "node:path";
 import {createRuntime, createTurnEventStream, createToolResultStream} from "../src/runtime.js";
 
-test("runtime exposes a typed stream probe without pretending CLI polling is streaming", async () => {
-  const bridge = createRuntime({bin: process.execPath});
-  const probe = await bridge.probe({capability: "stream"});
-  assert.deepEqual(probe, {ok: true, capability: "stream", supported: false, transport: "cli-subprocess", reason: "NO_INCREMENTAL_TRANSPORT"});
-  const unsupported = await bridge.stream({requestId: "r1", turnId: "t1"});
-  assert.equal(unsupported.ok, false);
-  assert.equal(unsupported.error.code, "UNSUPPORTED");
-  assert.equal(unsupported.error.transport, "cli-subprocess");
+test("runtime exposes observed incremental turn events with correlation validation", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bridge-runtime-stream-"));
+  const fake = path.join(dir, "bridge");
+  await writeFile(fake, `#!/bin/sh
+if [ "$1" = "stream" ]; then
+  printf '%s\n' '{"requestId":"r1","turnId":"t1","sequence":1,"type":"progress","progress":{"state":"started"}}'
+  printf '%s\n' '{"requestId":"r1","turnId":"t1","sequence":2,"type":"delta","assistantMessageId":"a1","delta":"hi"}'
+  printf '%s\n' '{"requestId":"r1","turnId":"t1","sequence":3,"type":"terminal","terminal":{"status":"completed","text":"hi"}}'
+  exit 0
+fi
+exit 2
+`, {mode: 0o755});
+  try {
+    const bridge = createRuntime({bin: fake});
+    assert.deepEqual(await bridge.probe({capability: "stream"}), {ok: true, capability: "stream", supported: true, transport: "cli-subprocess", mode: "observed-incremental"});
+    const result = await bridge.stream({target: "worker", message: "hello", requestId: "r1", turnId: "t1"});
+    assert.equal(result.ok, true);
+    assert.equal(result.data.at(-1).type, "terminal");
+    const mismatch = await bridge.stream({target: "worker", message: "hello", requestId: "r1", turnId: "t2"});
+    assert.equal(mismatch.error.code, "TURN_CORRELATION_MISMATCH");
+  } finally { await rm(dir, {recursive: true, force: true}); }
 });
 
-test("image parts stay behind a typed unsupported boundary without invoking the CLI", async () => {
+test("image parts validate local files and invoke the image send path", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "bridge-runtime-image-"));
   const fake = path.join(dir, "bridge");
   const marker = path.join(dir, "invoked");
+  const image = path.join(dir, "photo.png");
+  await writeFile(image, Buffer.from([137,80,78,71,13,10,26,10,0,0,0,0]));
   await writeFile(fake, `#!/bin/sh
-touch "${marker}"
+printf '%s\n' "$*" > "${marker}"
+printf '%s\n' '{"ok":true,"delivered":true}'
 exit 0
 `, {mode: 0o755});
   try {
     const bridge = createRuntime({bin: fake});
     assert.deepEqual(await bridge.probe({capability: "imageParts"}), {
-      ok: true, capability: "imageParts", supported: false,
-      transport: "cli-subprocess", reason: "NO_SAFE_LOCAL_IMAGE_UPLOAD"
+      ok: true, capability: "imageParts", supported: true,
+      transport: "cli-subprocess", mode: "local-file-upload"
     });
     const result = await bridge.sendParts({target: "worker", parts: [
       {type: "text", text: "inspect this"},
-      {type: "image", path: "/tmp/photo.png", mimeType: "image/png"}
+      {type: "image", path: image, mimeType: "image/png"}
     ]});
-    assert.equal(result.error.code, "UNSUPPORTED");
-    assert.equal(result.error.capability, "imageParts");
-    await assert.rejects(import("node:fs/promises").then(({access}) => access(marker)), {code: "ENOENT"});
+    assert.equal(result.ok, true);
+    assert.match(await import("node:fs/promises").then(({readFile}) => readFile(marker, "utf8")), /send worker inspect this --image-path/);
+    const asked = await bridge.askParts({target: "worker", parts: [{type: "text", text: "describe"}, {type: "image", path: image, mimeType: "image/png"}]});
+    assert.equal(asked.ok, true);
     assert.equal((await bridge.sendParts({target: "worker", parts: [{type: "image", url: "https://example.invalid/a.png"}]})).error.code, "IMAGE_REMOTE_URL_FORBIDDEN");
     assert.equal((await bridge.sendParts({target: "worker", parts: [{type: "image", data: "AAAA"}]})).error.code, "IMAGE_DATA_FORBIDDEN");
+    assert.equal((await bridge.sendParts({target: "worker", parts: [{type: "text", text: "inspect"}, {type: "image", path: "/tmp/missing.png"}]})).error.code, "IMAGE_FILE_NOT_FOUND");
   } finally { await rm(dir, {recursive: true, force: true}); }
 });
 
@@ -133,7 +151,7 @@ printf '%s\\n' '{"ok":true,"sessionState":"IDLE_COMPLETE"}'; exit 0
     assert.equal(bridge.capabilities.stream, false);
     assert.deepEqual(await bridge.resolveRoute({project: "P", target: "worker"}), {ok: true, route: {project: "P", account: "a", sessionRef: "c1", role: "worker", name: "worker"}});
     assert.deepEqual((await bridge.send({project: "P", target: "worker", message: "hello"})).data.delivered, true);
-    assert.equal((await bridge.stream()).error.code, "UNSUPPORTED");
+    assert.equal((await bridge.stream()).error.code, "INVALID_INPUT");
   } finally { await rm(dir, {recursive: true, force: true}); }
 });
 

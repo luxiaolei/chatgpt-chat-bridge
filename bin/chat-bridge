@@ -104,7 +104,7 @@ fi
 
 ORIGIN_ROUTED=0
 case "$CMD" in
-  send|ask|new|read|evidence|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete|projects|discover|list|event|task|project)
+  send|ask|stream|new|read|evidence|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete|projects|discover|list|event|task|project)
     ORIGIN_ROUTED=1 ;;
   space)
     [[ "$SUB" == "show" || "$SUB" == "prune" || "$SUB" == "consolidate" ]] && ORIGIN_ROUTED=1 ;;
@@ -120,7 +120,7 @@ elif (( ORIGIN_ROUTED )) && [[ -n "${CHAT_BRIDGE_FROM_SPACE:-}" && " ${*} " != *
 fi
 if [[ -z "${CHAT_BRIDGE_FROM_SPACE:-}" && -z "${CHAT_BRIDGE_FROM_ACCOUNT_ID:-}" && " ${*} " != *" --account "* ]]; then
   case "$CMD" in
-    send|ask|new|read|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete)
+    send|ask|stream|new|read|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete)
       python3 "$PREFLIGHT" unambiguous "$CONFIG_DIR" "$STATE_DIR" "$@"
       ;;
   esac
@@ -150,7 +150,7 @@ fi
 TOUCH_UI=0
 HEAVY_UI=0
 case "$CMD" in
-  projects|sync|discover|read|evidence|status|send|ask|model|effort|stop|retry|recover|resend|new|archive|retire|delete|watch)
+  projects|sync|discover|read|evidence|status|send|ask|stream|model|effort|stop|retry|recover|resend|new|archive|retire|delete|watch)
     TOUCH_UI=1
     ;;
   space)
@@ -189,7 +189,7 @@ if [[ "$CMD" == "watch" ]]; then
   fi
 fi
 
-if [[ "$CMD" == "send" || "$CMD" == "new" ]] && [[ " ${*} " != *" --background "* ]]; then
+if [[ "$CMD" == "send" || "$CMD" == "stream" || "$CMD" == "new" ]] && [[ " ${*} " != *" --background "* ]]; then
   COORDINATOR="${MAIN:h}/coordinator.py"
   PROJECT_ARG="$(python3 -c 'import sys; a=sys.argv[1:]; print(a[a.index("--project")+1] if "--project" in a and a.index("--project")+1<len(a) else "")' "$@")"
   python3 "$COORDINATOR" admission-check "$CONFIG_DIR" "$STATE_DIR" "$PROJECT_ARG" >/dev/null
