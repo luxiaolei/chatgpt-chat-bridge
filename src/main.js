@@ -499,8 +499,43 @@ async function accountPage(reg, account, project=null) {
   }
   throw new Error("Open a managed ChatGPT page in the bound Space first");
 }
+async function recoverConversationLoadError(page) {
+  const marked=await page.evaluate(() => {
+    const visible=node=>{
+      if(!node) return false;
+      const style=getComputedStyle(node);
+      return node.getClientRects().length>0 && style.visibility!=="hidden" &&
+        style.display!=="none" && style.opacity!=="0" && !node.closest("[inert]");
+    };
+    const body=String(document.body?.innerText||"");
+    const loadError=/(?:Could not load this ChatGPT conversation|Unable to load (?:this )?conversation)/i.test(body);
+    document.querySelectorAll("[data-chat-bridge-conversation-retry]").forEach(
+      node=>node.removeAttribute("data-chat-bridge-conversation-retry")
+    );
+    if(!loadError) return {loadError:false,count:0};
+    const buttons=[...document.querySelectorAll("button")].filter(button=>{
+      if(!visible(button)) return false;
+      const label=((button.innerText||"")+" "+(button.getAttribute("aria-label")||"")).trim().replace(/\s+/g," ");
+      return /^(?:Retry|Try again)(?:\s+(?:Retry|Try again))?$/i.test(label);
+    });
+    if(buttons.length===1) buttons[0].setAttribute("data-chat-bridge-conversation-retry","1");
+    return {loadError:true,count:buttons.length};
+  }).catch(()=>({loadError:false,count:0}));
+  if(!marked.loadError || marked.count!==1) return false;
+  try {
+    await page.focus('[data-chat-bridge-conversation-retry="1"]');
+    await page.keyboard.press("Enter");
+  } catch {
+    try { await page.click('[data-chat-bridge-conversation-retry="1"]'); }
+    catch { return false; }
+  }
+  await page.waitForTimeout(500);
+  return true;
+}
+
 async function waitForConversationReady(page, timeout=15000) {
   const deadline=Date.now()+timeout;
+  let loadRetries=0;
   while(Date.now()<deadline) {
     await detectWebRateLimit(page,"conversation-ready");
     const ok=await page.waitForSelector(COMPOSER_SELECTOR,{state:"visible",timeout:1000})
@@ -508,6 +543,10 @@ async function waitForConversationReady(page, timeout=15000) {
     if(ok && await page.evaluate(()=>[...document.querySelectorAll(
       '[data-message-author-role], [data-content-search-unit-key$=":user"], [data-content-search-unit-key$=":assistant"], [data-chatgpt-search-unit-key$=":user"], [data-chatgpt-search-unit-key$=":assistant"]'
     )].some(e=>(e.innerText||e.textContent||"").trim())).catch(()=>false)) return true;
+    if(!ok && loadRetries<2 && await recoverConversationLoadError(page)) {
+      loadRetries++;
+      continue;
+    }
     await page.waitForTimeout(250);
   }
   await detectWebRateLimit(page,"conversation-ready-timeout");
