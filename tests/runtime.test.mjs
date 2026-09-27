@@ -194,3 +194,27 @@ exit 1
     assert.equal(send.error.sendAttempted, true);
   } finally { await rm(dir, {recursive: true, force: true}); }
 });
+
+test("runtime preserves nested structured error receipts from gateway-facing commands", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bridge-runtime-error-contract-"));
+  const fake = path.join(dir, "bridge");
+  await writeFile(fake, `#!/bin/sh
+cat >&2 <<'JSON'
+{
+  "ok": false,
+  "error": {
+    "code": "ASK_FAILED",
+    "message": "final response unavailable",
+    "deliveryStage": "PRE_SEND"
+  }
+}
+JSON
+exit 1
+`, {mode: 0o755});
+  try {
+    const result = await createRuntime({bin: fake}).ask({target: "worker", message: "hello"});
+    assert.equal(result.error.code, "ASK_FAILED");
+    assert.equal(result.error.message, "final response unavailable");
+    assert.equal(result.error.deliveryStage, "PRE_SEND");
+  } finally { await rm(dir, {recursive: true, force: true}); }
+});

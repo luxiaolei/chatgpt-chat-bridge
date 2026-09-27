@@ -115,16 +115,20 @@ function run(binary, args, {env, timeoutMs = DEFAULT_TIMEOUT_MS} = {}) {
       const data = parseJsonLine(stdout);
       if (status === 0) return finish({ok: true, data: data ?? stdout.trim()});
       const detail = parseJsonLine(stderr) || parseJsonLine(stdout) || {};
-      const attempted = detail.deliveryStage === "SEND_ATTEMPTED" || detail.code === "DELIVERY_UNCONFIRMED";
-        finish(errorResponse(detail.code || (signal ? "RUNTIME_TERMINATED" : "BRIDGE_COMMAND_FAILED"),
-        detail.reason || detail.message || stderr.trim() || `bridge exited with status ${status}`, {
-          deliveryStage: detail.deliveryStage || (attempted ? "SEND_ATTEMPTED" : "PRE_SEND"),
+      const nested = detail.error && typeof detail.error === "object" ? detail.error : {};
+      const deliveryStage = detail.deliveryStage || nested.deliveryStage || (detail.code === "DELIVERY_UNCONFIRMED" ? "SEND_ATTEMPTED" : "PRE_SEND");
+      const attempted = deliveryStage === "SEND_ATTEMPTED" || detail.code === "DELIVERY_UNCONFIRMED" || nested.code === "DELIVERY_UNCONFIRMED";
+      const cause = detail.error ?? null;
+      finish(errorResponse(detail.code || nested.code || (signal ? "RUNTIME_TERMINATED" : "BRIDGE_COMMAND_FAILED"),
+        detail.reason || detail.message || nested.message || (typeof detail.error === "string" ? detail.error : null) || stderr.trim() || `bridge exited with status ${status}`, {
+          deliveryStage,
           sendAttempted: attempted,
           localProcess: signal ? "terminated" : "exited",
           remoteGeneration: "unknown",
           status,
           signal,
           retryAfterSec: detail.retryAfterSec,
+          ...(cause == null ? {} : {cause}),
         }));
     });
     const timer = setTimeout(() => {

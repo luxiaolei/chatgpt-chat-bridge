@@ -4,7 +4,7 @@
 
 ## Requests and responses
 
-All methods return a Promise of a JSON-safe object. Success is `{ok:true,data}` for CLI-backed operations, or `{ok:true,route}` for `resolveRoute`. Failure is `{ok:false,error:{code,message,...}}`; callers should branch on `ok` and must not retry a send after `sendAttempted:true` or `deliveryStage:"SEND_ATTEMPTED"`.
+All methods return a Promise of a JSON-safe object. Success is `{ok:true,data}` for CLI-backed operations, or `{ok:true,route}` for `resolveRoute`. Failure is `{ok:false,error:{code,message,...}}`; nested CLI receipts are normalized into the same `code`, `message`, and `deliveryStage` fields and retained as `cause`. Callers should branch on `ok` and must not retry a send after `sendAttempted:true` or `deliveryStage:"SEND_ATTEMPTED"`.
 
 ```js
 const bridge = createRuntime();
@@ -18,6 +18,10 @@ await bridge.attach({project: "Project", target: "worker"});
 ```
 
 `resolveRoute` is local-only and reads the existing session registry through `list`; it does not wake Ego. `attach` uses the existing status/ensure-page path and therefore may contact Ego. Destructive deletion is intentionally absent.
+
+## Concurrency boundary
+
+Each facade call owns one bounded CLI child. The facade does not create a second lock or bypass admission: the existing CLI remains the shared authority for per-account UI pacing, cooldown, user-control pauses, and page protection. Concurrent UI calls for the same account may return `PACING_DEFERRED`, `WEB_COOLDOWN_ACTIVE`, or another typed admission error; callers must preserve request/turn correlation and must not treat a child exit as proof that a remote generation stopped. Local `resolveRoute`/registry reads remain safe to run without waking Ego.
 
 `ask` is the existing bounded synchronous `status → send → status` path and returns one final response (`mode:"final-only"`). It is a safe transition for callers that need a response but must not be interpreted as a stream. `timeout` is in milliseconds and must be between 1 and 600000.
 
