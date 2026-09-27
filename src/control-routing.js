@@ -48,10 +48,11 @@
   }
   function resolveControllerTarget(chats, target, project, account = null) {
     const key = clean(target);
+    const allowedAccounts = account == null ? null : new Set(Array.isArray(account) ? account : [account]);
     const active = (chat) => chat && chat.status !== "deleted" && chat.status !== "retired" && chat.project === project;
     const direct = chats[key];
     if (direct && direct.status !== "deleted" && direct.status !== "retired") return direct;
-    const matches = Object.values(chats).filter(chat => active(chat) && (!account || chat.account === account) &&
+    const matches = Object.values(chats).filter(chat => active(chat) && (!allowedAccounts || allowedAccounts.has(chat.account)) &&
       [chat.role, chat.name, chat.alias, chat.title].includes(key));
     if (matches.length === 1) return matches[0];
     throw new Error(`${matches.length ? "AMBIGUOUS_CONTROLLER" : "UNKNOWN_CONTROLLER"}: ${key}`);

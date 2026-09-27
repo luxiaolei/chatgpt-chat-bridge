@@ -58,6 +58,9 @@ test('exact controller session wins across accounts and duplicate roles fail clo
   assert.equal(resolveControllerTarget(chats, 'a', 'P').id, 'a');
   assert.equal(resolveControllerTarget(chats, 'a', 'another-project').id, 'a');
   assert.equal(resolveControllerTarget(chats, 'conductor', 'P', 'beta').id, 'b');
+  assert.equal(resolveControllerTarget({
+    a: { id: 'a', project: 'P', account: 'alias', role: 'conductor', status: 'active' },
+  }, 'conductor', 'P', ['primary', 'alias']).id, 'a');
   assert.throws(() => resolveControllerTarget(chats, 'conductor', 'P'), /AMBIGUOUS_CONTROLLER/);
   assert.throws(() => resolveControllerTarget(chats, 'unknown', 'P'), /UNKNOWN_CONTROLLER/);
 });

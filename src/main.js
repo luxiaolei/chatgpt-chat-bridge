@@ -1495,10 +1495,14 @@ async function waitForGenerationStop(page, timeout=7000) {
 async function notifyController(reg, task, message) {
   const rootController=reg.projects?.[task.project]?.rootController || "conductor";
   const targets=notificationTargets(task,rootController);
+  const identity=reg.accounts?.[task.account]?.identity;
+  const accountScope=identity
+    ? Object.entries(reg.accounts||{}).filter(([,value])=>value?.identity===identity).map(([alias])=>alias)
+    : task.account||null;
   const failures=[];
   for(const target of targets) {
     try {
-      const controller=resolveControllerTarget(reg.chats,target,task.project,(task.replyToSessionRef||task.controllerSessionRef)?null:(task.account||null));
+      const controller=resolveControllerTarget(reg.chats,target,task.project,(task.replyToSessionRef||task.controllerSessionRef)?null:accountScope);
       if(controller.id===task.sessionId) {
         failures.push({target,reason:"target is task session"});
         continue;
