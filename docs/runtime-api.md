@@ -24,6 +24,47 @@ await bridge.attach({project: "Project", target: "worker"});
 
 `resolveRoute` is local-only and reads the existing session registry through `list`; it does not wake Ego. `attach` uses the existing status/ensure-page path and therefore may contact Ego. Destructive deletion is intentionally absent.
 
+## Gateway consumer boundary
+
+The Rust Gateway is a protocol adapter, not a second ChatBridge registry. It
+must use the Bridge route contract and must not resolve Space IDs, Page labels,
+account aliases, or browser ownership itself.
+
+The minimum call sequence is:
+
+```js
+const route = await bridge.resolveRoute({
+  project: "Project",
+  target: "worker",
+  // account is optional when the call has a verified account-bound origin
+});
+
+await bridge.ask({
+  project: "Project",
+  target: route.route.sessionRef,
+  account: route.route.account,
+  message: "...",
+});
+```
+
+`target` is the logical role/session selector. `project` alone is not an
+unambiguous route when a Project contains more than one registered session.
+The current API therefore requires `target` and returns `AMBIGUOUS_ROUTE` when
+the selector is not unique. A future project-only convenience operation must
+fail closed on ambiguity; it must not guess an account or session.
+
+The Bridge owns the selected account, Project binding, Space/Page attachment,
+pacing, cooldown, user-control pause, recovery, and delivery-stage receipt.
+The Gateway should preserve the resolved `project`, `account`, and
+`sessionRef` in its request evidence, while treating them as an observed route
+receipt rather than recreating the selection policy.
+
+An account may be omitted only when the caller is running in a verified
+account-bound origin. An unbound local invocation must provide the account when
+the Bridge cannot safely infer it. Desktop/MCP connectivity is an origin or
+control context; it is not a replacement for this route receipt or a native
+model-inference transport.
+
 ## Concurrency boundary
 
 Each facade call owns one bounded CLI child. The facade does not create a second lock or bypass admission: the existing CLI remains the shared authority for per-account UI pacing, cooldown, user-control pauses, and page protection. Concurrent UI calls for the same account may return `PACING_DEFERRED`, `WEB_COOLDOWN_ACTIVE`, or another typed admission error; callers must preserve request/turn correlation and must not treat a child exit as proof that a remote generation stopped. Local `resolveRoute`/registry reads remain safe to run without waking Ego.
