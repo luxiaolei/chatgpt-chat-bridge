@@ -24,7 +24,10 @@ function baseArgs(input = {}) {
 }
 
 function parseJsonLine(value) {
-  const lines = String(value || "").trim().split("\n").reverse();
+  const trimmed = String(value || "").trim();
+  if (!trimmed) return null;
+  try { return JSON.parse(trimmed); } catch {}
+  const lines = trimmed.split("\n").reverse();
   for (const line of lines) {
     try { return JSON.parse(line); } catch {}
   }

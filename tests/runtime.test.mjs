@@ -93,3 +93,46 @@ exit 1
     assert.equal(result.error.sendAttempted, true);
   } finally { await rm(dir, {recursive: true, force: true}); }
 });
+
+test("runtime preserves pretty-printed stdout and stderr JSON receipts", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bridge-runtime-pretty-"));
+  const fake = path.join(dir, "bridge");
+  await writeFile(fake, `#!/bin/sh
+if [ "$1" = "ask" ]; then
+  cat <<'JSON'
+{
+  "chat": "worker",
+  "response": "pretty done"
+}
+JSON
+  exit 0
+fi
+if [ "$1" = "status" ]; then
+  cat <<'JSON'
+{
+  "sessionState": "IDLE_COMPLETE",
+  "lastAssistantId": "a2"
+}
+JSON
+  exit 0
+fi
+cat >&2 <<'JSON'
+{
+  "ok": false,
+  "code": "DELIVERY_UNCONFIRMED",
+  "deliveryStage": "SEND_ATTEMPTED"
+}
+JSON
+exit 1
+`, {mode: 0o755});
+  try {
+    const bridge = createRuntime({bin: fake});
+    const ask = await bridge.ask({target: "worker", message: "hello"});
+    assert.equal(ask.data.response, "pretty done");
+    const status = await bridge.status({target: "worker"});
+    assert.equal(status.data.sessionState, "IDLE_COMPLETE");
+    const send = await bridge.send({target: "worker", message: "hello"});
+    assert.equal(send.error.code, "DELIVERY_UNCONFIRMED");
+    assert.equal(send.error.sendAttempted, true);
+  } finally { await rm(dir, {recursive: true, force: true}); }
+});
