@@ -44,6 +44,16 @@ test("duplicate aliases do not create fake capacity",async()=>{
  const sel=run("select",f); assert.equal(sel.selectedAccount,"b");
 });
 
+test("same Space label across distinct identities stays independent",async()=>{
+ const f=await fixture(); const fs=await import("node:fs/promises");
+ const file=path.join(f.config,"registry.json"); const reg=JSON.parse(await fs.readFile(file,"utf8"));
+ reg.projects.P.bindings.b.spaceName="sa";
+ await fs.writeFile(file,JSON.stringify(reg));
+ const cap=run("capacity",f);
+ assert.equal(cap.accounts.find(x=>x.account==="a").eligible,true);
+ assert.equal(cap.accounts.find(x=>x.account==="b").eligible,true);
+});
+
 test('new placement counts one login across all business projects',async()=>{
  const f=await fixture(); const fs=await import('node:fs/promises');
  const reg=JSON.parse(await fs.readFile(path.join(f.config,'registry.json'),'utf8'));
