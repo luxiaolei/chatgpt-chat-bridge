@@ -120,6 +120,22 @@ test("timeout and stop receipts distinguish local process from remote generation
   } finally { await rm(dir, {recursive: true, force: true}); }
 });
 
+test("stream timeout is an attempted delivery and never claims remote cancellation", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bridge-runtime-stream-timeout-"));
+  const fake = path.join(dir, "bridge");
+  await writeFile(fake, "#!/bin/sh\nsleep 2\n", {mode: 0o755});
+  try {
+    const result = await createRuntime({bin: fake, timeoutMs: 20}).stream({
+      target: "worker", message: "hello", requestId: "r-timeout", turnId: "t-timeout",
+    });
+    assert.equal(result.error.code, "RUNTIME_TIMEOUT");
+    assert.equal(result.error.sendAttempted, true);
+    assert.equal(result.error.deliveryStage, "SEND_ATTEMPTED");
+    assert.equal(result.error.localProcess, "terminated");
+    assert.equal(result.error.remoteGeneration, "unknown");
+  } finally { await rm(dir, {recursive: true, force: true}); }
+});
+
 test("ask exposes the final-only synchronous path and validates its envelope", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "bridge-runtime-ask-"));
   const fake = path.join(dir, "bridge");
