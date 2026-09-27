@@ -1001,8 +1001,10 @@ def control_status(db, project=None):
         }
         mgmt = db.execute("""SELECT
               sum(CASE WHEN d.status='ACKNOWLEDGED' THEN 1 ELSE 0 END) AS acknowledged,
-              sum(CASE WHEN d.status NOT IN ('ACKNOWLEDGED') THEN 1 ELSE 0 END) AS pending
+              sum(CASE WHEN d.status IN ('QUEUED','DISPATCHING','SENT')
+                         AND o.status IN ('QUEUED','DISPATCHING','SENT') THEN 1 ELSE 0 END) AS pending
             FROM management_deliveries d JOIN management_events e ON e.id=d.event_id
+            LEFT JOIN operations o ON o.id=d.operation_id
             WHERE e.scope IN ('global',?)""", ("project:"+name,)).fetchone()
         pending_business_ops = sum(n for (kind,status),n in operation_counts.items()
                                    if kind in {"dispatch","rotation","stop"} and status in {"QUEUED","DISPATCHING"})
@@ -1832,7 +1834,14 @@ def main():
             db.commit()
             value = response(db.execute("SELECT * FROM operations WHERE id=?", (args[1],)).fetchone())
         elif command == "cancel":
-            db.execute("UPDATE operations SET status='CANCELLED',updated_at=? WHERE id=? AND status='QUEUED'", (stamp(), args[0]))
+            now = stamp()
+            row = db.execute("SELECT kind,event_id FROM operations WHERE id=? AND status='QUEUED'", (args[0],)).fetchone()
+            db.execute("UPDATE operations SET status='CANCELLED',updated_at=? WHERE id=? AND status='QUEUED'", (now, args[0]))
+            if row:
+                if row["kind"] == "management" and row["event_id"]:
+                    db.execute("UPDATE management_deliveries SET status='CANCELLED',updated_at=? WHERE operation_id=?", (now,args[0]))
+                if row["kind"] == "callback" and row["event_id"] and str(row["event_id"]).startswith("result:"):
+                    db.execute("UPDATE task_results SET callback_status='CANCELLED' WHERE event_id=?", (row["event_id"],))
             db.commit()
             value = response(db.execute("SELECT * FROM operations WHERE id=?", (args[0],)).fetchone())
         elif command == "work-one":

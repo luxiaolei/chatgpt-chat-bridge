@@ -224,6 +224,22 @@ test("management broadcast previews, delivers through background send, and recor
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
+test("cancelled management delivery is not reported as pending", async()=>{
+  const f=await fixture();
+  try{
+    let r=f.call("control",["broadcast","--project","P","--kind","RELOAD","--message","stale","--event","stale-event","--confirm"]);
+    assert.equal(r.status,0,r.stderr);
+    const operation=JSON.parse(r.stdout).deliveries[0];
+    r=f.call("cancel",[operation.operationId]);
+    assert.equal(r.status,0,r.stderr);
+    r=f.call("control",["status","--project","P"]);
+    assert.equal(r.status,0,r.stderr);
+    const project=JSON.parse(r.stdout).projects[0];
+    assert.equal(project.management.pending,0);
+    assert.equal(project.attention.pendingManagement,0);
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
 
 test("two-phase controller rotation commits successor and late result follows it", async()=>{
   const f=await fixture();
