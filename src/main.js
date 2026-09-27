@@ -461,6 +461,8 @@ async function reclaimOrphanManagedPage(reg, task, binding) {
     protectedPageLabels:[...protectedPages],
   });
   for(const page of candidates) {
+    const snapshot=await state(page).catch(()=>null);
+    if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
     try {
       await page.close();
       return {page:page.label,reason:"orphan-managed"};
