@@ -110,8 +110,22 @@ export function createRuntime({bin = new URL("../bin/chat-bridge", import.meta.u
     const capability = input?.capability;
     if (capability === "stream") return {ok: true, capability, supported: false, transport: "cli-subprocess", reason: "NO_INCREMENTAL_TRANSPORT"};
     if (capability === "ask") return {ok: true, capability, supported: true, transport: "cli-subprocess", mode: "final-only"};
-    if (capability && !["resolveRoute", "send", "read", "status", "stop", "ask", "attach", "stream", "toolResults", "multimodal"].includes(capability)) return errorResponse("UNKNOWN_CAPABILITY", `unknown capability: ${capability}`, {capability});
-    return {ok: true, capabilities: {resolveRoute: true, send: true, read: true, status: true, stop: true, ask: true, attach: true, stream: false, toolResults: false, multimodal: false}, transport: "cli-subprocess"};
+    if (capability === "imageParts") return {ok: true, capability, supported: false, transport: "cli-subprocess", reason: "NO_SAFE_LOCAL_IMAGE_UPLOAD"};
+    if (capability === "toolResults") return {ok: true, capability, supported: false, transport: "cli-subprocess", reason: "NO_NATIVE_TOOL_EVENT_TRANSPORT"};
+    if (capability && !["resolveRoute", "send", "read", "status", "stop", "ask", "attach", "stream", "imageParts", "toolResults", "multimodal"].includes(capability)) return errorResponse("UNKNOWN_CAPABILITY", `unknown capability: ${capability}`, {capability});
+    return {ok: true, capabilities: {resolveRoute: true, send: true, read: true, status: true, stop: true, ask: true, attach: true, stream: false, imageParts: false, toolResults: false, multimodal: false}, transport: "cli-subprocess"};
+  }
+
+  async function sendParts(input = {}) {
+    try {
+      input ||= {};
+      if (!Array.isArray(input.parts) || input.parts.length === 0) return errorResponse("INVALID_INPUT", "parts must be a non-empty array");
+      const images = input.parts.filter((part) => part?.type === "image");
+      if (!images.length) return errorResponse("INVALID_INPUT", "parts must include an image part");
+      if (images.some((part) => typeof part.url === "string")) return errorResponse("IMAGE_REMOTE_URL_FORBIDDEN", "remote image URLs are not fetched by ChatBridge", {capability: "imageParts"});
+      if (images.some((part) => typeof part.data === "string" || typeof part.base64 === "string")) return errorResponse("IMAGE_DATA_FORBIDDEN", "base64 image data is not placed into a prompt", {capability: "imageParts"});
+      return errorResponse("UNSUPPORTED", "native local image upload is not exposed by the current Ego Browser path", {capability: "imageParts", transport: "cli-subprocess", reason: "NO_SAFE_LOCAL_IMAGE_UPLOAD"});
+    } catch (error) { return errorResponse("INVALID_INPUT", error.message); }
   }
 
   async function resolveRoute(input = {}) {
@@ -153,7 +167,7 @@ export function createRuntime({bin = new URL("../bin/chat-bridge", import.meta.u
   }
 
   return Object.freeze({
-    capabilities: Object.freeze({resolveRoute: true, send: true, read: true, status: true, stop: true, ask: true, attach: true, stream: false, toolResults: false, multimodal: false}),
+    capabilities: Object.freeze({resolveRoute: true, send: true, read: true, status: true, stop: true, ask: true, attach: true, stream: false, imageParts: false, toolResults: false, multimodal: false}),
     probe,
     resolveRoute,
     send: (input) => session("send", input),
@@ -162,6 +176,7 @@ export function createRuntime({bin = new URL("../bin/chat-bridge", import.meta.u
     stop: (input) => session("stop", input),
     ask: (input) => session("ask", input),
     attach: (input) => session("status", {...input, background: true}),
+    sendParts,
     stream: async () => unsupported("stream"),
     toolResults: async () => unsupported("toolResults"),
     multimodal: async () => unsupported("multimodal"),

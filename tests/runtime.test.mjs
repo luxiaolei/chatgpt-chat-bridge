@@ -15,6 +15,32 @@ test("runtime exposes a typed stream probe without pretending CLI polling is str
   assert.equal(unsupported.error.transport, "cli-subprocess");
 });
 
+test("image parts stay behind a typed unsupported boundary without invoking the CLI", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "bridge-runtime-image-"));
+  const fake = path.join(dir, "bridge");
+  const marker = path.join(dir, "invoked");
+  await writeFile(fake, `#!/bin/sh
+touch "${marker}"
+exit 0
+`, {mode: 0o755});
+  try {
+    const bridge = createRuntime({bin: fake});
+    assert.deepEqual(await bridge.probe({capability: "imageParts"}), {
+      ok: true, capability: "imageParts", supported: false,
+      transport: "cli-subprocess", reason: "NO_SAFE_LOCAL_IMAGE_UPLOAD"
+    });
+    const result = await bridge.sendParts({target: "worker", parts: [
+      {type: "text", text: "inspect this"},
+      {type: "image", path: "/tmp/photo.png", mimeType: "image/png"}
+    ]});
+    assert.equal(result.error.code, "UNSUPPORTED");
+    assert.equal(result.error.capability, "imageParts");
+    await assert.rejects(import("node:fs/promises").then(({access}) => access(marker)), {code: "ENOENT"});
+    assert.equal((await bridge.sendParts({target: "worker", parts: [{type: "image", url: "https://example.invalid/a.png"}]})).error.code, "IMAGE_REMOTE_URL_FORBIDDEN");
+    assert.equal((await bridge.sendParts({target: "worker", parts: [{type: "image", data: "AAAA"}]})).error.code, "IMAGE_DATA_FORBIDDEN");
+  } finally { await rm(dir, {recursive: true, force: true}); }
+});
+
 test("turn event stream enforces correlation, sequence, terminal state, and assistant freshness", () => {
   const stream = createTurnEventStream({requestId: "r1", turnId: "t1", assistantMessageId: "a2"});
   assert.equal(stream.push({requestId: "r1", turnId: "t1", sequence: 1, type: "delta", assistantMessageId: "a2", delta: "hi"}).ok, true);

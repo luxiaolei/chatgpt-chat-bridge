@@ -23,7 +23,11 @@ await bridge.attach({project: "Project", target: "worker"});
 
 ## Capabilities and limits
 
-`capabilities` reports `resolveRoute`, `send`, `read`, `status`, `stop`, `ask`, and `attach` as supported. `stream`, `toolResults`, and `multimodal` are false and their methods return `UNSUPPORTED`. `probe({capability:"stream"})` returns `{supported:false, transport:"cli-subprocess", reason:"NO_INCREMENTAL_TRANSPORT"}`. The CLI's status polling is never emitted as SSE.
+`capabilities` reports `resolveRoute`, `send`, `read`, `status`, `stop`, `ask`, and `attach` as supported. `stream`, `imageParts`, `toolResults`, and `multimodal` are false. `probe({capability:"stream"})` returns `{supported:false, transport:"cli-subprocess", reason:"NO_INCREMENTAL_TRANSPORT"}`. The CLI's status polling is never emitted as SSE.
+
+## Image parts
+
+`probe({capability:"imageParts"})` returns `NO_SAFE_LOCAL_IMAGE_UPLOAD`. `sendParts` is a boundary only: it rejects remote URLs with `IMAGE_REMOTE_URL_FORBIDDEN`, rejects base64/data fields with `IMAGE_DATA_FORBIDDEN`, and returns typed `UNSUPPORTED` for local image paths without invoking the CLI. The current Ego Browser surface used by ChatBridge exposes no verified file chooser or `setInputFiles` path, so no image is fetched or inserted into a text prompt. A future implementation must remain limited to one bounded local image plus text and require a dedicated canary before enabling the capability.
 
 ## Turn event boundary
 
