@@ -105,7 +105,7 @@ def terminal_detach_candidates(reg, runtime):
     candidates = set()
     tasks = runtime.get("tasks", {})
     for task in tasks.values():
-        if str(task.get("status") or "").upper() not in {"COMPLETE", "FAILED", "CANCELLED", "RESULT_RECORDED"}:
+        if str(task.get("status") or "").upper() not in {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "RESULT_RECORDED"}:
             continue
         if task.get("watchdogPausedForUserControl") or task.get("watchdogPendingNotification") or task.get("externalResponsePending"):
             continue

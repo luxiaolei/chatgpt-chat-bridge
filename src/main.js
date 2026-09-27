@@ -1563,7 +1563,7 @@ async function clearUserControlPause(chat) {
 async function detachTerminalTaskPages(reg, project=null, account=null) {
   const graceSec=Math.max(30,Number(process.env.CHAT_BRIDGE_TERMINAL_TAB_GRACE_SEC||180)||180);
   const rt=await loadRuntime(), now=Date.now(), closed=[];
-  const terminal=new Set(["COMPLETE","FAILED","CANCELLED","RESULT_RECORDED"]);
+  const terminal=new Set(["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"]);
   for(const taskRecord of Object.values(rt.tasks||{})) {
     if(project && taskRecord.project!==project) continue;
     if(account && (taskRecord.account||reg.chats?.[taskRecord.sessionId]?.account)!==account) continue;
