@@ -44,7 +44,7 @@ Each facade call owns one bounded CLI child. The facade does not create a second
 
 ## Turn event boundary
 
-`createTurnEventStream({requestId, turnId, assistantMessageId})` validates events for a future incremental transport. Each event must carry the same `requestId`, `turnId`, and a contiguous positive `sequence`, with `type` equal to `delta`, `progress`, or `terminal`. A configured assistant baseline is required for delta freshness; a different assistant message returns `STALE_ASSISTANT_CONTENT`. Duplicate, skipped, mismatched, or post-terminal events return typed errors. This validator does not create events from polling and does not claim that the current CLI can stream.
+`createTurnEventStream({requestId, turnId, assistantMessageId})` validates the events returned by `stream`. Each event must carry the same `requestId`, `turnId`, and a contiguous positive `sequence`, with `type` equal to `delta`, `progress`, or `terminal`. A configured assistant baseline is required for delta freshness; a different assistant message returns `STALE_ASSISTANT_CONTENT`. Duplicate, skipped, mismatched, or post-terminal events return typed errors. The runtime emits these events from observed DOM polling and does not split a completed final response into fake chunks.
 
 ## Error and cancellation boundary
 

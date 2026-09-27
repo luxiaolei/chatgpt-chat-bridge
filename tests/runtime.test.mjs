@@ -148,7 +148,9 @@ printf '%s\\n' '{"ok":true,"sessionState":"IDLE_COMPLETE"}'; exit 0
 `, {mode: 0o755});
   try {
     const bridge = createRuntime({bin: fake});
-    assert.equal(bridge.capabilities.stream, false);
+    assert.equal(bridge.capabilities.stream, true);
+    assert.equal(bridge.capabilities.imageParts, true);
+    assert.equal(bridge.capabilities.multimodal, true);
     assert.deepEqual(await bridge.resolveRoute({project: "P", target: "worker"}), {ok: true, route: {project: "P", account: "a", sessionRef: "c1", role: "worker", name: "worker"}});
     assert.deepEqual((await bridge.send({project: "P", target: "worker", message: "hello"})).data.delivered, true);
     assert.equal((await bridge.stream()).error.code, "INVALID_INPUT");

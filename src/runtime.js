@@ -209,7 +209,7 @@ export function createRuntime({bin = new URL("../bin/chat-bridge", import.meta.u
     if (capability === "toolResults") return {ok: true, capability, supported: false, transport: "cli-subprocess", reason: "NO_NATIVE_TOOL_EVENT_TRANSPORT"};
     if (capability && !["resolveRoute", "send", "read", "status", "stop", "ask", "attach", "stream", "imageParts", "toolResults", "multimodal"].includes(capability)) return errorResponse("UNKNOWN_CAPABILITY", `unknown capability: ${capability}`, {capability});
     if (capability === "multimodal") return {ok: true, capability, supported: true, transport: "cli-subprocess", mode: "image-text-final-only"};
-    return {ok: true, capabilities: {resolveRoute: true, send: true, read: true, status: true, stop: true, ask: true, attach: true, stream: false, imageParts: true, toolResults: false, multimodal: true}, transport: "cli-subprocess"};
+    return {ok: true, capabilities: {resolveRoute: true, send: true, read: true, status: true, stop: true, ask: true, attach: true, stream: true, imageParts: true, toolResults: false, multimodal: true}, transport: "cli-subprocess"};
   }
 
     async function imageRequest(input = {}) {
@@ -312,7 +312,7 @@ export function createRuntime({bin = new URL("../bin/chat-bridge", import.meta.u
   }
 
   return Object.freeze({
-    capabilities: Object.freeze({resolveRoute: true, send: true, read: true, status: true, stop: true, ask: true, attach: true, stream: false, imageParts: true, toolResults: false, multimodal: false}),
+    capabilities: Object.freeze({resolveRoute: true, send: true, read: true, status: true, stop: true, ask: true, attach: true, stream: true, imageParts: true, toolResults: false, multimodal: true}),
     probe,
     resolveRoute,
     send: (input) => session("send", input),
@@ -326,7 +326,7 @@ export function createRuntime({bin = new URL("../bin/chat-bridge", import.meta.u
     submitToolResult: async () => unsupported("toolResults"),
     stream,
     toolResults: async () => unsupported("toolResults"),
-    multimodal: async () => unsupported("multimodal"),
+    multimodal: askParts,
   });
 }
 
