@@ -100,7 +100,9 @@ def snapshot(config, state, project, now=None):
         if row['identityVerified']:
             groups.setdefault(('identity',row['_capacityScope']),[]).append(row)
         if row.get('spaceName'):
-            groups.setdefault(('space',row['spaceName']),[]).append(row)
+            # Space labels are only unique inside a verified login/Profile.
+            # Different identities may legitimately use the same label.
+            groups.setdefault(('space',row['_capacityScope'],row['spaceName']),[]).append(row)
     for members in groups.values():
         aliases=sorted({r['account'] for r in members})
         if len(aliases)<2:

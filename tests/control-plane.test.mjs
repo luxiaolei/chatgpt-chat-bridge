@@ -483,6 +483,9 @@ test("control status distinguishes no work, in progress, awaiting ACK and comple
     assert.equal(initialStatus.completion.state,"NO_KNOWN_WORK");
     assert.equal(initialStatus.businessState,"REPLANNING");
     assert.equal(initialStatus.durableStateRef,"https://example.invalid/issues/1");
+    assert.deepEqual(initialStatus.admission,{mode:"RUNNING",acceptingNewWork:true,reason:null});
+    assert.deepEqual(initialStatus.attention,{blockedTasks:0,failedTasks:0,unknownOperations:0,pendingBusiness:0,
+      pendingCallbacks:0,pendingManagement:0,awaitingControllerAck:0,awaitingDurable:0});
 
     let get=spawnSync("python3",[path.resolve("src/state-store.py"),"get",f.config,f.state,"runtime"],{encoding:"utf8"});
     let base=JSON.parse(get.stdout), next=structuredClone(base);

@@ -1017,6 +1017,7 @@ def control_status(db, project=None):
         awaiting_durable = task_counts.get("AWAITING_DURABLE_UPDATE",0)
         awaiting_ack = task_counts.get("RESULT_RECORDED",0)
         pending_management = int((mgmt["pending"] if mgmt and mgmt["pending"] is not None else 0) or 0)
+        control = management_mode(db, name)
 
         if blocked or failed or unknown_ops or results["callbackUnknown"] or results["rejectedOrBlocked"]:
             completion_state = "NEEDS_REVIEW"
@@ -1039,7 +1040,12 @@ def control_status(db, project=None):
             "businessStateReason": cfg.get("businessStateReason"),
             "durableStateRef": cfg.get("durableStateRef"),
             "archived": bool(cfg.get("archived")),
-            "control": management_mode(db, name),
+            "control": control,
+            "admission": {
+                "mode": control["mode"],
+                "acceptingNewWork": control["mode"] == "RUNNING" and not bool(cfg.get("archived")),
+                "reason": control.get("reason"),
+            },
             "rootRole": root_role,
             "rootControllerSessionRef": controller,
             "tasks": {
@@ -1059,6 +1065,16 @@ def control_status(db, project=None):
             "management": {
                 "acknowledged": int((mgmt["acknowledged"] if mgmt and mgmt["acknowledged"] is not None else 0) or 0),
                 "pending": pending_management,
+            },
+            "attention": {
+                "blockedTasks": blocked,
+                "failedTasks": failed,
+                "unknownOperations": unknown_ops,
+                "pendingBusiness": pending_business_ops,
+                "pendingCallbacks": pending_callback_ops,
+                "pendingManagement": pending_management,
+                "awaitingControllerAck": results["awaitingControllerAck"],
+                "awaitingDurable": awaiting_durable,
             },
             "completion": {
                 "state": completion_state,

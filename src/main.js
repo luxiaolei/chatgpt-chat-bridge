@@ -65,6 +65,7 @@ const TOPOLOGY=globalThis.__CHAT_BRIDGE_TOPOLOGY__;
 const WEB_COOLDOWN_PATH = pathMod.join(STATE_DIR, "web-cooldown.json");
 const taskAccounts=new Map();
 const COMPOSER_SELECTOR = 'div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]';
+const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 
 function accountScope(reg, account) {
   const identity=reg.accounts?.[account]?.identity;
@@ -460,6 +461,8 @@ async function reclaimOrphanManagedPage(reg, task, binding) {
     protectedPageLabels:[...protectedPages],
   });
   for(const page of candidates) {
+    const snapshot=await state(page).catch(()=>null);
+    if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
     try {
       await page.close();
       return {page:page.label,reason:"orphan-managed"};
@@ -880,6 +883,39 @@ async function sendMessage(page, msg) {
   return {delivered:true,attempts,lastUserId:after.lastUserId||null,messageCount:after.messageCount};
 }
 
+async function uploadImage(page, file, mimeType=null) {
+  if(!file || !pathMod.isAbsolute(file)) { const error=new Error("image path must be an absolute local path"); error.code="IMAGE_LOCAL_PATH_REQUIRED"; throw error; }
+  let info;
+  try { info=await fs.lstat(file); } catch(error) {
+    if(error.code==="ENOENT"){ const e=new Error("image file does not exist"); e.code="IMAGE_FILE_NOT_FOUND"; throw e; }
+    throw error;
+  }
+  if(!info.isFile()){ const e=new Error("image path must refer to a regular file"); e.code="IMAGE_FILE_UNSAFE"; throw e; }
+  if(info.size>IMAGE_MAX_BYTES){ const e=new Error(`image file exceeds ${IMAGE_MAX_BYTES} bytes`); e.code="IMAGE_FILE_TOO_LARGE"; throw e; }
+  const bytes=await fs.readFile(file);
+  const detected=bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))?"image/png"
+    :bytes.subarray(0,3).equals(Buffer.from([255,216,255]))?"image/jpeg"
+    :bytes.subarray(0,4).toString()==="RIFF"&&bytes.subarray(8,12).toString()==="WEBP"?"image/webp":null;
+  if(!detected){ const e=new Error("image must be a PNG, JPEG, or WebP file"); e.code="IMAGE_MIME_UNSUPPORTED"; throw e; }
+  if(mimeType && mimeType!==detected){ const e=new Error("declared image MIME type does not match file bytes"); e.code="IMAGE_MIME_MISMATCH"; throw e; }
+  await detectWebRateLimit(page,"upload-before");
+  const marked=await page.evaluate(()=>{
+    document.querySelectorAll("input[type=file][data-chat-bridge-upload-target]").forEach(e=>e.removeAttribute("data-chat-bridge-upload-target"));
+    const inputs=[...document.querySelectorAll("input[type=file]")];
+    const exact=inputs.filter(e=>e.accept.trim().toLowerCase()==="image/*");
+    const compatible=exact.length===1?exact:inputs.filter(e=>/image\//i.test(e.accept));
+    if(compatible.length!==1)return {count:compatible.length};
+    compatible[0].setAttribute("data-chat-bridge-upload-target","1");
+    return {count:1};
+  });
+  if(marked.count!==1){ const e=new Error("image upload control is unavailable or ambiguous"); e.code="IMAGE_UPLOAD_CONTROL_UNAVAILABLE"; throw e; }
+  await page.setInputFiles('input[type=file][data-chat-bridge-upload-target="1"]',[file]);
+  const name=pathMod.basename(file);
+  await page.waitForFunction((name)=>[...document.querySelectorAll("button")].some(button=>button.getAttribute("aria-label")===`Remove ${name}`),name,{timeout:10000});
+  await detectWebRateLimit(page,"upload-after");
+  return {uploaded:true,path:file,mimeType:detected,bytes:info.size};
+}
+
 async function askMessage(page, msg, timeout=180000) {
   const before=await state(page);
   await sendMessage(page,msg);
@@ -891,6 +927,32 @@ async function askMessage(page, msg, timeout=180000) {
     return a.length>n && !stop && (a[a.length-1].innerText||"").trim().length>0;
   }, before.assistantCount, {timeout});
   return await state(page);
+}
+
+async function streamMessage(page, msg, {requestId, turnId, timeout=180000}={}) {
+  const before=await state(page);
+  await sendMessage(page,msg);
+  let sequence=0, emitted="", assistantMessageId=null;
+  const emit=(type,payload)=>console.log(JSON.stringify({requestId,turnId,sequence:++sequence,type,...payload,observedAt:new Date().toISOString()}));
+  emit("progress",{progress:{state:"started",delivery:"confirmed"}});
+  const deadline=Date.now()+timeout;
+  while(Date.now()<deadline){
+    const observed=await state(page);
+    const fresh=observed.assistantCount>before.assistantCount || (observed.lastAssistantId && observed.lastAssistantId!==before.lastAssistantId);
+    if(fresh && observed.lastAssistantId) assistantMessageId=observed.lastAssistantId;
+    const full=String(observed.lastAssistant||"");
+    if(fresh && full && full!==emitted){
+      const delta=full.startsWith(emitted)?full.slice(emitted.length):full;
+      emit("delta",{assistantMessageId,delta,replace:!full.startsWith(emitted)});
+      emitted=full;
+    }
+    if(fresh && !observed.generating){
+      emit("terminal",{terminal:{status:"completed",assistantMessageId,text:full}});
+      return {requestId,turnId,sequence,assistantMessageId,text:full};
+    }
+    await page.waitForTimeout(150);
+  }
+  const error=new Error("STREAM_TIMEOUT"); error.code="STREAM_TIMEOUT"; throw error;
 }
 
 async function openModelMenu(page) {
@@ -2229,11 +2291,11 @@ else if(["archive","retire","delete","forget"].includes(cmd)){
     print({ok:true,chat:chat.name,id:chat.id,status:chat.status});
   }
 }
-else if(["read","evidence","status","send","ask","model","effort","stop","retry","recover","resend"].includes(cmd)){
+else if(["read","evidence","status","send","ask","stream","model","effort","stop","retry","recover","resend"].includes(cmd)){
   const key=args[1]; if(!key) throw new Error("chat key required");
   const chat=resolveChat(reg,key,project,accountArg);
   const background=args.includes("--background")||cmd==="evidence";
-  if(["send","ask","retry","recover","resend"].includes(cmd) && !background) await clearUserControlPause(chat);
+  if(["send","ask","stream","retry","recover","resend"].includes(cmd) && !background) await clearUserControlPause(chat);
   const {page,binding}=await ensurePage(reg,chat,{pauseOnUserControl:background});
   await touchRuntime(chat.project,{activeAccount:chat.account,spaceName:binding.spaceName,lastCommand:cmd,lastSession:chat.id});
   if(cmd==="read") print((await state(page)).lastAssistant);
@@ -2304,8 +2366,12 @@ else if(["read","evidence","status","send","ask","model","effort","stop","retry"
       if(conflict) throw new Error(`session already has active task ${conflict.taskId}; complete/clear it or use a different worker session`);
       rt.tasks[taskId]=tracked; await saveRuntime(rt);
     }
-    let delivery=null;
-    try { delivery=await sendMessage(page,msg); }
+    let delivery=null, upload=null;
+    try {
+      const imagePath=opt("image-path",null);
+      if(imagePath) upload=await uploadImage(page,imagePath,opt("mime-type",null));
+      delivery=await sendMessage(page,msg);
+    }
     catch(error) {
       if(tracked){
         const rt=await loadRuntime(), live=rt.tasks[taskId];
@@ -2325,7 +2391,7 @@ else if(["read","evidence","status","send","ask","model","effort","stop","retry"
     await page.waitForTimeout(250);
     const observed=await observeSession(chat,page,tracked);
     if(tracked){ const rt=await loadRuntime(), live=rt.tasks[taskId]; live.status=observed.generating?"RUNNING":"DISPATCHED"; live.blockedReason=null; live.updatedAt=new Date().toISOString(); rt.tasks[taskId]=live; await saveRuntime(rt); }
-    print({ok:true,delivered:true,delivery,chat:chat.name,taskId:taskId||null,state:observed.sessionState,
+    print({ok:true,delivered:true,delivery,upload,chat:chat.name,taskId:taskId||null,state:observed.sessionState,
       modelSelection:dispatchModel?{
         model:dispatchModel.model||dispatchModel.observed?.model||null,
         effort:dispatchModel.effort||dispatchModel.observed?.effort||null,
@@ -2336,13 +2402,22 @@ else if(["read","evidence","status","send","ask","model","effort","stop","retry"
   if(cmd==="ask"){
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
     const dispatchModel=await applyDispatchModel(page,chat,null,null);
+    const upload=opt("image-path",null)?await uploadImage(page,opt("image-path",null),opt("mime-type",null)):null;
     const st=await askMessage(page,msg,Number(opt("timeout","180000")));
-    print({chat:chat.name,response:st.lastAssistant,modelSelection:dispatchModel?{
+    print({chat:chat.name,response:st.lastAssistant,upload,modelSelection:dispatchModel?{
       model:dispatchModel.model||dispatchModel.observed?.model||null,
       effort:dispatchModel.effort||dispatchModel.observed?.effort||null,
       raw:dispatchModel.observed?.raw||st.mode||null,
       verified:!dispatchModel.uiModelUnverifiable,
     }:observedModel(st.mode),dispatchModel});
+  }
+  if(cmd==="stream"){
+    const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
+    const requestId=opt("request-id",null), turnId=opt("turn-id",null);
+    if(!requestId||!turnId) throw new Error("request-id and turn-id are required");
+    try { await applyDispatchModel(page,chat,null,null); }
+    catch(error) { if(!deferrableModelUiError(error)) throw error; }
+    await streamMessage(page,msg,{requestId,turnId,timeout:Number(opt("timeout","180000"))});
   }
   if(cmd==="model"){
     const m=positionals(2).join(" "); if(!m) throw new Error("model required"); const applied=await applyModelSpec(page,m,opt("effort",null));
