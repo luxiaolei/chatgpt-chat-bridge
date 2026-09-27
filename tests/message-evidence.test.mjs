@@ -7,7 +7,7 @@ const start=source.indexOf("function normalizedEvidenceText");
 const end=source.indexOf("\nasync function state",start);
 const {normalize,expand}=new Function(source.slice(start,end)+
   ";return {normalize:normalizedEvidenceText,expand:expandEvidenceMessages};")();
-const readyStart=source.indexOf("async function waitForConversationReady");
+const readyStart=source.indexOf("async function recoverConversationLoadError");
 const readyEnd=source.indexOf("\nasync function waitForProjectReady",readyStart);
 const ready=new Function("detectWebRateLimit","COMPOSER_SELECTOR",source.slice(readyStart,readyEnd)+
   ";return waitForConversationReady;")(async()=>{},"composer");
@@ -21,6 +21,25 @@ test("existing conversation waits for message history after composer appears",as
   },1000);
   assert.equal(reads,2);
   assert.equal(waits,1);
+});
+
+test("conversation load error uses one native Retry before readiness",async()=>{
+  let selectors=0,focus=0,presses=0,evals=0;
+  await ready({
+    waitForSelector:async()=>{
+      selectors++;
+      if(selectors===1) throw new Error("not visible yet");
+      return true;
+    },
+    evaluate:async()=>++evals===1?{loadError:true,count:1}:true,
+    focus:async()=>{focus++;},
+    keyboard:{press:async()=>{presses++;}},
+    click:async()=>{throw new Error("click fallback should not be needed");},
+    waitForTimeout:async()=>{},
+  },2000);
+  assert.equal(focus,1);
+  assert.equal(presses,1);
+  assert.equal(selectors,2);
 });
 
 test("evidence expands only user messages and strips UI disclosure labels",async()=>{
