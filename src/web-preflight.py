@@ -58,6 +58,18 @@ def task_account(reg, task):
     return chat.get("account") or task.get("account") or project_account(reg, task.get("project"))
 
 
+def capacity_retry_ready(task, now=None):
+    if str(task.get("status") or "").upper() != "WAITING_CAPACITY":
+        return True
+    raw=task.get("capacityNextRetryAt")
+    if not raw:
+        return True
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")) <= (now or datetime.now(timezone.utc))
+    except ValueError:
+        return True
+
+
 def project_account(reg, project):
     return reg.get("projects", {}).get(project, {}).get("activeAccount") or reg.get("defaultAccount") or "default"
 
@@ -188,7 +200,7 @@ def run(action, config, state, args):
                 continue
             status = str(task.get("status") or "").upper()
             pending = status == "BLOCKED" and task.get("watchdogPendingNotification")
-            if status not in terminal or pending:
+            if (status not in terminal and capacity_retry_ready(task)) or pending:
                 task_rows.append((str(task.get("taskId") or task_key), task_account(reg, task)))
         lifecycle_rows = []
         for name in ([project] if project else reg.get("projects", {})):
@@ -266,7 +278,7 @@ def run(action, config, state, args):
                     continue
                 status = str(task.get("status") or "").upper()
                 pending = status == "BLOCKED" and task.get("watchdogPendingNotification")
-                if (status not in terminal or pending) and not cooldown(reg, state, a)["active"]:
+                if ((status not in terminal and capacity_retry_ready(task)) or pending) and not cooldown(reg, state, a)["active"]:
                     print("1")
                     return
         if "--skip-lifecycle" not in args:

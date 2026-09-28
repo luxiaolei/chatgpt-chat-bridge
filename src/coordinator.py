@@ -25,6 +25,7 @@ def account_id(identity):
 
 EFFORTS = {"Instant", "Medium", "High", "Extra High", "Pro"}
 TERMINAL = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "RESULT_RECORDED"}
+CAPACITY_WAITING = "WAITING_CAPACITY"
 
 
 def ensure_column(db, table, name, declaration):
@@ -266,6 +267,43 @@ def observed_response(row, tasks):
     if task:
         value["taskStatus"] = task.get("status")
     return value
+
+
+def mark_capacity_wait(db, row, detail):
+    """Keep queue capacity pressure visible without turning it into BLOCKED."""
+    rt = runtime(db)
+    tasks = rt.setdefault("tasks", {})
+    task = tasks.get(row["task_id"]) or {
+        "taskId": row["task_id"], "project": row["project"], "account": row["account_alias"],
+        "role": row["role"], "sessionId": row["session_ref"], "controllerSessionRef": row["caller_ref"],
+    }
+    if str(task.get("status") or "").upper() in TERMINAL:
+        return
+    now = stamp()
+    task.update({
+        "taskId": row["task_id"], "project": row["project"], "account": row["account_alias"],
+        "role": row["role"], "sessionId": row["session_ref"], "status": CAPACITY_WAITING,
+        "capacityState": CAPACITY_WAITING, "capacityReason": detail.get("reason") or "PAGE_BUDGET",
+        "capacityRetryAfterSec": detail.get("retryAfterSec"), "capacityNextRetryAt": detail.get("nextRetryAt"),
+        "updatedAt": now,
+    })
+    tasks[row["task_id"]] = task
+    db.execute("UPDATE documents SET payload=? WHERE kind=?", (json.dumps(rt, ensure_ascii=False), "runtime"))
+    db.commit()
+
+
+def clear_capacity_wait(db, task_id):
+    rt = runtime(db)
+    task = (rt.get("tasks") or {}).get(task_id)
+    if not task:
+        return
+    for key in ("capacityState", "capacityReason", "capacityRetryAfterSec", "capacityNextRetryAt"):
+        task.pop(key, None)
+    if str(task.get("status") or "").upper() == CAPACITY_WAITING:
+        task["status"] = "DISPATCHED"
+    task["updatedAt"] = stamp()
+    db.execute("UPDATE documents SET payload=? WHERE kind=?", (json.dumps(rt, ensure_ascii=False), "runtime"))
+    db.commit()
 
 
 def control_footer(task_id, caller_ref, role, model, effort, policy_version):
@@ -1018,6 +1056,7 @@ def control_status(db, project=None):
         cancelled = task_counts.get("CANCELLED",0)
         awaiting_durable = task_counts.get("AWAITING_DURABLE_UPDATE",0)
         awaiting_ack = task_counts.get("RESULT_RECORDED",0)
+        capacity_waiting = task_counts.get(CAPACITY_WAITING,0)
         pending_management = int((mgmt["pending"] if mgmt and mgmt["pending"] is not None else 0) or 0)
         control = management_mode(db, name)
 
@@ -1056,6 +1095,7 @@ def control_status(db, project=None):
                 "blocked": blocked,
                 "failed": failed,
                 "cancelled": cancelled,
+                "capacityWaiting": capacity_waiting,
                 "awaitingDurable": awaiting_durable,
                 "resultRecorded": awaiting_ack,
                 "complete": task_counts.get("COMPLETE",0),
@@ -1077,6 +1117,7 @@ def control_status(db, project=None):
                 "pendingManagement": pending_management,
                 "awaitingControllerAck": results["awaitingControllerAck"],
                 "awaitingDurable": awaiting_durable,
+                **({"capacityWaiting": capacity_waiting} if capacity_waiting else {}),
             },
             "completion": {
                 "state": completion_state,
@@ -1560,6 +1601,10 @@ def work_one(db):
         detail = receipt or {}
         if detail.get("code") in {"PACING_DEFERRED", "WEB_COOLDOWN_ACTIVE"}:
             return finish(db, row, "QUEUED", detail.get("reason"), max(1, float(detail.get("retryAfterSec", 10))))
+    if completed.returncode and receipt and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("code") == "CAPACITY_WAIT":
+        if row["kind"] == "dispatch":
+            mark_capacity_wait(db, row, receipt)
+        return finish(db, row, "QUEUED", "CAPACITY_WAITING", max(1, float(receipt.get("retryAfterSec", 15))))
     if completed.returncode and receipt and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("code") in {"CHAT_BUSY", "USER_DRAFT_PRESENT", "SPACE_IN_USER_CONTROL"}:
         reason = "TARGET_USER_CONTROLLED" if receipt["code"] == "SPACE_IN_USER_CONTROL" else "TARGET_BUSY_OR_DRAFT"
         return finish(db, row, "QUEUED", reason, 30)
@@ -1602,6 +1647,8 @@ def work_one(db):
         recorded = subprocess.run(record_args, capture_output=True, text=True, timeout=30)
         if recorded.returncode:
             return finish(db, row, "DELIVERY_UNKNOWN", "TASK_RECORD_NOT_CONFIRMED", session_ref=target)
+    if row["kind"] == "dispatch":
+        clear_capacity_wait(db, row["task_id"])
     result_payload = {"delivered": True, "modelSelection": receipt.get("modelSelection")}
     return finish(db, row, "SENT", result=result_payload, session_ref=target)
 

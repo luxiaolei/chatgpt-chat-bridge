@@ -99,6 +99,7 @@ function emptyRegistry() {
 function normalizeRegistry(raw) {
   const reg={...emptyRegistry(),...(raw||{})};
   reg.accounts ||= {}; reg.projects ||= {}; reg.chats ||= {}; reg.spaces ||= {};
+  reg.capacityOverflow ||= {};
   reg.defaultAccount ||= DEFAULT_ACCOUNT;
   reg.accounts[reg.defaultAccount] ||= {name:reg.defaultAccount};
   for (const [name,p0] of Object.entries(reg.projects)) {
@@ -117,7 +118,8 @@ function normalizeRegistry(raw) {
     c.role ||= c.name || c.title || c.id; c.status ||= "active";
     const b=reg.projects[c.project]?.bindings?.[c.account];
     const targetSpace=b?.spaceName || defaultSpaceName(c.project||"default",c.account);
-    const moved=!c.spaceName || c.spaceName!==targetSpace || (b?.spaceId!=null && c.spaceId!=null && Number(c.spaceId)!==Number(b.spaceId));
+    const overflowSpace=!!(c.spaceName && b?.spaceName && c.spaceName===`${b.spaceName}-overflow`);
+    const moved=!overflowSpace && (!c.spaceName || c.spaceName!==targetSpace || (b?.spaceId!=null && c.spaceId!=null && Number(c.spaceId)!==Number(b.spaceId)));
     if(moved){
       if(c.legacySpaceId==null && c.spaceId!=null) c.legacySpaceId=c.spaceId;
       c.spaceName=targetSpace; c.spaceId=b?.spaceId??null; c.page=null;
@@ -126,9 +128,42 @@ function normalizeRegistry(raw) {
   reg.version=2; return reg;
 }
 function normalizeRuntime(raw) {
-  const rt={version:2,projects:{},tasks:{},sessions:{},...(raw||{})};
-  rt.projects ||= {}; rt.tasks ||= {}; rt.sessions ||= {}; rt.version=2;
+  const rt={version:2,projects:{},tasks:{},sessions:{},capacity:{},...(raw||{})};
+  rt.projects ||= {}; rt.tasks ||= {}; rt.sessions ||= {}; rt.capacity ||= {}; rt.version=2;
   return rt;
+}
+
+const CAPACITY_WAIT_STATUS="WAITING_CAPACITY";
+const CAPACITY_WAIT_CODE="CAPACITY_WAIT";
+const CAPACITY_INITIAL_BACKOFF_SEC=15;
+const CAPACITY_MAX_BACKOFF_SEC=300;
+const CAPACITY_OVERFLOW_AFTER_SEC=120;
+function pageBudgetError(error) { return /page budget reached/i.test(String(error?.message||error)); }
+function capacityScope(reg, account, binding) {
+  const identity=reg.accounts?.[account]?.identity || `alias:${account}`;
+  return `${identity}|${binding?.profileId||"unknown"}`;
+}
+function capacityBackoffSec(attempt) {
+  return Math.min(CAPACITY_MAX_BACKOFF_SEC,CAPACITY_INITIAL_BACKOFF_SEC*Math.pow(2,Math.max(0,Number(attempt||1)-1)));
+}
+async function recordCapacityWait(reg, project, account, binding, reason) {
+  const rt=await loadRuntime(), key=capacityScope(reg,account,binding), prior=rt.capacity[key]||{};
+  const now=Date.now(), firstAt=Number(prior.firstAt||now), attempt=Number(prior.attempt||0)+1;
+  const retryAfterSec=capacityBackoffSec(attempt), nextRetryAt=new Date(now+retryAfterSec*1000).toISOString();
+  const value={project,account,profileId:binding?.profileId||null,spaceName:binding?.spaceName||null,
+    status:CAPACITY_WAIT_STATUS,attempt,firstAt,nextRetryAt,retryAfterSec,reason:String(reason||"PAGE_BUDGET")};
+  rt.capacity[key]=value; await saveRuntime(rt); return value;
+}
+async function clearCapacityWait(reg, account, binding) {
+  const rt=await loadRuntime(), key=capacityScope(reg,account,binding);
+  if(!rt.capacity[key]) return;
+  delete rt.capacity[key]; await saveRuntime(rt);
+}
+function capacityWaitError(binding, value, reason=null) {
+  const error=new Error(`Page capacity waiting in space "${binding?.spaceName||"unknown"}"${reason?`: ${reason}`:""}`);
+  error.code=CAPACITY_WAIT_CODE; error.status=CAPACITY_WAIT_STATUS;
+  error.reason=reason||value?.reason||"PAGE_BUDGET"; error.retryAfterSec=value?.retryAfterSec||CAPACITY_INITIAL_BACKOFF_SEC;
+  error.nextRetryAt=value?.nextRetryAt||null; return error;
 }
 async function loadRuntime() {
   const runtime=normalizeRuntime(stored("get","runtime"));
@@ -316,11 +351,12 @@ function bindingExecutionReadiness(project, binding) {
 }
 
 async function openBoundTask(reg, project, account=null, options={}) {
-  const b=bindingFor(reg,project,account,true);
+  const canonical=bindingFor(reg,project,account,true);
+  const b=options.spaceOverride?{...canonical,...options.spaceOverride,account:canonical.account}:canonical;
   if(!bindingObserved(reg,b.account,b)) throw new Error(`PROJECT_NOT_OBSERVED_FOR_LOGIN: ${project} / ${b.account}; scan and bind the actual Project before UI work`);
   await assertWebAvailable(b.account);
   let profileId=b.profileId||null, existingSpace=false;
-  if(typeof listTaskSpaces==="function") {
+  if(!options.spaceOverride && typeof listTaskSpaces==="function") {
     const identity=reg.accounts?.[b.account]?.identity;
     const accountName=Object.values(reg.spaces||{}).find(space=>space.identity===identity&&space.accountName)?.accountName||reg.accounts?.[b.account]?.label||b.account;
     const selected=SPACE_CATALOG.selectManagedSpace(b,accountName,await listTaskSpaces(),{pauseOnUserControl:!!options.pauseOnUserControl});
@@ -333,7 +369,7 @@ async function openBoundTask(reg, project, account=null, options={}) {
   const prior=taskAccounts.get(Number(task.spaceId));
   if(prior&&accountScope(reg,prior)!==accountScope(reg,b.account)) throw new Error("Space is bound to conflicting ChatGPT accounts");
   taskAccounts.set(Number(task.spaceId),b.account);
-  if(Number(b.spaceId)!==Number(task.spaceId)){ b.spaceId=task.spaceId; await saveRegistry(reg); }
+  if(!options.spaceOverride && Number(b.spaceId)!==Number(task.spaceId)){ b.spaceId=task.spaceId; await saveRegistry(reg); }
   return {binding:b,task};
 }
 function samePhysicalSpace(record, binding, task) {
@@ -471,14 +507,58 @@ async function reclaimOrphanManagedPage(reg, task, binding) {
   return null;
 }
 
-async function newManagedPage(reg, project, account, task, binding, excludeChatId=null) {
-  try { return await task.newPage(); }
+async function overflowManagedTask(reg, project, account, binding) {
+  const plan=managedSpacePlan(reg,account,binding?.profileId||null);
+  reg.capacityOverflow ||= {};
+  const overflowKey=`${reg.accounts?.[account]?.identity||`alias:${account}`}|${plan.profileId}`;
+  const remembered=reg.capacityOverflow?.[overflowKey];
+  const name=remembered?.spaceName||`${plan.spaceName}-overflow`;
+  if(typeof listTaskSpaces!=="function") throw new Error("OVERFLOW_SPACE_ENUMERATION_UNAVAILABLE");
+  const available=await listTaskSpaces(), matches=available.filter(space=>space.name===name);
+  if(matches.length>1) throw new Error(`AMBIGUOUS_OVERFLOW_SPACE: ${name}`);
+  const existing=matches[0];
+  if(existing && ["user","agentDelegatedToUser"].includes(existing.ownership)) {
+    const error=new Error(`SPACE_IN_USER_CONTROL: ${name}`); error.code="SPACE_IN_USER_CONTROL";
+    error.spaceName=name; error.ownership=existing.ownership; throw error;
+  }
+  if(existing?.profileId && existing.profileId!==plan.profileId) throw new Error(`OVERFLOW_SPACE_PROFILE_MISMATCH: ${name}`);
+  if(existing && existing.ownership && existing.ownership!=="agent") throw new Error(`OVERFLOW_SPACE_NOT_MANAGED: ${name}`);
+  const task=await taskSpace(name,!existing?{profileId:plan.profileId}:undefined);
+  const prior=taskAccounts.get(Number(task.spaceId));
+  if(prior&&accountScope(reg,prior)!==accountScope(reg,account)) throw new Error("Space is bound to conflicting ChatGPT accounts");
+  taskAccounts.set(Number(task.spaceId),account);
+  if(!remembered){ reg.capacityOverflow[overflowKey]={spaceName:name,profileId:plan.profileId,account,createdAt:new Date().toISOString()}; await saveRegistry(reg); }
+  return {task,spaceName:name,profileId:plan.profileId,binding:{...binding,spaceName:name,spaceId:task.spaceId,profileId:plan.profileId,controlPage:null}};
+}
+
+async function newManagedPage(reg, project, account, task, binding, excludeChatId=null, options={}) {
+  try {
+    const page=await task.newPage(); await clearCapacityWait(reg,account,binding); return page;
+  }
   catch(error) {
-    if(!/page budget reached/i.test(String(error?.message||error))) throw error;
+    if(!pageBudgetError(error)) throw error;
     const reclaimed=await reclaimIdlePageSlot(reg,project,account,task,binding,excludeChatId) ||
       await reclaimOrphanManagedPage(reg,task,binding);
-    if(!reclaimed) throw new Error(`Page budget reached in space "${binding.spaceName}" and no idle session page is safely reclaimable`);
-    return await task.newPage();
+    if(reclaimed) {
+      try { const page=await task.newPage(); await clearCapacityWait(reg,account,binding); return page; }
+      catch(errorAfterReclaim) { if(!pageBudgetError(errorAfterReclaim)) throw errorAfterReclaim; }
+    }
+    const wait=await recordCapacityWait(reg,project,account,binding,
+      `PAGE_BUDGET_NO_SAFE_RECLAIM:${binding.spaceName}`);
+    const elapsedSec=(Date.now()-Number(wait.firstAt||Date.now()))/1000;
+    if(options.allowOverflow && elapsedSec>=CAPACITY_OVERFLOW_AFTER_SEC) {
+      try {
+        const overflow=await overflowManagedTask(reg,project,account,binding);
+        const page=await overflow.task.newPage();
+        await clearCapacityWait(reg,account,binding);
+        return {...overflow,page,overflow:true};
+      } catch(overflowError) {
+        const detail=String(overflowError?.message||overflowError);
+        const refreshed=await recordCapacityWait(reg,project,account,binding,`OVERFLOW_UNAVAILABLE:${detail}`);
+        throw capacityWaitError(binding,refreshed,refreshed.reason);
+      }
+    }
+    throw capacityWaitError(binding,wait);
   }
 }
 
@@ -488,7 +568,7 @@ async function controlPage(reg, project, account=null) {
   if(!page){
     for(const p of pages){ const u=await p.url().catch(()=>""); if(u==="about:blank" || u==="chrome://newtab/"){ page=p; break; } }
   }
-  if(!page) page=await newManagedPage(reg,project,account,task,binding,null);
+  if(!page) page=await newManagedPage(reg,project,account,task,binding,null,{allowOverflow:false});
   binding.controlPage=page.label; await saveRegistry(reg); return {binding,task,page};
 }
 async function accountPage(reg, account, project=null) {
@@ -601,9 +681,12 @@ async function openConversationFromProject(page, binding, projectName, chatId) {
 }
 
 async function ensurePage(reg, chat, options={}) {
-  const {binding,task}=await openBoundTask(reg,chat.project,chat.account,options), pages=await pagesOf(task);
+  const configured=reg.projects?.[chat.project]?.bindings?.[chat.account];
+  const spaceOverride=chat.spaceName && configured?.spaceName!==chat.spaceName
+    ? {spaceName:chat.spaceName,spaceId:chat.spaceId,profileId:chat.profileId||null} : null;
+  const {binding,task}=await openBoundTask(reg,chat.project,chat.account,{...options,spaceOverride}), pages=await pagesOf(task);
   let page=pages.find(p=>p.label===chat.page) || null;
-  if(!page) page=await newManagedPage(reg,chat.project,chat.account,task,binding,chat.id);
+  if(!page) page=await newManagedPage(reg,chat.project,chat.account,task,binding,chat.id,{allowOverflow:false});
   chat.spaceName=binding.spaceName; chat.spaceId=task.spaceId; chat.lastUsedAt=new Date().toISOString();
   let attached=false;
   try {
@@ -1706,6 +1789,7 @@ async function watchOnce(reg, project=null, account=null, options={}) {
   const rt=await loadRuntime(), results=[];
   const taskGapMs=Math.max(10000,Number(process.env.CHAT_BRIDGE_WATCH_TASK_GAP_MS||10000)||10000);
   const tasks=options.skipTasks?[]:Object.values(rt.tasks||{}).filter(t=>!t.watchdogPausedForUserControl &&
+    String(t.status||"").toUpperCase()!==CAPACITY_WAIT_STATUS &&
     (!options.taskId||t.taskId===options.taskId) &&
     (activeTaskStatus(t.status)||(t.status==="BLOCKED"&&t.watchdogPendingNotification)) && (!project||t.project===project) &&
     (!account||(reg.chats[t.sessionId]?.account||t.account||reg.projects[t.project]?.activeAccount||reg.defaultAccount)===account));
@@ -2332,7 +2416,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     print({...observed,modelSelection:foldedSelection,verifiedResourceSelection:{
       model:chat.verifiedModel||null,effort:chat.verifiedEffort||null,verifiedAt:chat.resourceVerifiedAt||null
     },configuredModel:chat.model||null,configuredEffort:chat.effort||null,project:chat.project||null,account:chat.account,status:chat.status,
-      spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page,task:linked?{taskId:linked.taskId,status:linked.status,completionMode:linked.completionMode||"durable",affinityKey:linked.affinityKey||null,controller:linked.controller||null,replyTo:linked.replyTo||null,escalationTo:linked.escalationTo||null,recoveryAttempts:linked.recoveryAttempts||0}:null});
+      spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page,task:linked?{taskId:linked.taskId,status:linked.status,capacityState:linked.capacityState||null,capacityReason:linked.capacityReason||null,capacityNextRetryAt:linked.capacityNextRetryAt||null,completionMode:linked.completionMode||"durable",affinityKey:linked.affinityKey||null,controller:linked.controller||null,replyTo:linked.replyTo||null,escalationTo:linked.escalationTo||null,recoveryAttempts:linked.recoveryAttempts||0}:null});
   }
   if(cmd==="send"){
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
@@ -2463,7 +2547,10 @@ else if(cmd==="new"){
   if(!first) throw new Error("--message required");
   const conflict=Object.values(reg.chats).find(c=>c.project===p&&c.account===a&&c.role===role&&c.status==="active");
   if(conflict&&!args.includes("--allow-duplicate-role")) throw new Error(`Active role already exists: ${role} (${conflict.id})`);
-  const {task,binding}=await openBoundTask(reg,p,a), page=await newManagedPage(reg,p,a,task,binding,null);
+  let {task,binding}=await openBoundTask(reg,p,a);
+  const allocation=await newManagedPage(reg,p,a,task,binding,null,{allowOverflow:true});
+  let page=allocation?.page||allocation;
+  if(allocation?.overflow){ task=allocation.task; binding=allocation.binding; }
   try {
     await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000});
     await openProjectPage(page,p,binding.projectUrl||null);
@@ -2484,7 +2571,7 @@ else if(cmd==="new"){
     reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model,effort:requestedEffort||applied.effort||null,affinityKey,workgroupId,
       verifiedModel:applied.model||applied.observed?.model||null,verifiedEffort:applied.effort||applied.observed?.effort||null,
       resourceVerifiedAt:new Date().toISOString(),
-      spaceName:binding.spaceName,spaceId:task.spaceId,pageSpaceId:task.spaceId,page:page.label,attachmentEpoch:1,createdAt:new Date().toISOString()};
+      spaceName:binding.spaceName,spaceId:task.spaceId,pageSpaceId:task.spaceId,profileId:binding.profileId||null,page:page.label,attachmentEpoch:1,createdAt:new Date().toISOString()};
     await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:binding.spaceName,lastCommand:"new",lastSession:id});
     print({...reg.chats[id],modelSelection:{
       model:applied.model||applied.observed?.model||null,
@@ -2501,7 +2588,12 @@ else if(cmd==="new"){
 }
 else throw new Error("Unknown command: "+cmd);
 } catch(error) {
-  console.error?.(JSON.stringify({ok:false,deliveryStage:sendAttempted?"SEND_ATTEMPTED":"PRE_SEND",
-    code:String(error?.code||error?.message||"BRIDGE_ERROR").slice(0,200)}));
+  const payload={ok:false,deliveryStage:sendAttempted?"SEND_ATTEMPTED":"PRE_SEND",
+    code:String(error?.code||error?.message||"BRIDGE_ERROR").slice(0,200)};
+  if(error?.status) payload.status=error.status;
+  if(error?.reason) payload.reason=String(error.reason).slice(0,500);
+  if(error?.retryAfterSec!=null) payload.retryAfterSec=Number(error.retryAfterSec);
+  if(error?.nextRetryAt) payload.nextRetryAt=error.nextRetryAt;
+  console.error?.(JSON.stringify(payload));
   throw error;
 }
