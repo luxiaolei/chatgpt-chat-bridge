@@ -395,13 +395,6 @@ function spaceProtection(reg, runtime, binding, task) {
       if(samePhysicalSpace(candidate,binding,task) && candidate?.controlPage) labels.add(candidate.controlPage);
     }
   }
-  for(const chat of Object.values(reg.chats||{})) {
-    if(!samePhysicalSpace(chat,binding,task)) continue;
-    if(chat.status==="active" && chat.page) {
-      labels.add(chat.page);
-      protectedChatIds.add(chat.id);
-    }
-  }
   for(const live of Object.values(runtime.tasks||{})) {
     if(!activeTaskStatus(live.status)) continue;
     const chat=live.sessionId?reg.chats?.[live.sessionId]:null;

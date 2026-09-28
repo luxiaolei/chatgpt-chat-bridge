@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
-test("shared physical Space protection includes every Project and active task page", async()=>{
+test("shared physical Space protection includes controls and active task pages", async()=>{
   const source=await readFile(path.resolve("src/main.js"),"utf8");
   const begin=source.indexOf("function samePhysicalSpace");
   const end=source.indexOf("async function reclaimIdlePageSlot",begin);
@@ -26,6 +26,8 @@ test("shared physical Space protection includes every Project and active task pa
   };
   const runtime={tasks:{tb:{taskId:"tb",project:"B",account:"a",sessionId:"b",role:"worker",status:"RUNNING"}}};
   const protectedSet=spaceProtection(reg,runtime,reg.projects.A.bindings.a,{spaceId:7});
-  for(const label of ["a-control","b-control","a-page","b-page"]) assert.equal(protectedSet.labels.has(label),true,label);
+  for(const label of ["a-control","b-control","b-page"]) assert.equal(protectedSet.labels.has(label),true,label);
+  assert.equal(protectedSet.labels.has("a-page"),false);
   assert.equal(protectedSet.protectedChatIds.has("b"),true);
+  assert.equal(protectedSet.protectedChatIds.has("a"),false);
 });
