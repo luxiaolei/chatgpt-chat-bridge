@@ -190,6 +190,37 @@ test("unknown dispatch, callback and management require exact bound Chat evidenc
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
+test("retired management target is superseded only after a committed controller successor", async()=>{
+  const f=await fixture();
+  try {
+    const parse=r=>{ assert.equal(r.status,0,r.stderr); return JSON.parse(r.stdout); };
+    const management=parse(f.call("control",["broadcast","--project","P","--kind","RELOAD","--message","obsolete reload","--event","obsolete-event","--confirm"])).deliveries[0];
+    const marked=spawnSync("python3",["-c",
+      "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute(\"UPDATE operations SET status='DELIVERY_UNKNOWN',reason='WORKER_EXIT_1' WHERE id=?\",(sys.argv[2],)); d.commit()",
+      path.join(f.state,"bridge.sqlite3"),management.operationId],{encoding:"utf8"});
+    assert.equal(marked.status,0,marked.stderr);
+    const successorScript=`
+import json,sqlite3,sys
+db=sqlite3.connect(sys.argv[1]); row=db.execute("select payload from documents where kind='registry'").fetchone()
+reg=json.loads(row[0]); old=reg['chats']['controller']; old['status']='retired'; old['retiredAt']='2026-09-28T00:00:00Z'
+reg['chats']['successor']={'id':'successor','project':'P','account':'a','role':'conductor','status':'active','model':'Latest','effort':'High'}
+db.execute("update documents set payload=? where kind='registry'",(json.dumps(reg),))
+db.execute("insert into session_successors(old_session_ref,logical_ref,successor_ref,epoch,committed_at) values(?,?,?,?,?)",('controller','project:P:role:conductor','successor',2,'2026-09-28T00:01:00Z'))
+db.execute("insert into logical_sessions(logical_ref,project,role,current_session_ref,epoch,state,updated_at) values(?,?,?,?,?,?,?)",('project:P:role:conductor','P','conductor','successor',2,'ACTIVE','2026-09-28T00:01:00Z'))
+db.commit()
+`;
+    const changed=spawnSync("python3",["-c",successorScript,path.join(f.state,"bridge.sqlite3")],{encoding:"utf8"});
+    assert.equal(changed.status,0,changed.stderr);
+    const outcome=parse(f.call("reconcile",["--operation",management.operationId]));
+    assert.equal(outcome.outcome,"RECONCILED_SUPERSEDED");
+    assert.equal(parse(f.call("status",[management.operationId])).status,"RECONCILED_SUPERSEDED");
+    const status=parse(f.call("control",["status","--project","P"])).projects[0];
+    assert.equal(status.operationSummary.unknown,0);
+    assert.equal(status.operationSummary.reconciledSuperseded,1);
+    assert.notEqual(status.completion.state,"NEEDS_REVIEW");
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
 test("persistent pause/drain blocks new business admission and resume reopens it", async()=>{
   const f=await fixture();
   try{

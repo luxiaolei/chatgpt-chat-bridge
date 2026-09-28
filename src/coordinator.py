@@ -1050,6 +1050,8 @@ def control_status(db, project=None):
                                    if kind=="callback" and status in {"QUEUED","DISPATCHING"})
         unknown_ops = sum(n for (kind,status),n in operation_counts.items()
                           if status in {"DELIVERY_UNKNOWN", "SUPERSEDED"})
+        reconciled_superseded_ops = sum(n for (kind,status),n in operation_counts.items()
+                                        if status == "RECONCILED_SUPERSEDED")
         active_tasks = sum(count for status,count in task_counts.items() if status not in TERMINAL)
         blocked = task_counts.get("BLOCKED",0)
         failed = task_counts.get("FAILED",0)
@@ -1103,7 +1105,10 @@ def control_status(db, project=None):
             },
             "results": results,
             "operations": [{"status": row["status"], "kind": row["kind"], "count": row["n"]} for row in operation_rows],
-            "operationSummary": {"pendingBusiness": pending_business_ops, "pendingCallbacks": pending_callback_ops, "unknown": unknown_ops},
+            "operationSummary": {"pendingBusiness": pending_business_ops, "pendingCallbacks": pending_callback_ops,
+                                  "unknown": unknown_ops,
+                                  **({"reconciledSuperseded": reconciled_superseded_ops}
+                                     if reconciled_superseded_ops else {})},
             "management": {
                 "acknowledged": int((mgmt["acknowledged"] if mgmt and mgmt["acknowledged"] is not None else 0) or 0),
                 "pending": pending_management,
@@ -1118,6 +1123,8 @@ def control_status(db, project=None):
                 "awaitingControllerAck": results["awaitingControllerAck"],
                 "awaitingDurable": awaiting_durable,
                 **({"capacityWaiting": capacity_waiting} if capacity_waiting else {}),
+                **({"reconciledSupersededOperations": reconciled_superseded_ops}
+                   if reconciled_superseded_ops else {}),
             },
             "completion": {
                 "state": completion_state,
@@ -1486,6 +1493,41 @@ def parse_worker_receipt(completed):
     return None
 
 
+def retired_management_successor(db, row):
+    """Return lifecycle evidence for an obsolete management target.
+
+    A retired controller cannot provide a useful read-back target.  Only a
+    committed successor for the same project may supersede a management
+    delivery; ordinary dispatch/callback UNKNOWN records still require Chat
+    evidence.
+    """
+    if row["kind"] != "management" or not row["session_ref"]:
+        return None
+    reg = registry(db)
+    old = (reg.get("chats") or {}).get(row["session_ref"])
+    if not old or old.get("status") != "retired":
+        return None
+    successor_ref = resolve_successor(db, row["session_ref"])
+    successor = (reg.get("chats") or {}).get(successor_ref) if successor_ref else None
+    if not successor or successor.get("status", "active") != "active" or successor.get("project") != row["project"]:
+        return None
+    link = db.execute("SELECT logical_ref,epoch,committed_at FROM session_successors WHERE old_session_ref=?",
+                      (row["session_ref"],)).fetchone()
+    if not link:
+        return None
+    return {
+        "oldSessionRef": row["session_ref"],
+        "successorSessionRef": successor_ref,
+        "logicalRef": link["logical_ref"],
+        "epoch": link["epoch"],
+        "committedAt": link["committed_at"],
+        "oldStatus": old.get("status"),
+        "successorStatus": successor.get("status"),
+        "project": row["project"],
+        "eventId": row["event_id"],
+    }
+
+
 def reconcile_delivery(db, operation_id):
     if os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID") or os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
         raise ValueError("RECONCILE_HOST_LOCAL_REQUIRED")
@@ -1494,6 +1536,28 @@ def reconcile_delivery(db, operation_id):
         raise ValueError("UNKNOWN_OPERATION")
     if row["status"] != "DELIVERY_UNKNOWN" or row["kind"] not in {"dispatch", "callback", "management"}:
         raise ValueError("RECONCILE_REQUIRES_UNKNOWN_DELIVERY")
+    superseded = retired_management_successor(db, row)
+    if superseded:
+        now = stamp()
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            current = db.execute("SELECT status FROM operations WHERE id=?", (operation_id,)).fetchone()
+            if not current or current["status"] != "DELIVERY_UNKNOWN":
+                raise ValueError("OPERATION_CHANGED_DURING_RECONCILIATION")
+            reason = "TARGET_SESSION_RETIRED_SUCCESSOR_ACTIVE"
+            db.execute("INSERT INTO reconciliation_attempts VALUES (?,?,?,?,?,?)",
+                       (str(uuid.uuid4()), operation_id, "RECONCILED_SUPERSEDED", reason,
+                        json.dumps(superseded, ensure_ascii=False), now))
+            db.execute("UPDATE operations SET status='RECONCILED_SUPERSEDED',reason=?,result=?,updated_at=? WHERE id=?",
+                       (reason, json.dumps({"reconciliation": superseded}, ensure_ascii=False), now, operation_id))
+            db.execute("UPDATE management_deliveries SET status='SUPERSEDED',updated_at=? WHERE operation_id=?",
+                       (now, operation_id))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return {"operationId": operation_id, "kind": row["kind"], "outcome": "RECONCILED_SUPERSEDED",
+                "reason": reason, "evidence": superseded}
     expected = hashlib.sha256(" ".join(row["message"].split()).encode()).hexdigest()
     evidence, reason = None, "NO_SESSION_REFERENCE"
     if row["session_ref"]:
