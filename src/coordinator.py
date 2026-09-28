@@ -68,18 +68,33 @@ def account_cooldown_active(db, reg, alias):
     return False
 
 
-def management_mode(db, project):
-    scopes = ("global", "project:" + project)
+def management_mode(db, project, workgroup=None):
+    return _management_mode(db, project, workgroup)
+
+
+def _management_mode(db, project, workgroup=None):
+    scopes = [("global", None), ("project:" + project, None)]
+    reg = registry(db) if workgroup else None
+    if workgroup:
+        groups = (reg.get("projects") or {}).get(project, {}).get("workgroups") or {}
+        current = str(workgroup)
+        seen = set()
+        while current and current not in seen and current in groups:
+            seen.add(current)
+            scopes.append((f"workgroup:{project}:{current}", current))
+            current = str((groups.get(current) or {}).get("parentWorkgroupId") or "").strip() or None
     rows = db.execute(
-        "SELECT scope,mode,epoch,reason,updated_at FROM control_state WHERE scope IN (?,?)",
-        scopes,
+        "SELECT scope,mode,epoch,reason,updated_at FROM control_state WHERE scope IN (%s)" % ",".join("?" for _ in scopes),
+        tuple(scope for scope, _ in scopes),
     ).fetchall()
     priority = {"RUNNING": 0, "DRAINING": 1, "PAUSED": 2}
-    selected = {"mode": "RUNNING", "epoch": 0, "reason": None, "scope": None, "updatedAt": None}
-    for row in rows:
-        if priority.get(row["mode"], 0) >= priority.get(selected["mode"], 0):
+    selected = {"mode": "RUNNING", "epoch": 0, "reason": None, "scope": None, "workgroupId": None, "updatedAt": None}
+    by_scope = {row["scope"]: row for row in rows}
+    for scope, group_id in scopes:
+        row = by_scope.get(scope)
+        if row and priority.get(row["mode"], 0) > priority.get(selected["mode"], 0):
             selected = {"mode": row["mode"], "epoch": row["epoch"], "reason": row["reason"],
-                        "scope": row["scope"], "updatedAt": row["updated_at"]}
+                        "scope": row["scope"], "workgroupId": group_id, "updatedAt": row["updated_at"]}
     return selected
 
 
@@ -140,6 +155,8 @@ def connection(config, state, initialize=True):
         ("original_message", "TEXT"),
         ("force_new", "INTEGER NOT NULL DEFAULT 0"),
         ("rotation_id", "TEXT"),
+        ("control_scope", "TEXT"),
+        ("control_epoch", "INTEGER"),
     ):
         ensure_column(db, "operations", name, declaration)
     db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS operations_active_placement
@@ -165,9 +182,10 @@ def connection(config, state, initialize=True):
     )""")
     db.execute("""CREATE TABLE IF NOT EXISTS logical_sessions (
         logical_ref TEXT PRIMARY KEY, project TEXT NOT NULL, role TEXT NOT NULL,
-        current_session_ref TEXT, epoch INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL DEFAULT 'ACTIVE',
+        current_session_ref TEXT, workgroup_id TEXT, epoch INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL DEFAULT 'ACTIVE',
         pending_session_ref TEXT, handoff_hash TEXT, rotation_id TEXT, updated_at TEXT NOT NULL
     )""")
+    ensure_column(db, "logical_sessions", "workgroup_id", "TEXT")
     ensure_column(db, "logical_sessions", "rotation_id", "TEXT")
     db.execute("""CREATE TABLE IF NOT EXISTS session_successors (
         old_session_ref TEXT PRIMARY KEY, logical_ref TEXT NOT NULL, successor_ref TEXT NOT NULL,
@@ -176,19 +194,53 @@ def connection(config, state, initialize=True):
     db.execute("""CREATE TABLE IF NOT EXISTS task_results (
         task_id TEXT NOT NULL, result_version TEXT NOT NULL, event_id TEXT NOT NULL,
         status TEXT NOT NULL, summary TEXT NOT NULL, github TEXT, next_text TEXT,
-        payload_hash TEXT NOT NULL, callback_operation_id TEXT, callback_status TEXT,
+        payload_hash TEXT NOT NULL, callback_operation_id TEXT, callback_status TEXT, workgroup_id TEXT,
+        owner_ref TEXT, owner_project TEXT, owner_account TEXT,
         callback_delivered_at TEXT, acceptance_status TEXT, acceptance_message TEXT,
         recorded_at TEXT NOT NULL, accepted_at TEXT,
         PRIMARY KEY(task_id,result_version)
     )""")
     ensure_column(db, "task_results", "callback_status", "TEXT")
     ensure_column(db, "task_results", "callback_delivered_at", "TEXT")
+    ensure_column(db, "task_results", "owner_ref", "TEXT")
+    ensure_column(db, "task_results", "owner_project", "TEXT")
+    ensure_column(db, "task_results", "owner_account", "TEXT")
+    ensure_column(db, "task_results", "workgroup_id", "TEXT")
     db.execute("""CREATE TABLE IF NOT EXISTS session_checkpoints (
-        id TEXT PRIMARY KEY, project TEXT NOT NULL, role TEXT NOT NULL, session_ref TEXT,
+        id TEXT PRIMARY KEY, project TEXT NOT NULL, role TEXT NOT NULL, workgroup_id TEXT, session_ref TEXT,
         task_id TEXT, version TEXT NOT NULL, summary TEXT NOT NULL, github TEXT,
         decisions TEXT, next_text TEXT, payload_hash TEXT NOT NULL, created_at TEXT NOT NULL,
-        UNIQUE(project,role,version)
+        UNIQUE(project,role,workgroup_id,version)
     )""")
+    ensure_column(db, "session_checkpoints", "workgroup_id", "TEXT")
+    checkpoint_indexes = list(db.execute("PRAGMA index_list(session_checkpoints)"))
+    for checkpoint_index in checkpoint_indexes:
+        if not checkpoint_index[2]:
+            continue
+        index_name = str(checkpoint_index[1]).replace("'", "''")
+        index_columns = [row[2] for row in db.execute(f"PRAGMA index_info('{index_name}')")]
+        if index_columns != ["project", "role", "version"]:
+            continue
+        try:
+            db.execute("BEGIN")
+            db.execute("DROP TABLE IF EXISTS session_checkpoints_v2")
+            db.execute("""CREATE TABLE session_checkpoints_v2 (
+                id TEXT PRIMARY KEY, project TEXT NOT NULL, role TEXT NOT NULL, workgroup_id TEXT, session_ref TEXT,
+                task_id TEXT, version TEXT NOT NULL, summary TEXT NOT NULL, github TEXT,
+                decisions TEXT, next_text TEXT, payload_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(project,role,workgroup_id,version)
+            )""")
+            db.execute("""INSERT INTO session_checkpoints_v2(
+                id,project,role,workgroup_id,session_ref,task_id,version,summary,github,decisions,next_text,payload_hash,created_at)
+                SELECT id,project,role,workgroup_id,session_ref,task_id,version,summary,github,decisions,next_text,payload_hash,created_at
+                FROM session_checkpoints""")
+            db.execute("DROP TABLE session_checkpoints")
+            db.execute("ALTER TABLE session_checkpoints_v2 RENAME TO session_checkpoints")
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        break
     db.commit()
     return db
 
@@ -237,7 +289,7 @@ def public(row):
                                       "not_before", "attempts", "reason")}
     keys = set(row.keys())
     for key in ("requested_model", "requested_effort", "resource_policy_version", "workgroup_id",
-                "affinity_key", "placement_key", "event_id"):
+                "affinity_key", "placement_key", "event_id", "control_scope", "control_epoch"):
         if key in keys:
             item[key] = row[key]
     return item
@@ -254,6 +306,7 @@ def response(row):
         "requested_model": "requestedModel", "requested_effort": "requestedEffort",
         "resource_policy_version": "resourcePolicyVersion", "workgroup_id": "workgroupId",
         "affinity_key": "affinityKey", "placement_key": "placementKey", "event_id": "eventId",
+        "control_scope": "controlScope", "control_epoch": "controlEpoch",
     }
     for source, target in aliases.items():
         if source in result:
@@ -306,7 +359,7 @@ def clear_capacity_wait(db, task_id):
     db.commit()
 
 
-def control_footer(task_id, caller_ref, role, model, effort, policy_version):
+def control_footer(task_id, caller_ref, role, model, effort, policy_version, workgroup=None):
     lines = [
         "",
         "[CHATBRIDGE CONTROL v1]",
@@ -323,6 +376,8 @@ def control_footer(task_id, caller_ref, role, model, effort, policy_version):
         "- If blocked or unsafe, report BLOCKED instead of inventing success.",
         "[/CHATBRIDGE CONTROL]",
     ]
+    if workgroup:
+        lines.insert(3, f"workgroup_id: {workgroup}")
     return "\n".join(lines)
 
 
@@ -363,7 +418,7 @@ def submit(db, payload):
             raise ValueError("PROJECT_NOT_REGISTERED")
         if project_record.get("archived"):
             raise ValueError("PROJECT_ARCHIVED")
-        mode = management_mode(db, project)
+        mode = management_mode(db, project, workgroup)
         if mode["mode"] in {"PAUSED", "DRAINING"}:
             raise ValueError("ADMISSION_" + mode["mode"])
 
@@ -385,6 +440,8 @@ def submit(db, payload):
         target_chat = (reg.get("chats") or {}).get(target) if target else None
         if target and (not target_chat or target_chat.get("project") != project or target_chat.get("status", "active") != "active"):
             raise ValueError("TARGET_SESSION_NOT_REGISTERED")
+        if target_chat and target_chat.get("workgroupId") != workgroup:
+            raise ValueError("TARGET_WORKGROUP_MISMATCH")
         if target_chat:
             role = target_chat.get("role") or role or target
         if not role:
@@ -398,7 +455,7 @@ def submit(db, payload):
             matches = [chat for chat in (reg.get("chats") or {}).values()
                        if chat.get("project") == project and chat.get("status", "active") == "active"
                        and chat.get("role") == role
-                       and (not workgroup or chat.get("workgroupId") in (None, workgroup))]
+                       and (chat.get("workgroupId") == workgroup if workgroup else not chat.get("workgroupId"))]
             if len(matches) > 1:
                 raise ValueError("AMBIGUOUS_TARGET_ROLE")
             if matches:
@@ -475,15 +532,16 @@ def submit(db, payload):
         if not binding_execution_ready(project_record,bindings[alias]):
             raise ValueError("TARGET_PROJECT_CONTENT_NOT_READY")
 
-        message = original_message + control_footer(task_id, caller, role, requested_model, requested_effort, policy_version)
+        message = original_message + control_footer(task_id, caller, role, requested_model, requested_effort, policy_version, workgroup)
         now = stamp()
         db.execute("""INSERT INTO operations(
             id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,
             role,message,task_id,created_at,updated_at,not_before,requested_model,requested_effort,
-            resource_policy_version,workgroup_id,affinity_key,placement_key,original_message)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            resource_policy_version,workgroup_id,affinity_key,placement_key,original_message,control_scope,control_epoch)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (operation_id,key,digest,"QUEUED",project,alias,stable,caller,target,role,message,task_id,now,now,time.time(),
-             requested_model,requested_effort,policy_version,workgroup,affinity,placement_key,original_message))
+             requested_model,requested_effort,policy_version,workgroup,affinity,placement_key,original_message,
+             mode.get("scope"),mode.get("epoch")))
         row = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
         db.commit()
         return response(row)
@@ -519,6 +577,25 @@ def task_contract(db, task_id):
     }
 
 
+def task_workgroup(task):
+    return str(task.get("workgroupId") or task.get("workgroup") or "").strip() or None
+
+
+def target_matches_task_scope(task, target, reg=None):
+    """Keep legacy tasks scoped, while allowing an explicitly owning root outside a group."""
+    expected = task_workgroup(task)
+    actual = str((target or {}).get("workgroupId") or "").strip() or None
+    if expected == actual:
+        return True
+    if not expected or actual:
+        return False
+    explicit = str(task.get("replyToSessionRef") or task.get("controllerSessionRef") or "").strip()
+    if explicit and explicit == (target or {}).get("id"):
+        return True
+    root_role = (((reg or {}).get("projects") or {}).get(task.get("project")) or {}).get("rootController") or "conductor"
+    return (target or {}).get("role") == root_role
+
+
 def resolve_callback_target(db, reg, task, requested=None):
     explicit = task.get("replyToSessionRef") or task.get("controllerSessionRef")
     target_ref = requested or explicit
@@ -546,19 +623,31 @@ def callback(db, payload):
     if not task:
         raise ValueError("CALLBACK_TASK_NOT_REGISTERED")
     reg = registry(db)
-    target_ref = resolve_callback_target(db, reg, task, requested_target)
+    explicit = str(task.get("replyToSessionRef") or task.get("controllerSessionRef") or "").strip() or None
+    if explicit and requested_target and requested_target != explicit:
+        raise ValueError("CALLBACK_TARGET_MISMATCH")
+    contract_ref = explicit or requested_target
+    if contract_ref:
+        target_ref = resolve_successor(db, contract_ref)
+    else:
+        try:
+            target_ref = resolve_callback_target(db, reg, task, None)
+        except ValueError as error:
+            if str(error) != "CALLBACK_TARGET_AMBIGUOUS":
+                raise
+            target_ref = None
     target = (reg.get("chats") or {}).get(target_ref)
-    if not target or target.get("status", "active") != "active":
-        raise ValueError("CALLBACK_TARGET_NOT_REGISTERED")
-    if target.get("project") != task.get("project"):
+    if target and target.get("project") != task.get("project"):
         raise ValueError("CALLBACK_PROJECT_MISMATCH")
-    alias = target.get("account")
+    if target and not target_matches_task_scope(task, target, reg):
+        raise ValueError("CALLBACK_WORKGROUP_MISMATCH")
+    alias = target.get("account") if target else task.get("account")
     identity = ((reg.get("accounts") or {}).get(alias) or {}).get("identity")
     if not identity:
         raise ValueError("CALLBACK_ACCOUNT_UNVERIFIED")
     digest = hashlib.sha256(message.encode()).hexdigest()
     stable_event = event_id or digest
-    key = "callback:" + task_id + ":" + target_ref + ":" + stable_event
+    key = "callback:" + task_id + ":" + (target_ref or "UNRESOLVED") + ":" + stable_event
     db.execute("BEGIN IMMEDIATE")
     try:
         prior = db.execute("SELECT * FROM operations WHERE request_key=?", (key,)).fetchone()
@@ -568,10 +657,11 @@ def callback(db, payload):
         operation_id, now = str(uuid.uuid4()), stamp()
         db.execute("""INSERT INTO operations(
             id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,
-            role,message,task_id,created_at,updated_at,not_before,kind,event_id,original_message)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (operation_id,key,digest,"QUEUED",target["project"],alias,account_id(identity),target_ref,target_ref,
-             target.get("role") or target_ref,message,task_id,now,now,time.time(),"callback",event_id,message))
+            role,message,task_id,created_at,updated_at,not_before,kind,event_id,workgroup_id,original_message)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (operation_id,key,digest,"QUEUED" if target and target.get("status", "active") == "active" else "WAITING_ROUTE",
+             task.get("project"),alias,account_id(identity),contract_ref or target_ref or "",contract_ref or target_ref or "",
+             target.get("role") if target else (task.get("role") or contract_ref or "callback"),message,task_id,now,now,time.time(),"callback",event_id,task_workgroup(task),message))
         row = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
         db.commit()
         return response(row)
@@ -585,19 +675,21 @@ def checkpoint(db, payload):
     project=str(payload.get("project") or "").strip() or None
     role=str(payload.get("role") or "").strip() or None
     session_ref=str(payload.get("sessionRef") or "").strip() or None
+    workgroup=str(payload.get("workgroupId") or "").strip() or None
     if task_id:
         task=task_contract(db,task_id)
         if not task: raise ValueError("CHECKPOINT_TASK_NOT_REGISTERED")
         project=project or task.get("project")
         role=role or task.get("role")
         session_ref=session_ref or task.get("sessionId")
+        workgroup=workgroup or task_workgroup(task)
     summary=str(payload.get("summary") or "").strip()
     github=str(payload.get("github") or "").strip()
     decisions=str(payload.get("decisions") or "").strip()
     next_text=str(payload.get("next") or "").strip()
     if not project or not role or not summary:
         raise ValueError("checkpoint requires project, role and summary")
-    raw={"project":project,"role":role,"sessionRef":session_ref,"taskId":task_id,"summary":summary,
+    raw={"project":project,"role":role,"workgroupId":workgroup,"sessionRef":session_ref,"taskId":task_id,"summary":summary,
          "github":github,"decisions":decisions,"next":next_text}
     digest=hashlib.sha256(json.dumps(raw,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     version=str(payload.get("version") or ("cp-"+digest[:16])).strip()
@@ -609,36 +701,141 @@ def checkpoint(db, payload):
         identity=((reg.get("accounts") or {}).get(chat.get("account")) or {}).get("identity") if chat else None
         if not identity or account_id(identity)!=origin:
             raise ValueError("CHECKPOINT_ORIGIN_ACCOUNT_MISMATCH")
-    prior=db.execute("SELECT * FROM session_checkpoints WHERE project=? AND role=? AND version=?",
-                     (project,role,version)).fetchone()
+    prior=db.execute("SELECT * FROM session_checkpoints WHERE project=? AND role=? AND version=? AND coalesce(workgroup_id,'')=coalesce(?,'')",
+                     (project,role,version,workgroup)).fetchone()
     if prior:
         if prior["payload_hash"]!=digest: raise ValueError("CHECKPOINT_VERSION_CONFLICT")
         return dict(prior)
     checkpoint_id=str(uuid.uuid4()); now=stamp()
     db.execute("""INSERT INTO session_checkpoints(
-        id,project,role,session_ref,task_id,version,summary,github,decisions,next_text,payload_hash,created_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (checkpoint_id,project,role,session_ref,task_id,version,summary,github or None,decisions or None,next_text or None,digest,now))
+        id,project,role,workgroup_id,session_ref,task_id,version,summary,github,decisions,next_text,payload_hash,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (checkpoint_id,project,role,workgroup,session_ref,task_id,version,summary,github or None,decisions or None,next_text or None,digest,now))
     db.commit()
-    return {"checkpointId":checkpoint_id,"project":project,"role":role,"sessionRef":session_ref,
+    return {"checkpointId":checkpoint_id,"project":project,"role":role,"workgroupId":workgroup,"sessionRef":session_ref,
             "taskId":task_id,"version":version,"summary":summary,"github":github or None,
             "decisions":decisions or None,"next":next_text or None,"createdAt":now}
 
 
-def latest_checkpoint(db, project, role):
+def latest_checkpoint(db, project, role, workgroup=None):
     row=db.execute("""SELECT * FROM session_checkpoints WHERE project=? AND role=?
-                      ORDER BY created_at DESC,id DESC LIMIT 1""",(project,role)).fetchone()
+                      AND coalesce(workgroup_id,'')=coalesce(?,'')
+                      ORDER BY created_at DESC,id DESC LIMIT 1""",(project,role,workgroup)).fetchone()
     return dict(row) if row else None
 
 
 def checkpoint_handoff(row):
     if not row: return None
     lines=[f"Checkpoint version: {row['version']}",f"Summary: {row['summary']}"]
+    if row.get("workgroup_id"): lines.insert(1, "Workgroup: " + row["workgroup_id"])
     if row.get("github"): lines.append("GitHub/durable evidence: "+row["github"])
     if row.get("decisions"): lines.append("Decisions/constraints: "+row["decisions"])
     if row.get("next_text"): lines.append("Next: "+row["next_text"])
     if row.get("task_id"): lines.append("Task: "+row["task_id"])
     return "\n".join(lines)
+
+
+def result_owner(db, reg, task):
+    """Resolve the persisted owner without treating a missing Chat as root."""
+    explicit = str(task.get("replyToSessionRef") or task.get("controllerSessionRef") or "").strip() or None
+    if explicit:
+        target_ref = resolve_successor(db, explicit)
+        target = (reg.get("chats") or {}).get(target_ref)
+        if target and target.get("project") != task.get("project"):
+            raise ValueError("CALLBACK_PROJECT_MISMATCH")
+        return explicit, target_ref, target
+    root_role = ((reg.get("projects") or {}).get(task.get("project")) or {}).get("rootController") or "conductor"
+    matches = [chat for chat in (reg.get("chats") or {}).values()
+               if chat.get("project") == task.get("project") and chat.get("status", "active") == "active"
+               and chat.get("role") == root_role]
+    if len(matches) == 1:
+        target = matches[0]
+        return target["id"], target["id"], target
+    return None, None, None
+
+
+def result_message(task_id, status, version, summary, github, next_text):
+    lines = ["[RESULT]", f"task_id: {task_id}", f"status: {status}", f"result_version: {version}"]
+    if github:
+        lines.append("github: " + github)
+    lines.append("summary: " + summary)
+    if next_text:
+        lines.append("next: " + next_text)
+    lines += ["", f"Controller acknowledgement: chat-bridge queue ack --task {task_id} --result-version {version} --caller-ref YOUR_SESSION_REF --status ACCEPTED --message <review>"]
+    return "\n".join(lines)
+
+
+def materialize_pending_callbacks(db):
+    """Attach saved results to their original owner once routing is available."""
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        reg = registry(db)
+        rows = db.execute("""SELECT * FROM task_results
+                           WHERE callback_operation_id IS NULL
+                             AND (callback_status IS NULL OR callback_status='WAITING_ROUTE')
+                           ORDER BY recorded_at,event_id""").fetchall()
+        for row in rows:
+            task = task_contract(db, row["task_id"])
+            if not task:
+                continue
+            owner_ref = row["owner_ref"]
+            target_ref = resolve_successor(db, owner_ref) if owner_ref else None
+            target = (reg.get("chats") or {}).get(target_ref) if target_ref else None
+            if not target_ref:
+                owner_ref, target_ref, target = result_owner(db, reg, task)
+            if not target or target.get("status", "active") != "active":
+                continue
+            if target.get("project") != (row["owner_project"] or task.get("project")):
+                continue
+            if not target_matches_task_scope(task, target, reg):
+                continue
+            alias = target.get("account")
+            identity = ((reg.get("accounts") or {}).get(alias) or {}).get("identity")
+            if not identity:
+                continue
+            message = result_message(row["task_id"], row["status"], row["result_version"], row["summary"], row["github"] or "", row["next_text"] or "")
+            request_key = "callback:" + row["task_id"] + ":" + target_ref + ":" + row["event_id"]
+            operation_id, now = str(uuid.uuid4()), stamp()
+            db.execute("""INSERT INTO operations(
+                id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,
+                role,message,task_id,created_at,updated_at,not_before,kind,event_id,workgroup_id,original_message)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (operation_id, request_key, hashlib.sha256(message.encode()).hexdigest(), "QUEUED",
+                 target["project"], alias, account_id(identity), target_ref, target_ref,
+                 target.get("role") or target_ref, message, row["task_id"], now, now, time.time(),
+                 "callback", row["event_id"], task_workgroup(task), message))
+            db.execute("""UPDATE task_results SET callback_operation_id=?,callback_status=?,owner_ref=coalesce(owner_ref,?),
+                          owner_project=coalesce(owner_project,?),owner_account=coalesce(owner_account,?)
+                          WHERE task_id=? AND result_version=? AND callback_operation_id IS NULL""",
+                       (operation_id, "QUEUED", owner_ref or target_ref, target["project"], alias,
+                        row["task_id"], row["result_version"]))
+        pending = db.execute("SELECT * FROM operations WHERE kind='callback' AND status='WAITING_ROUTE'").fetchall()
+        for row in pending:
+            task = task_contract(db, row["task_id"])
+            if not task:
+                continue
+            owner_ref = str(task.get("replyToSessionRef") or task.get("controllerSessionRef") or row["caller_ref"] or "").strip() or None
+            if not owner_ref:
+                owner_ref, target_ref, target = result_owner(db, reg, task)
+            else:
+                target_ref = resolve_successor(db, owner_ref)
+                target = (reg.get("chats") or {}).get(target_ref) if target_ref else None
+            if not target or target.get("status", "active") != "active" or target.get("project") != row["project"]:
+                continue
+            if not target_matches_task_scope(task, target, reg):
+                continue
+            alias = target.get("account")
+            identity = ((reg.get("accounts") or {}).get(alias) or {}).get("identity")
+            if not identity:
+                continue
+            db.execute("""UPDATE operations SET status='QUEUED',account_alias=?,account_id=?,caller_ref=?,session_ref=?,
+                          role=?,not_before=?,reason=NULL,updated_at=? WHERE id=? AND status='WAITING_ROUTE'""",
+                       (alias, account_id(identity), target_ref, target_ref, target.get("role") or target_ref,
+                        time.time(), stamp(), row["id"]))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
 
 def result(db, payload):
@@ -672,41 +869,50 @@ def result(db, payload):
     if prior:
         if prior["payload_hash"] != digest:
             raise ValueError("RESULT_VERSION_CONFLICT")
-        callback_row = db.execute("SELECT * FROM operations WHERE id=?", (prior["callback_operation_id"],)).fetchone()
-        return {"resultRecorded":True,"taskId":task_id,"resultVersion":version,"eventId":prior["event_id"],
+        callback_row = db.execute("SELECT * FROM operations WHERE id=?", (prior["callback_operation_id"],)).fetchone() if prior["callback_operation_id"] else None
+        return {"resultRecorded":True,"taskId":task_id,"workgroupId":prior["workgroup_id"],"resultVersion":version,"eventId":prior["event_id"],
                 "callback":response(callback_row) if callback_row else None,
-                "acceptanceStatus":prior["acceptance_status"]}
+                "acceptanceStatus":prior["acceptance_status"],"callbackStatus":prior["callback_status"]}
 
     reg = registry(db)
-    target_ref = resolve_callback_target(db, reg, task, None)
-    target = (reg.get("chats") or {}).get(target_ref)
-    if not target or target.get("status", "active") != "active":
-        raise ValueError("CALLBACK_TARGET_NOT_REGISTERED")
-    alias = target.get("account")
-    identity = ((reg.get("accounts") or {}).get(alias) or {}).get("identity")
-    if not identity:
-        raise ValueError("CALLBACK_ACCOUNT_UNVERIFIED")
-    lines = ["[RESULT]",f"task_id: {task_id}",f"status: {status}",f"result_version: {version}"]
-    if github: lines.append("github: "+github)
-    lines.append("summary: "+summary)
-    if next_text: lines.append("next: "+next_text)
-    lines += ["",f"Controller acknowledgement: chat-bridge queue ack --task {task_id} --result-version {version} --caller-ref YOUR_SESSION_REF --status ACCEPTED --message <review>"]
-    message="\n".join(lines)
-    operation_id, now = str(uuid.uuid4()), stamp()
-    request_key="callback:"+task_id+":"+target_ref+":"+event_id
+    workgroup = task_workgroup(task)
+    owner_ref, target_ref, target = result_owner(db, reg, task)
+    if target and target.get("status", "active") == "active" and target.get("project") != task.get("project"):
+        raise ValueError("CALLBACK_PROJECT_MISMATCH")
+    alias = target.get("account") if target else None
+    identity = ((reg.get("accounts") or {}).get(alias) or {}).get("identity") if alias else None
+    message = result_message(task_id, status, version, summary, github, next_text)
+    operation_id = None
+    now = stamp()
     db.execute("BEGIN IMMEDIATE")
     try:
-        db.execute("""INSERT INTO operations(
-            id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,
-            role,message,task_id,created_at,updated_at,not_before,kind,event_id,original_message)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (operation_id,request_key,hashlib.sha256(message.encode()).hexdigest(),"QUEUED",target["project"],alias,
-             account_id(identity),target_ref,target_ref,target.get("role") or target_ref,message,task_id,
-             now,now,time.time(),"callback",event_id,message))
+        prior = db.execute("SELECT * FROM task_results WHERE task_id=? AND result_version=?", (task_id,version)).fetchone()
+        if prior:
+            if prior["payload_hash"] != digest:
+                raise ValueError("RESULT_VERSION_CONFLICT")
+            db.commit()
+            callback_row = db.execute("SELECT * FROM operations WHERE id=?", (prior["callback_operation_id"],)).fetchone() if prior["callback_operation_id"] else None
+            return {"resultRecorded":True,"taskId":task_id,"workgroupId":prior["workgroup_id"],"resultVersion":version,"eventId":prior["event_id"],
+                    "callback":response(callback_row) if callback_row else None,
+                    "acceptanceStatus":prior["acceptance_status"],"callbackStatus":prior["callback_status"]}
+
+        if target and target.get("status", "active") == "active" and target.get("project") == task.get("project") and target_matches_task_scope(task, target, reg) and identity:
+            operation_id = str(uuid.uuid4())
+            request_key = "callback:" + task_id + ":" + target_ref + ":" + event_id
+            db.execute("""INSERT INTO operations(
+                id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,
+                role,message,task_id,created_at,updated_at,not_before,kind,event_id,workgroup_id,original_message)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (operation_id,request_key,hashlib.sha256(message.encode()).hexdigest(),"QUEUED",target["project"],alias,
+                 account_id(identity),target_ref,target_ref,target.get("role") or target_ref,message,task_id,
+                 now,now,time.time(),"callback",event_id,workgroup,message))
+        callback_status = "QUEUED" if operation_id else "WAITING_ROUTE"
         db.execute("""INSERT INTO task_results(
             task_id,result_version,event_id,status,summary,github,next_text,payload_hash,
-            callback_operation_id,recorded_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (task_id,version,event_id,status,summary,github or None,next_text or None,digest,operation_id,now))
+            callback_operation_id,callback_status,workgroup_id,owner_ref,owner_project,owner_account,recorded_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (task_id,version,event_id,status,summary,github or None,next_text or None,digest,operation_id,
+             callback_status,workgroup,owner_ref,task.get("project"),alias,now))
         row = db.execute("SELECT payload FROM documents WHERE kind='runtime'").fetchone()
         rt = json.loads(row[0])
         live = (rt.get("tasks") or {}).get(task_id)
@@ -717,6 +923,9 @@ def result(db, payload):
             live["resultEventId"]=event_id
             live["resultRecordedAt"]=now
             live["resultSummary"]=summary
+            live["controllerAckStatus"]=None
+            live["controllerAckAt"]=None
+            live["controllerAckMessage"]=None
             if github: live["github"]=github
             live["externalResponsePending"]=False
             live["updatedAt"]=now
@@ -726,8 +935,9 @@ def result(db, payload):
         db.rollback()
         raise
     callback_row=db.execute("SELECT * FROM operations WHERE id=?",(operation_id,)).fetchone()
-    return {"resultRecorded":True,"taskId":task_id,"resultVersion":version,"eventId":event_id,
-            "reportedStatus":status,"callback":response(callback_row),"acceptanceStatus":None}
+    return {"resultRecorded":True,"taskId":task_id,"workgroupId":workgroup,"resultVersion":version,"eventId":event_id,
+            "reportedStatus":status,"callback":response(callback_row) if callback_row else None,
+            "callbackStatus":callback_status,"acceptanceStatus":None}
 
 
 def result_ack(db, payload):
@@ -742,11 +952,20 @@ def result_ack(db, payload):
     if not result_row:
         raise ValueError("RESULT_NOT_REGISTERED")
     task=task_contract(db,task_id)
+    if not task:
+        raise ValueError("RESULT_TASK_NOT_REGISTERED")
     reg=registry(db)
-    expected=resolve_callback_target(db,reg,task,None)
+    owner_ref=result_row["owner_ref"]
+    expected=resolve_successor(db, owner_ref) if owner_ref else result_owner(db,reg,task)[1]
+    if not expected:
+        raise ValueError("RESULT_ACK_OWNER_UNAVAILABLE")
     if caller!=expected:
         raise ValueError("RESULT_ACK_TARGET_MISMATCH")
     chat=(reg.get("chats") or {}).get(expected)
+    if not chat or chat.get("status", "active") != "active" or chat.get("project") != task.get("project"):
+        raise ValueError("RESULT_ACK_OWNER_UNAVAILABLE")
+    if not target_matches_task_scope(task, chat, reg) or (result_row["workgroup_id"] or None) != task_workgroup(task):
+        raise ValueError("RESULT_ACK_WORKGROUP_MISMATCH")
     identity=((reg.get("accounts") or {}).get(chat.get("account")) or {}).get("identity") if chat else None
     origin=os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
     if origin and (not identity or account_id(identity)!=origin):
@@ -754,8 +973,22 @@ def result_ack(db, payload):
     now=stamp()
     db.execute("BEGIN IMMEDIATE")
     try:
-        db.execute("""UPDATE task_results SET acceptance_status=?,acceptance_message=?,accepted_at=?
-                      WHERE task_id=? AND result_version=?""",(status,message,now,task_id,version))
+        current=db.execute("SELECT acceptance_status,acceptance_message,accepted_at FROM task_results WHERE task_id=? AND result_version=?",
+                           (task_id,version)).fetchone()
+        if current and current["acceptance_status"]:
+            if current["acceptance_status"]!=status or (current["acceptance_message"] or "")!=message:
+                raise ValueError("RESULT_ALREADY_ACKED")
+            db.commit()
+            return {"taskId":task_id,"resultVersion":version,"status":status,"callerRef":expected,"message":message,
+                    "acceptedAt":current["accepted_at"],"idempotent":True}
+        latest=db.execute("""SELECT result_version,recorded_at FROM task_results
+                            WHERE task_id=? ORDER BY recorded_at DESC,event_id DESC LIMIT 1""",(task_id,)).fetchone()
+        if latest and latest["result_version"]!=version and latest["recorded_at"]>result_row["recorded_at"]:
+            raise ValueError("STALE_RESULT_ACK")
+        changed=db.execute("""UPDATE task_results SET acceptance_status=?,acceptance_message=?,accepted_at=?
+                      WHERE task_id=? AND result_version=? AND acceptance_status IS NULL""",(status,message,now,task_id,version))
+        if changed.rowcount != 1:
+            raise ValueError("RESULT_ACK_CONFLICT")
         row=db.execute("SELECT payload FROM documents WHERE kind='runtime'").fetchone()
         rt=json.loads(row[0])
         live=(rt.get("tasks") or {}).get(task_id)
@@ -788,6 +1021,7 @@ def configure(config, state, payload):
     accounts = next_value.setdefault("accounts", {})
     projects = next_value.setdefault("projects", {})
     kind = payload.get("type")
+    dry_run = bool(payload.get("dryRun"))
     project_key = str(payload.get("project") or "").strip()
     if kind == "account":
         stable = payload.get("accountId")
@@ -844,18 +1078,54 @@ def configure(config, state, payload):
         group_id = str(payload.get("workgroupId") or "").strip()
         name = str(payload.get("name") or "").strip()
         controller = str(payload.get("controllerSessionRef") or "").strip() or None
+        parent = str(payload.get("parentWorkgroupId") or "").strip() or None
+        charter = str(payload.get("charterIssue") or "").strip() or None
+        existing = (current.get("workgroups") or {}).get(group_id) if current else None
+        expected = payload.get("expectedRevision", 0)
+        if isinstance(expected, bool) or not isinstance(expected, int) or expected < 0:
+            raise ValueError("INVALID_WORKGROUP_REVISION")
         if not current or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}", group_id) or not name or len(name) > 100:
             raise ValueError("INVALID_WORKGROUP")
         if controller and ((next_value.get("chats") or {}).get(controller) or {}).get("project") != project_key:
             raise ValueError("WORKGROUP_CONTROLLER_NOT_REGISTERED")
-        current.setdefault("workgroups", {})[group_id] = {"name": name, "controllerSessionRef": controller}
-        result = {"workgroup": {"id": group_id, "name": name, "controllerSessionRef": controller}}
+        if parent and (parent == group_id or parent not in (current.get("workgroups") or {})):
+            raise ValueError("WORKGROUP_PARENT_NOT_REGISTERED")
+        seen_parents = set()
+        cursor = parent
+        while cursor and cursor not in seen_parents:
+            if cursor == group_id:
+                raise ValueError("WORKGROUP_PARENT_CYCLE")
+            seen_parents.add(cursor)
+            cursor = str(((current.get("workgroups") or {}).get(cursor) or {}).get("parentWorkgroupId") or "").strip() or None
+        actual_revision = int((existing or {}).get("revision") or 0)
+        desired = {"name": name, "controllerSessionRef": controller, "parentWorkgroupId": parent, "charterIssue": charter}
+        diff = {key: {"before": (existing or {}).get(key), "after": value}
+                for key, value in desired.items() if (existing or {}).get(key) != value}
+        if existing and not diff:
+            result = {"workgroup": {"id": group_id, **existing}, "changed": False,
+                      "preview": {"changed": False, "diff": {}}}
+        else:
+            if existing and expected != actual_revision:
+                raise ValueError("WORKGROUP_REVISION_CONFLICT")
+            candidate = {**desired, "revision": actual_revision + 1, "epoch": int((existing or {}).get("epoch") or 0) + 1}
+            result = {"workgroup": {"id": group_id, **candidate}, "changed": True,
+                      "preview": {"changed": True, "diff": diff}}
+            if not dry_run:
+                current.setdefault("workgroups", {})[group_id] = candidate
     else:
         raise ValueError("UNKNOWN_CONFIG_TYPE")
+    if dry_run:
+        result["dryRun"] = True
+        return result
     written = subprocess.run([sys.executable, store, "put", str(config), str(state), "registry"],
                              input=json.dumps({"base": base, "next": next_value}), capture_output=True, text=True, timeout=20)
     if written.returncode:
         raise ValueError(written.stderr.strip() or "CONFIG_WRITE_FAILED")
+    if kind == "workgroup":
+        readback = json.loads(subprocess.run([sys.executable, store, "get", str(config), str(state), "registry"],
+                                             check=True, capture_output=True, text=True, timeout=20).stdout)
+        actual = ((readback.get("projects") or {}).get(project_key) or {}).get("workgroups", {}).get(group_id)
+        result["readback"] = {"workgroup": {"id": group_id, **actual}} if actual else None
     return result
 
 
@@ -870,7 +1140,7 @@ def put_registry_projection(config, state, base, next_value):
         raise ValueError(completed.stderr.strip() or "REGISTRY_WRITE_FAILED")
 
 
-def authorize_control(db, caller_ref=None, project=None, global_scope=False):
+def authorize_control(db, caller_ref=None, project=None, global_scope=False, workgroup=None):
     origin=os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
     if not origin:
         return {"authorized":True,"mode":"HOST_LOCAL"}
@@ -886,6 +1156,19 @@ def authorize_control(db, caller_ref=None, project=None, global_scope=False):
         raise ValueError("CONTROL_ORIGIN_MISMATCH")
     if caller in set(reg.get("managementAdmins") or []):
         return {"authorized":True,"mode":"MANAGEMENT_ADMIN","callerRef":caller}
+    if workgroup:
+        if global_scope or not project:
+            raise ValueError("WORKGROUP_SCOPE_REQUIRES_PROJECT")
+        group = ((reg.get("projects") or {}).get(project) or {}).get("workgroups", {}).get(workgroup)
+        if not group:
+            raise ValueError("WORKGROUP_NOT_REGISTERED")
+        root_role = ((reg.get("projects") or {}).get(project) or {}).get("rootController") or "conductor"
+        current_root = current_controller_ref(db, reg, project, root_role)
+        if caller == current_root:
+            return {"authorized":True,"mode":"PROJECT_ROOT","callerRef":caller,"project":project,"workgroupId":workgroup}
+        if caller == group.get("controllerSessionRef"):
+            return {"authorized":True,"mode":"WORKGROUP_CONTROLLER","callerRef":caller,"project":project,"workgroupId":workgroup}
+        raise ValueError("WORKGROUP_CONTROLLER_REQUIRED")
     if not global_scope and project:
         cfg=(reg.get("projects") or {}).get(project) or {}
         root_role=cfg.get("rootController") or "conductor"
@@ -946,11 +1229,13 @@ def attest_project_binding(config,state,db,project,account,context_version,tools
     return {"project":project,"account":account,"readiness":readiness,"executionReady":ready}
 
 
-def set_control_mode(db, project, mode, reason=None):
+def set_control_mode(db, project, mode, reason=None, workgroup=None):
     mode = str(mode or "").upper()
     if mode not in {"RUNNING", "PAUSED", "DRAINING"}:
         raise ValueError("INVALID_CONTROL_MODE")
-    scope = "global" if not project else "project:" + project
+    if workgroup and not project:
+        raise ValueError("WORKGROUP_SCOPE_REQUIRES_PROJECT")
+    scope = (f"workgroup:{project}:{workgroup}" if workgroup else ("global" if not project else "project:" + project))
     current = db.execute("SELECT epoch FROM control_state WHERE scope=?", (scope,)).fetchone()
     epoch = (current["epoch"] if current else 0) + 1
     db.execute("""INSERT INTO control_state(scope,mode,epoch,reason,updated_at) VALUES (?,?,?,?,?)
@@ -993,27 +1278,31 @@ def enqueue_stop_requests(db, project, task_id=None):
     return {"project":project,"taskId":task_id,"stopRequests":targets}
 
 
-def current_controller_ref(db, reg, project, role):
+def current_controller_ref(db, reg, project, role, workgroup=None):
     row = db.execute("""SELECT current_session_ref FROM logical_sessions
                         WHERE project=? AND role=? AND state='ACTIVE'
-                        ORDER BY epoch DESC LIMIT 1""", (project, role)).fetchone()
+                          AND ((workgroup_id IS NULL AND ? IS NULL) OR workgroup_id=?)
+                        ORDER BY epoch DESC LIMIT 1""", (project, role, workgroup, workgroup)).fetchone()
     if row and row["current_session_ref"]:
         chat = (reg.get("chats") or {}).get(row["current_session_ref"])
         if chat and chat.get("status", "active") == "active":
             return row["current_session_ref"]
     matches = [chat["id"] for chat in (reg.get("chats") or {}).values()
                if chat.get("project") == project and chat.get("role") == role
+               and (chat.get("workgroupId") == workgroup if workgroup else not chat.get("workgroupId"))
                and chat.get("status", "active") == "active"]
     if len(matches) == 1:
         return matches[0]
     return None
 
 
-def control_status(db, project=None):
+def control_status(db, project=None, workgroup=None):
     reg, rt = registry(db), runtime(db)
     projects = []
     for name, cfg in (reg.get("projects") or {}).items():
         if project and name != project:
+            continue
+        if workgroup and workgroup not in (cfg.get("workgroups") or {}):
             continue
         tasks = [task for task in (rt.get("tasks") or {}).values() if task.get("project") == name]
         task_counts = {}
@@ -1025,12 +1314,13 @@ def control_status(db, project=None):
         ).fetchall()
         operation_counts = {(row["kind"], row["status"]): row["n"] for row in operation_rows}
         result_rows = db.execute("""SELECT tr.* FROM task_results tr
-            JOIN operations op ON op.task_id=tr.task_id AND op.kind='dispatch'
-            WHERE op.project=? GROUP BY tr.task_id,tr.result_version""", (name,)).fetchall()
+            LEFT JOIN operations op ON op.task_id=tr.task_id AND op.kind='dispatch'
+            WHERE coalesce(op.project,tr.owner_project)=? GROUP BY tr.task_id,tr.result_version""", (name,)).fetchall()
         results = {
             "recorded": len(result_rows),
             "callbackPending": sum(1 for row in result_rows if not row["callback_status"]
-                                   or row["callback_status"] in {"QUEUED","DISPATCHING"}),
+                                   or row["callback_status"] in {"QUEUED","DISPATCHING","WAITING_ROUTE"}),
+            "callbackWaitingRoute": sum(1 for row in result_rows if row["callback_status"] == "WAITING_ROUTE"),
             "callbackUnknown": sum(1 for row in result_rows if row["callback_status"]=="DELIVERY_UNKNOWN"),
             "awaitingControllerAck": sum(1 for row in result_rows
                                          if row["callback_status"]=="DELIVERED" and not row["acceptance_status"]),
@@ -1061,6 +1351,51 @@ def control_status(db, project=None):
         capacity_waiting = task_counts.get(CAPACITY_WAITING,0)
         pending_management = int((mgmt["pending"] if mgmt and mgmt["pending"] is not None else 0) or 0)
         control = management_mode(db, name)
+        workgroup_rows = []
+        for group_id, group in (cfg.get("workgroups") or {}).items():
+            if workgroup and group_id != workgroup:
+                continue
+            scoped = [task for task in tasks if task.get("workgroupId") == group_id]
+            statuses = {}
+            for task in scoped:
+                status = str(task.get("status") or "UNKNOWN").upper()
+                statuses[status] = statuses.get(status, 0) + 1
+            scoped_results = [row for row in result_rows if (row["workgroup_id"] or None) == group_id]
+            scoped_ops = db.execute("""SELECT kind,status,count(*) AS n FROM operations
+                                      WHERE project=? AND workgroup_id=? GROUP BY kind,status""", (name, group_id)).fetchall()
+            scoped_op_reasons = db.execute("""SELECT DISTINCT reason FROM operations
+                                              WHERE project=? AND workgroup_id=? AND reason IS NOT NULL""", (name, group_id)).fetchall()
+            scoped_waiting = sorted({str(task.get("blockedReason") or task.get("capacityReason") or "")
+                                     for task in scoped if task.get("blockedReason") or task.get("capacityReason")})
+            scoped_waiting.extend(sorted({"CALLBACK_" + str(row["callback_status"])
+                                          for row in scoped_results if row["callback_status"] in {"WAITING_ROUTE", "DELIVERY_UNKNOWN"}}))
+            scoped_waiting.extend(sorted({str(row["reason"]) for row in scoped_op_reasons if row["reason"]}))
+            owner_contract = group.get("controllerSessionRef")
+            owner_current = resolve_successor(db, owner_contract) if owner_contract else None
+            owner_chat = (reg.get("chats") or {}).get(owner_current) if owner_current else None
+            workgroup_rows.append({
+                "workgroupId": group_id,
+                "name": group.get("name") or group_id,
+                "charterIssue": group.get("charterIssue"),
+                "parentWorkgroupId": group.get("parentWorkgroupId"),
+                "revision": group.get("revision", 0),
+                "epoch": group.get("epoch", 0),
+                "ownerSessionRef": owner_current if owner_chat and owner_chat.get("status", "active") == "active" else owner_contract,
+                "ownerContractSessionRef": owner_contract,
+                "control": management_mode(db, name, group_id),
+                "tasks": {"total": len(scoped), "byStatus": statuses},
+                "results": {
+                    "recorded": len(scoped_results),
+                    "awaitingControllerAck": sum(1 for row in scoped_results if row["callback_status"] == "DELIVERED" and not row["acceptance_status"]),
+                    "callbackPending": sum(1 for row in scoped_results if row["callback_status"] in {None, "QUEUED", "DISPATCHING", "WAITING_ROUTE"}),
+                    "callbackUnknown": sum(1 for row in scoped_results if row["callback_status"] == "DELIVERY_UNKNOWN"),
+                    "accepted": sum(1 for row in scoped_results if row["acceptance_status"] == "ACCEPTED"),
+                },
+                "operations": [{"kind": row["kind"], "status": row["status"], "count": row["n"]} for row in scoped_ops],
+                "waitingReasons": scoped_waiting,
+                "updatedAt": max([str(task.get("updatedAt") or "") for task in scoped] +
+                                  [str(row["recorded_at"] or "") for row in scoped_results], default=None),
+            })
 
         if blocked or failed or unknown_ops or results["callbackUnknown"] or results["rejectedOrBlocked"]:
             completion_state = "NEEDS_REVIEW"
@@ -1113,6 +1448,7 @@ def control_status(db, project=None):
                 "acknowledged": int((mgmt["acknowledged"] if mgmt and mgmt["acknowledged"] is not None else 0) or 0),
                 "pending": pending_management,
             },
+            "workgroups": workgroup_rows,
             "attention": {
                 "blockedTasks": blocked,
                 "failedTasks": failed,
@@ -1251,24 +1587,27 @@ def acknowledge_management(db, payload):
 def rotation_prepare(db, payload):
     project = str(payload.get("project") or "").strip()
     role = str(payload.get("role") or "").strip()
+    workgroup = str(payload.get("workgroupId") or "").strip() or None
     handoff = str(payload.get("handoff") or "").strip()
     if not project or not role:
         raise ValueError("project and role are required")
     if not handoff:
-        handoff=checkpoint_handoff(latest_checkpoint(db,project,role)) or ""
+        handoff=checkpoint_handoff(latest_checkpoint(db,project,role,workgroup)) or ""
     if not handoff:
         raise ValueError("handoff required when no checkpoint exists")
     reg = registry(db)
     cfg = (reg.get("projects") or {}).get(project)
     if not cfg:
         raise ValueError("PROJECT_NOT_REGISTERED")
-    logical_ref = str(payload.get("logicalRef") or f"project:{project}:role:{role}")
-    current = current_controller_ref(db, reg, project, role)
+    logical_ref = str(payload.get("logicalRef") or (f"project:{project}:workgroup:{workgroup}:role:{role}" if workgroup else f"project:{project}:role:{role}"))
+    current = current_controller_ref(db, reg, project, role, workgroup)
     if not current:
         raise ValueError("CURRENT_ROLE_SESSION_NOT_UNIQUE")
     old_chat = (reg.get("chats") or {}).get(current)
     if not old_chat:
         raise ValueError("CURRENT_ROLE_SESSION_NOT_REGISTERED")
+    if not target_matches_task_scope({"project": project, "workgroupId": workgroup, "controllerSessionRef": current}, old_chat, reg):
+        raise ValueError("ROTATION_WORKGROUP_MISMATCH")
     existing = db.execute("SELECT * FROM logical_sessions WHERE logical_ref=?", (logical_ref,)).fetchone()
     if existing and existing["state"] == "ROTATING":
         raise ValueError("ROTATION_ALREADY_PENDING")
@@ -1300,25 +1639,25 @@ def rotation_prepare(db, payload):
     db.execute("BEGIN IMMEDIATE")
     try:
         db.execute("""INSERT INTO logical_sessions(
-            logical_ref,project,role,current_session_ref,epoch,state,pending_session_ref,handoff_hash,rotation_id,updated_at)
-            VALUES (?,?,?,?,?,'ROTATING',NULL,?,?,?)
+            logical_ref,project,role,current_session_ref,workgroup_id,epoch,state,pending_session_ref,handoff_hash,rotation_id,updated_at)
+            VALUES (?,?,?,?,?,?,'ROTATING',NULL,?,?,?)
             ON CONFLICT(logical_ref) DO UPDATE SET project=excluded.project,role=excluded.role,
               current_session_ref=excluded.current_session_ref,state='ROTATING',pending_session_ref=NULL,
               handoff_hash=excluded.handoff_hash,rotation_id=excluded.rotation_id,updated_at=excluded.updated_at""",
-            (logical_ref,project,role,current,epoch,handoff_hash,rotation_id,now))
+            (logical_ref,project,role,current,workgroup,epoch,handoff_hash,rotation_id,now))
         db.execute("""INSERT INTO operations(
             id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,
             role,message,task_id,created_at,updated_at,not_before,kind,requested_model,requested_effort,
-            resource_policy_version,placement_key,original_message,force_new,rotation_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            resource_policy_version,workgroup_id,placement_key,original_message,force_new,rotation_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (operation_id,key,handoff_hash,"QUEUED",project,old_chat["account"],account_id(identity),
              current,None,role,message,task_id,now,now,time.time(),"rotation",requested_model,requested_effort,
-             "rotation-v1",logical_placement_key(project,None,role,rotation_id),handoff,1,rotation_id))
+             "rotation-v1",workgroup,logical_placement_key(project,workgroup,role,rotation_id),handoff,1,rotation_id))
         db.commit()
     except Exception:
         db.rollback()
         raise
-    return {"rotationId": rotation_id, "logicalRef": logical_ref, "project": project, "role": role,
+    return {"rotationId": rotation_id, "logicalRef": logical_ref, "project": project, "role": role, "workgroupId": workgroup,
             "currentSessionRef": current, "operationId": operation_id, "state": "ROTATING", "nextEpoch": epoch+1}
 
 
@@ -1335,6 +1674,8 @@ def rotation_ack(db, payload, config, state):
     successor_chat = (reg.get("chats") or {}).get(successor)
     if not successor_chat or successor_chat.get("project") != row["project"]:
         raise ValueError("ROTATION_SUCCESSOR_NOT_REGISTERED")
+    if not target_matches_task_scope({"project": row["project"], "workgroupId": row["workgroup_id"], "controllerSessionRef": row["current_session_ref"]}, successor_chat, reg):
+        raise ValueError("ROTATION_SUCCESSOR_WORKGROUP_MISMATCH")
     identity = ((reg.get("accounts") or {}).get(successor_chat.get("account")) or {}).get("identity")
     origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
     if origin and (not identity or account_id(identity) != origin):
@@ -1622,9 +1963,19 @@ def reconcile_delivery(db, operation_id):
 
 
 def work_one(db):
+    materialize_pending_callbacks(db)
     row = claim(db)
     if row is None:
         return {"status": "IDLE"}
+    if row["kind"] in {"dispatch", "rotation"}:
+        mode = management_mode(db, row["project"], row["workgroup_id"])
+        if mode["mode"] in {"PAUSED", "DRAINING"}:
+            return finish(db, row, "QUEUED", "ADMISSION_" + mode["mode"], 5)
+        if row["control_scope"] != mode.get("scope") or int(row["control_epoch"] or 0) != int(mode.get("epoch") or 0):
+            db.execute("UPDATE operations SET control_scope=?,control_epoch=?,updated_at=? WHERE id=?",
+                       (mode.get("scope"), mode.get("epoch"), stamp(), row["id"]))
+            db.commit()
+            row = db.execute("SELECT * FROM operations WHERE id=?", (row["id"],)).fetchone()
     bridge = os.environ.get("CHAT_BRIDGE_BIN") or str(pathlib.Path.home() / ".local/bin/chat-bridge")
     args = [bridge]
     if row["kind"] in {"callback", "management"}:
@@ -1767,7 +2118,7 @@ def main():
             value = submit(db, payload)
         elif command == "checkpoint":
             if args:
-                names={"--task":"taskId","--project":"project","--role":"role","--session-ref":"sessionRef",
+                names={"--task":"taskId","--project":"project","--role":"role","--workgroup":"workgroupId","--session-ref":"sessionRef",
                        "--version":"version","--summary":"summary","--github":"github",
                        "--decisions":"decisions","--next":"next"}
                 if len(args)%2 or any(args[i] not in names for i in range(0,len(args),2)):
@@ -1821,6 +2172,10 @@ def main():
                                   JOIN operations o ON o.id=r.callback_operation_id
                                   WHERE o.account_id=? AND r.callback_status='DELIVERED'
                                   AND r.acceptance_status IS NULL""",(stable,))]
+            if projects:
+                unacked.extend(row[0] for row in db.execute("""SELECT event_id FROM task_results
+                                      WHERE callback_status='WAITING_ROUTE' AND owner_project IN (%s)
+                                      AND acceptance_status IS NULL""" % ",".join("?" for _ in projects), projects).fetchall())
             invalid_bindings=[]
             for name in projects:
                 for bound_alias in aliases:
@@ -1834,26 +2189,28 @@ def main():
                    "invalidBindings":invalid_bindings,"controls":controls,
                    "safe":not live and not pending and not unknown and not unacked and not invalid_bindings and not runnable}
         elif command == "admission-check":
-            project = (args[0] if args else "") or (registry(db).get("defaultProject") or "")
+            project = (args[0] if args and not args[0].startswith("--") else "") or (registry(db).get("defaultProject") or "")
+            workgroup = args[args.index("--workgroup") + 1] if "--workgroup" in args and args.index("--workgroup") + 1 < len(args) else None
             if not project:
                 raise ValueError("project required")
-            mode = management_mode(db, project)
+            mode = management_mode(db, project, workgroup)
             if mode["mode"] in {"PAUSED", "DRAINING"}:
                 raise ValueError("ADMISSION_" + mode["mode"])
             value = {"ok": True, "project": project, "control": mode}
         elif command == "control":
             sub = args[0] if args else "status"
             raw = args[1:]
-            flags = {item for item in raw if item in {"--all", "--confirm"}}
+            flags = {item for item in raw if item in {"--all", "--confirm", "--dry-run"}}
             pairs = [item for item in raw if item not in flags]
             if len(pairs) % 2:
                 raise ValueError("control options must be name/value pairs")
             opts = {pairs[i]: pairs[i+1] for i in range(0,len(pairs),2)}
             project = opts.get("--project")
+            workgroup = opts.get("--workgroup")
             caller_ref = opts.get("--caller-ref")
             global_scope = "--all" in flags
             if sub == "status":
-                value = control_status(db, project)
+                value = control_status(db, project, workgroup)
             elif sub in {"admin-list","admin-add","admin-remove"}:
                 admin_sub = {"admin-list":"list","admin-add":"add","admin-remove":"remove"}[sub]
                 value = configure_admin(config,state,db,admin_sub,opts.get("--target-ref"),"--confirm" in flags)
@@ -1862,9 +2219,9 @@ def main():
                     raise ValueError("control mutation requires --confirm")
                 if not project and not global_scope:
                     raise ValueError("provide --project or --all")
-                authorize_control(db,caller_ref,project,global_scope)
+                authorize_control(db,caller_ref,project,global_scope,workgroup)
                 mode = {"pause":"PAUSED","drain":"DRAINING","resume":"RUNNING"}[sub]
-                value = set_control_mode(db, None if global_scope else project, mode, opts.get("--reason"))
+                value = set_control_mode(db, None if global_scope else project, mode, opts.get("--reason"), workgroup)
             elif sub == "broadcast":
                 if "--confirm" in flags:
                     authorize_control(db,caller_ref,project,not bool(project))
@@ -1881,6 +2238,24 @@ def main():
                     "callerRef": opts.get("--caller-ref"),
                     "status": opts.get("--status") or "ACKNOWLEDGED",
                     "message": opts.get("--message") or "",
+                })
+            elif sub == "workgroup":
+                if "--confirm" not in flags:
+                    raise ValueError("workgroup mutation requires --confirm")
+                if not project:
+                    raise ValueError("workgroup requires --project")
+                authorize_control(db,caller_ref,project,False)
+                try:
+                    expected_revision = int(opts.get("--expected-revision") or 0)
+                except ValueError:
+                    raise ValueError("INVALID_WORKGROUP_REVISION")
+                value = configure(config, state, {
+                    "type": "workgroup", "project": project,
+                    "workgroupId": opts.get("--workgroup-id"), "name": opts.get("--name"),
+                    "controllerSessionRef": opts.get("--controller-session-ref"),
+                    "parentWorkgroupId": opts.get("--parent-workgroup"),
+                    "charterIssue": opts.get("--charter-issue"), "expectedRevision": expected_revision,
+                    "dryRun": "--dry-run" in flags,
                 })
             elif sub == "requirements":
                 if "--confirm" not in flags:
@@ -1908,10 +2283,11 @@ def main():
             elif sub == "rotation-prepare":
                 if "--confirm" not in flags:
                     raise ValueError("rotation prepare requires --confirm")
-                authorize_control(db,caller_ref,project,False)
+                authorize_control(db,caller_ref,project,False,opts.get("--workgroup"))
                 value = rotation_prepare(db,{
                     "project": project,
                     "role": opts.get("--role"),
+                    "workgroupId": opts.get("--workgroup"),
                     "logicalRef": opts.get("--logical-ref"),
                     "handoff": opts.get("--handoff"),
                     "model": opts.get("--model"),

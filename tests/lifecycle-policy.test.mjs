@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import "../src/lifecycle-policy.js";
 
-const { normalizeLifecycle, reconcileCandidate } = globalThis.__CHAT_BRIDGE_LIFECYCLE_POLICY__;
+const { normalizeLifecycle, reconcileCandidate, reconcileCandidates } = globalThis.__CHAT_BRIDGE_LIFECYCLE_POLICY__;
 
 test("lifecycle defaults are conservative", () => {
   assert.deepEqual(normalizeLifecycle({ rootController: "00-g" }), {
@@ -52,4 +52,48 @@ test("minimum gap defers but preserves pending event", () => {
   const out = reconcileCandidate("HZ OS", project, tasks, runtime, Date.parse("2026-09-24T07:00:00Z"));
   assert.equal(out?.ready, false);
   assert.equal(Math.round(out?.waitSec), 180);
+});
+
+test("workgroup reconcile ignores another workgroup's active task", () => {
+  const project = {
+    rootController: "00-g",
+    lifecycle: { autoReconcile: true, minGapSec: 0 },
+    workgroups: { A: { controllerSessionRef: "owner-a" }, B: { controllerSessionRef: "owner-b" } },
+  };
+  const tasks = [
+    { taskId: "A-1", project: "P", workgroupId: "A", role: "worker", status: "COMPLETE",
+      github: "https://example/a", updatedAt: "2026-09-24T07:00:00Z" },
+    { taskId: "B-1", project: "P", workgroupId: "B", role: "worker", status: "RUNNING" },
+  ];
+  const a = reconcileCandidate("P", project, tasks, {}, Date.parse("2026-09-24T08:00:00Z"),
+    { workgroupId: "A", ownerSessionRef: "owner-a" });
+  assert.equal(a?.workgroupId, "A");
+  assert.equal(a?.ownerSessionRef, "owner-a");
+  assert.equal(reconcileCandidate("P", project, tasks, {}, Date.now(), { workgroupId: "B", ownerSessionRef: "owner-b" }), null);
+  assert.deepEqual(reconcileCandidates("P", project, tasks, {}, Date.parse("2026-09-24T08:00:00Z")).map(x => x.workgroupId), ["A"]);
+});
+
+test("group result recorded wakes its owner without requiring ACK", () => {
+  const project = { rootController: "00-g", lifecycle: { autoReconcile: true, minGapSec: 0 },
+    workgroups: { A: { controllerSessionRef: "owner-a" }, B: { controllerSessionRef: "owner-b" } } };
+  const tasks = [
+    { taskId: "A-1", project: "P", workgroupId: "A", role: "worker", status: "RESULT_RECORDED",
+      resultVersion: "1", resultRecordedAt: "2026-09-24T07:00:00Z" },
+    { taskId: "B-1", project: "P", workgroupId: "B", role: "worker", status: "RUNNING" },
+  ];
+  const a = reconcileCandidate("P", project, tasks, {}, Date.parse("2026-09-24T08:00:00Z"),
+    { workgroupId: "A", ownerSessionRef: "owner-a" });
+  assert.equal(a?.resultVersion, "1");
+  assert.equal(a?.latestTaskId, "A-1");
+});
+
+test("legacy reconcile remains independent from grouped work", () => {
+  const project = { rootController: "00-g", lifecycle: { autoReconcile: true, minGapSec: 0 },
+    workgroups: { A: { controllerSessionRef: "owner-a" } } };
+  const tasks = [
+    { taskId: "legacy-1", project: "P", role: "worker", status: "COMPLETE", github: "https://example/legacy", updatedAt: "2026-09-24T07:00:00Z" },
+    { taskId: "A-1", project: "P", workgroupId: "A", role: "worker", status: "RUNNING" },
+  ];
+  const legacy = reconcileCandidate("P", project, tasks, {}, Date.parse("2026-09-24T08:00:00Z"), { legacyOnly: true });
+  assert.equal(legacy?.latestTaskId, "legacy-1");
 });

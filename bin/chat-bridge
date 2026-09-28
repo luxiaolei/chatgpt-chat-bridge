@@ -192,7 +192,12 @@ fi
 if [[ "$CMD" == "send" || "$CMD" == "stream" || "$CMD" == "new" ]] && [[ " ${*} " != *" --background "* ]]; then
   COORDINATOR="${MAIN:h}/coordinator.py"
   PROJECT_ARG="$(python3 -c 'import sys; a=sys.argv[1:]; print(a[a.index("--project")+1] if "--project" in a and a.index("--project")+1<len(a) else "")' "$@")"
-  python3 "$COORDINATOR" admission-check "$CONFIG_DIR" "$STATE_DIR" "$PROJECT_ARG" >/dev/null
+  WORKGROUP_ARG="$(python3 -c 'import sys; a=sys.argv[1:]; print(a[a.index("--workgroup")+1] if "--workgroup" in a and a.index("--workgroup")+1<len(a) else "")' "$@")"
+  if [[ -n "$WORKGROUP_ARG" ]]; then
+    python3 "$COORDINATOR" admission-check "$CONFIG_DIR" "$STATE_DIR" "$PROJECT_ARG" --workgroup "$WORKGROUP_ARG" >/dev/null
+  else
+    python3 "$COORDINATOR" admission-check "$CONFIG_DIR" "$STATE_DIR" "$PROJECT_ARG" >/dev/null
+  fi
 fi
 
 if (( TOUCH_UI )) && [[ "$CMD" != "watch" ]]; then

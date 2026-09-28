@@ -1611,69 +1611,112 @@ function projectReconcileMessage(candidate) {
     "[PROJECT EVENT]",
     "event: RECONCILE_REQUIRED",
     `project: ${candidate.project}`,
-    `root_controller: ${candidate.rootRole}`,
+    candidate.workgroupId ? `workgroup: ${candidate.workgroupId}` : "scope: legacy-project",
+    candidate.ownerSessionRef ? `owner_session_ref: ${candidate.ownerSessionRef}` : `root_controller: ${candidate.rootRole}`,
     `reason: ${candidate.reason}`,
     `latest_task: ${candidate.latestTaskId||"unknown"}`,
     `latest_durable: ${candidate.latestGithub||"unknown"}`,
     `progress_at: ${candidate.progressAt}`,
+    candidate.resultVersion ? `result_version: ${candidate.resultVersion}` : "",
     "",
-    "All non-root project tasks are terminal and new durable progress exists since the previous reconcile event.",
-    "Re-read the project's durable source of truth, reconcile current controller/task state, and dispatch only genuinely runnable next work according to this project's own governance. Do not replay completed work."
+    candidate.workgroupId
+      ? "This workgroup has new durable progress and no unfinished work in its scope. Re-read the workgroup charter and durable source of truth, then dispatch only genuinely runnable next work. Other workgroups may continue independently."
+      : "All non-root project tasks are terminal and new durable progress exists since the previous reconcile event. Re-read the project's durable source of truth, reconcile current controller/task state, and dispatch only genuinely runnable next work according to this project's own governance. Do not replay completed work."
   ];
   if(candidate.instruction) lines.push("", "Project policy:", candidate.instruction);
   return lines.join("\n");
 }
 
-async function maybeNotifyProjectReconcile(reg, projectName, account=null) {
+function resolveLifecycleOwner(reg, group, projectName) {
+  let ref=group?.controllerSessionRef||group?.ownerSessionRef||null;
+  const seen=new Set();
+  while(ref && !seen.has(ref)) {
+    seen.add(ref);
+    const chat=reg.chats?.[ref];
+    if(chat?.project===projectName && (chat.status||"active")==="active") return chat;
+    ref=chat?.successorSessionRef||null;
+  }
+  const role=String(group?.controllerRole||"").trim();
+  if(role) {
+    const matches=Object.values(reg.chats||{}).filter(chat=>chat.project===projectName && chat.role===role && (chat.status||"active")==="active");
+    if(matches.length===1) return matches[0];
+  }
+  return null;
+}
+
+async function maybeNotifyProjectReconcile(reg, projectName, account=null, workgroupId=null) {
   const project=projectRecord(reg,projectName);
   const policy=normalizeLifecycle(project);
   if(!policy.autoReconcile) return null;
   const rt=await loadRuntime(), runtimeProject=rt.projects[projectName]||{};
-  const candidate=reconcileCandidate(projectName,project,Object.values(rt.tasks||{}),runtimeProject,Date.now());
+  const group=workgroupId ? (project.workgroups||{})[workgroupId] : null;
+  const scopedRuntime=workgroupId ? ((runtimeProject.workgroups||{})[workgroupId]||{}) : runtimeProject;
+  const lifecycleScope=workgroupId
+    ? {workgroupId,ownerSessionRef:group?.controllerSessionRef}
+    : (Object.keys(project.workgroups||{}).length ? {legacyOnly:true} : null);
+  const candidate=reconcileCandidate(projectName,project,Object.values(rt.tasks||{}),scopedRuntime,Date.now(),
+    lifecycleScope);
   if(!candidate) return null;
   if(!candidate.ready) return {project:projectName,event:candidate.event,state:"DEFERRED_MIN_GAP",waitSec:candidate.waitSec,eventKey:candidate.eventKey};
+  if(workgroupId && !group) return {project:projectName,workgroupId,event:candidate.event,state:"WORKGROUP_NOT_REGISTERED",eventKey:candidate.eventKey};
   const a=account||project.activeAccount||reg.defaultAccount||DEFAULT_ACCOUNT;
   try {
-    const root=resolveChat(reg,candidate.rootRole,projectName,a);
-    await assertWebAvailable(root.account||a);
-    const {page}=await ensurePage(reg,root,{pauseOnUserControl:true});
-    const observed=await observeSession(root,page,null);
+    const owner=workgroupId
+      ? resolveLifecycleOwner(reg,group,projectName)
+      : resolveChat(reg,candidate.rootRole,projectName,a);
+    if(!owner) return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"OWNER_UNRESOLVED",eventKey:candidate.eventKey};
+    await assertWebAvailable(owner.account||a);
+    const {page}=await ensurePage(reg,owner,{pauseOnUserControl:true});
+    const observed=await observeSession(owner,page,null);
     if(observed.generating || !observed.inputReady || String(observed.composerText||"").trim()) {
-      return {project:projectName,event:candidate.event,state:"ROOT_BUSY",eventKey:candidate.eventKey,
+      return {project:projectName,workgroupId:workgroupId||null,ownerSessionRef:owner.id,event:candidate.event,state:workgroupId?"OWNER_BUSY":"ROOT_BUSY",eventKey:candidate.eventKey,
         rootState:observed.sessionState,composerNonempty:!!String(observed.composerText||"").trim()};
     }
     const delivery=await sendMessage(page,projectReconcileMessage(candidate));
     const latest=await loadRuntime();
-    latest.projects[projectName]={...(latest.projects[projectName]||{}),
+    const currentProject={...(latest.projects[projectName]||{})};
+    const state=workgroupId ? {...((currentProject.workgroups||{})[workgroupId]||{})} : currentProject;
+    Object.assign(state, {
       lastReconcileProgressAt:candidate.progressAt,lastReconcileEventKey:candidate.eventKey,
       lastReconcileNotifiedAt:new Date().toISOString(),
-      lastReconcileNotification:{sent:true,rootRole:candidate.rootRole,delivery}};
-    delete latest.projects[projectName].pendingReconcileEvent;
-    delete latest.projects[projectName].lastReconcileError;
-    delete latest.projects[projectName].lastReconcileErrorAt;
+      lastReconcileResultVersion:candidate.resultVersion||null,
+      lastReconcileNotification:{sent:true,rootRole:workgroupId?null:candidate.rootRole,ownerSessionRef:owner.id,workgroupId:workgroupId||null,delivery}
+    });
+    delete state.pendingReconcileEvent;
+    delete state.lastReconcileError;
+    delete state.lastReconcileErrorAt;
+    if(workgroupId) currentProject.workgroups={...(currentProject.workgroups||{}),[workgroupId]:state};
+    else Object.assign(currentProject,state);
+    latest.projects[projectName]=currentProject;
     await saveRuntime(latest);
-    return {project:projectName,event:candidate.event,state:"SENT",eventKey:candidate.eventKey,
-      latestTaskId:candidate.latestTaskId,rootRole:candidate.rootRole,delivery};
+    return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"SENT",eventKey:candidate.eventKey,
+      latestTaskId:candidate.latestTaskId,rootRole:workgroupId?null:candidate.rootRole,ownerSessionRef:owner.id,delivery};
   } catch(error) {
     const latest=await loadRuntime();
+    const currentProject={...(latest.projects[projectName]||{})};
+    const state=workgroupId ? {...((currentProject.workgroups||{})[workgroupId]||{})} : currentProject;
     if(error?.code==="SPACE_IN_USER_CONTROL") {
-      latest.projects[projectName]={...(latest.projects[projectName]||{}),
-        pendingReconcileEvent:candidate,watchdogPausedForUserControl:true,
+      Object.assign(state,{pendingReconcileEvent:candidate,watchdogPausedForUserControl:true,
         watchdogPausedAt:new Date().toISOString(),
         watchdogPausedSpace:error.spaceName||null,
-        watchdogPausedOwnership:error.ownership||null};
-      delete latest.projects[projectName].lastReconcileError;
-      delete latest.projects[projectName].lastReconcileErrorAt;
+        watchdogPausedOwnership:error.ownership||null});
+      delete state.lastReconcileError;
+      delete state.lastReconcileErrorAt;
+      if(workgroupId) currentProject.workgroups={...(currentProject.workgroups||{}),[workgroupId]:state};
+      else Object.assign(currentProject,state);
+      latest.projects[projectName]=currentProject;
       await saveRuntime(latest);
-      return {project:projectName,event:candidate.event,state:"USER_CONTROLLED",paused:true,
+      return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"USER_CONTROLLED",paused:true,
         spaceName:error.spaceName||null,ownership:error.ownership||null,eventKey:candidate.eventKey};
     }
-    latest.projects[projectName]={...(latest.projects[projectName]||{}),
-      pendingReconcileEvent:candidate,lastReconcileError:String(error?.message||error),
-      lastReconcileErrorAt:new Date().toISOString()};
+    Object.assign(state,{pendingReconcileEvent:candidate,lastReconcileError:String(error?.message||error),
+      lastReconcileErrorAt:new Date().toISOString()});
+    if(workgroupId) currentProject.workgroups={...(currentProject.workgroups||{}),[workgroupId]:state};
+    else Object.assign(currentProject,state);
+    latest.projects[projectName]=currentProject;
     await saveRuntime(latest);
-    if(error?.code==="WEB_RATE_LIMITED") return {project:projectName,event:candidate.event,state:"WEB_COOLDOWN",account:error.account,eventKey:candidate.eventKey};
-    return {project:projectName,event:candidate.event,state:"NOT_SENT",error:String(error?.message||error),eventKey:candidate.eventKey};
+    if(error?.code==="WEB_RATE_LIMITED") return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"WEB_COOLDOWN",account:error.account,eventKey:candidate.eventKey};
+    return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"NOT_SENT",error:String(error?.message||error),eventKey:candidate.eventKey};
   }
 }
 
@@ -1905,17 +1948,28 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
   }
   const lifecycleProjects=options.skipLifecycle?[]:(project ? [project] : Object.keys(reg.projects||{}).filter(p=>normalizeLifecycle(reg.projects[p]).autoReconcile));
   for(const p of lifecycleProjects) {
-    if(account && activeAccount(reg,p,null)!==account) continue;
-    if(options.autoRecover===false) {
-      const latest=await loadRuntime();
-      const candidate=reconcileCandidate(p,projectRecord(reg,p),Object.values(latest.tasks||{}),latest.projects[p]||{},Date.now());
-      if(candidate) results.push({project:p,projectLifecycle:{...candidate,state:candidate.ready?"DRY_RUN_READY":"DRY_RUN_DEFERRED"}});
-      continue;
+    const projectCfg=projectRecord(reg,p);
+    const workgroups=Object.keys(projectCfg.workgroups||{});
+    const scopes=workgroups.length ? [...workgroups,null] : [null];
+    for(const workgroupId of scopes) {
+      const group=workgroupId ? projectCfg.workgroups[workgroupId] : null;
+      if(account && !workgroupId && activeAccount(reg,p,null)!==account) continue;
+      const lifecycleOwner=workgroupId ? resolveLifecycleOwner(reg,group,p) : null;
+      if(account && workgroupId && lifecycleOwner && lifecycleOwner.account!==account) continue;
+      if(options.autoRecover===false) {
+        const latest=await loadRuntime();
+        const candidate=reconcileCandidate(p,projectCfg,Object.values(latest.tasks||{}),
+          workgroupId ? ((latest.projects[p]?.workgroups||{})[workgroupId]||{}) : (latest.projects[p]||{}),Date.now(),
+          workgroupId ? {workgroupId,ownerSessionRef:group?.controllerSessionRef}
+            : (Object.keys(projectCfg.workgroups||{}).length ? {legacyOnly:true} : null));
+        if(candidate) results.push({project:p,workgroupId:workgroupId||null,projectLifecycle:{...candidate,state:candidate.ready?"DRY_RUN_READY":"DRY_RUN_DEFERRED"}});
+        continue;
+      }
+      const waitMs=Math.max(0,taskGapMs-(Date.now()-lastVisitedAt));
+      if(waitMs && lastVisitedAt) await new Promise(resolve=>setTimeout(resolve,waitMs));
+      const lifecycle=await maybeNotifyProjectReconcile(reg,p,account,workgroupId);
+      if(lifecycle) { lastVisitedAt=Date.now(); results.push({project:p,workgroupId:workgroupId||null,projectLifecycle:lifecycle}); }
     }
-    const waitMs=Math.max(0,taskGapMs-(Date.now()-lastVisitedAt));
-    if(waitMs && lastVisitedAt) await new Promise(resolve=>setTimeout(resolve,waitMs));
-    const lifecycle=await maybeNotifyProjectReconcile(reg,p,account);
-    if(lifecycle) { lastVisitedAt=Date.now(); results.push({project:p,projectLifecycle:lifecycle}); }
   }
   if(options.autoRecover!==false) {
     const closed=await detachTerminalTaskPages(reg,project,account);
@@ -2051,7 +2105,7 @@ const accountArg=opt("account",null);
 try {
 
 if(cmd==="help"){
-  print("chat-bridge commands: init [--root-controller ROLE], project ensure, policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, event list, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE], watch, read, status, send [--task ID --controller ROLE], ask, model, effort, stop, retry, recover, resend, new, archive, retire, delete, forget; space: show|bind|prune|gc|consolidate|scan|map|restore|label");
+  print("chat-bridge commands: init [--root-controller ROLE], project ensure, policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, event list, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE --workgroup ID], watch, read, status, send [--task ID --controller ROLE --workgroup ID], ask, model, effort, stop, retry, recover, resend, new [--workgroup ID], control status|pause|drain|resume|workgroup [--project NAME --workgroup ID], queue submit|result|ack, archive, retire, delete, forget; space: show|bind|prune|gc|consolidate|scan|map|restore|label");
 }
 else if(cmd==="topology"){
   print(TOPOLOGY.topologyPreview(reg,await loadRuntime()));
@@ -2545,7 +2599,8 @@ else if(cmd==="new"){
   const p=project; if(!p) throw new Error("--project required");
   const a=activeAccount(reg,p,accountArg), name=opt("name","New chat"), role=opt("role",name), first=opt("message",null), affinityKey=opt("affinity-key",null), workgroupId=opt("workgroup",null);
   if(!first) throw new Error("--message required");
-  const conflict=Object.values(reg.chats).find(c=>c.project===p&&c.account===a&&c.role===role&&c.status==="active");
+  const conflict=Object.values(reg.chats).find(c=>c.project===p&&c.account===a&&c.role===role&&c.status==="active"&&
+    (c.workgroupId||null)===(workgroupId||null));
   if(conflict&&!args.includes("--allow-duplicate-role")) throw new Error(`Active role already exists: ${role} (${conflict.id})`);
   let {task,binding}=await openBoundTask(reg,p,a);
   const allocation=await newManagedPage(reg,p,a,task,binding,null,{allowOverflow:true});
