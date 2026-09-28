@@ -235,6 +235,34 @@ test("persistent pause/drain blocks new business admission and resume reopens it
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
+test("workgroup scope is exact and group pause blocks queued sends", async()=>{
+  const f=await fixture();
+  try{
+    const getRegistry=()=>JSON.parse(spawnSync("python3",[path.resolve("src/state-store.py"),"get",f.config,f.state,"registry"],{encoding:"utf8"}).stdout);
+    const putRegistry=(next)=>{
+      const base=getRegistry();
+      const put=spawnSync("python3",[path.resolve("src/state-store.py"),"put",f.config,f.state,"registry"],{input:JSON.stringify({base,next}),encoding:"utf8"});
+      assert.equal(put.status,0,put.stderr);
+    };
+    const reg=getRegistry();
+    reg.chats.owner={id:"owner",project:"P",account:"a",role:"group-owner",status:"active",model:"Latest",effort:"High",workgroupId:"A"};
+    putRegistry(reg);
+    let r=f.call("configure",[],{type:"workgroup",project:"P",workgroupId:"A",name:"Group A",controllerSessionRef:"owner",charterIssue:"#31"});
+    assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(r.stdout).workgroup.revision,1);
+    r=f.call("configure",[],{type:"workgroup",project:"P",workgroupId:"A",name:"Group A",controllerSessionRef:"owner",charterIssue:"#31",expectedRevision:1});
+    assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(r.stdout).changed,false);
+    r=f.call("submit",[],{requestId:"wg-1",callerRef:"owner",role:"worker",workgroup:"A",message:"group work"});
+    assert.equal(r.status,0,r.stderr); const op=JSON.parse(r.stdout); assert.equal(op.workgroupId,"A");
+    r=f.call("control",["pause","--project","P","--workgroup","A","--caller-ref","owner","--confirm"]);
+    assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(r.stdout).scope,"workgroup:P:A");
+    r=f.call("work-one"); assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(r.stdout).status,"QUEUED");
+    r=f.call("control",["resume","--project","P","--workgroup","A","--caller-ref","controller","--confirm"]);
+    assert.equal(r.status,0,r.stderr);
+    spawnSync("python3",["-c","import sqlite3,sys,time; d=sqlite3.connect(sys.argv[1]); d.execute('update operations set not_before=? where id=?',(time.time(),sys.argv[2])); d.commit()",path.join(f.state,"bridge.sqlite3"),op.operationId]);
+    r=f.call("work-one"); assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(r.stdout).status,"SENT");
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
 test("management broadcast previews, delivers through background send, and records ACK", async()=>{
   const f=await fixture();
   try{
@@ -340,6 +368,87 @@ test("result is recorded before callback delivery and controller ACK completes b
     assert.equal(r.status,0,r.stderr);
     rt=JSON.parse(spawnSync("python3",[path.resolve("src/state-store.py"),"get",f.config,f.state,"runtime"],{encoding:"utf8"}).stdout);
     assert.equal(rt.tasks.t1.status,"COMPLETE"); assert.equal(rt.tasks.t1.controllerAckStatus,"ACCEPTED");
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test("valid result waits for a missing owner and resumes the original callback after restoration", async()=>{
+  const f=await fixture();
+  try{
+    const getRegistry=()=>JSON.parse(spawnSync("python3",[path.resolve("src/state-store.py"),"get",f.config,f.state,"registry"],{encoding:"utf8"}).stdout);
+    const putRegistry=(next)=>{
+      const base=getRegistry();
+      const put=spawnSync("python3",[path.resolve("src/state-store.py"),"put",f.config,f.state,"registry"],{
+        input:JSON.stringify({base,next}),encoding:"utf8"});
+      assert.equal(put.status,0,put.stderr);
+    };
+    const getRuntime=()=>JSON.parse(spawnSync("python3",[path.resolve("src/state-store.py"),"get",f.config,f.state,"runtime"],{encoding:"utf8"}).stdout);
+    const base=getRuntime(), next=structuredClone(base);
+    next.tasks={missingOwner:{taskId:"missingOwner",project:"P",account:"a",role:"worker",sessionId:"w1",status:"RUNNING",
+      controllerSessionRef:"controller",replyToSessionRef:"controller",updatedAt:new Date().toISOString()}};
+    const put=spawnSync("python3",[path.resolve("src/state-store.py"),"put",f.config,f.state,"runtime"],{
+      input:JSON.stringify({base,next}),encoding:"utf8"});
+    assert.equal(put.status,0,put.stderr);
+
+    const hidden=getRegistry(); hidden.chats.controller.status="retired"; putRegistry(hidden);
+    let r=f.call("result",["--task","missingOwner","--status","COMPLETE","--summary","saved","--result-version","1"]);
+    assert.equal(r.status,0,r.stderr);
+    let saved=JSON.parse(r.stdout);
+    assert.equal(saved.callback,null); assert.equal(saved.callbackStatus,"WAITING_ROUTE");
+    const status=JSON.parse(f.call("control",["status","--project","P"]).stdout).projects[0];
+    assert.equal(status.results.callbackWaitingRoute,1); assert.equal(status.completion.state,"AWAITING_ACK");
+    let db=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('select owner_ref,callback_status from task_results where task_id=?',(sys.argv[2],)).fetchone())",path.join(f.state,"bridge.sqlite3"),"missingOwner"],{encoding:"utf8"});
+    assert.equal(db.status,0,db.stderr); assert.match(db.stdout,/controller.*WAITING_ROUTE/);
+
+    const restored=getRegistry(); restored.chats.controller.status="active"; putRegistry(restored);
+    r=f.call("work-one"); assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(r.stdout).status,"SENT");
+    db=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('select callback_status from task_results where task_id=?',(sys.argv[2],)).fetchone()[0])",path.join(f.state,"bridge.sqlite3"),"missingOwner"],{encoding:"utf8"});
+    assert.equal(db.stdout.trim(),"DELIVERED");
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test("workgroup scope propagates through result, callback outbox and status readback", async()=>{
+  const f=await fixture();
+  try{
+    const get=()=>JSON.parse(spawnSync("python3",[path.resolve("src/state-store.py"),"get",f.config,f.state,"registry"],{encoding:"utf8"}).stdout);
+    const put=next=>{const r=spawnSync("python3",[path.resolve("src/state-store.py"),"put",f.config,f.state,"registry"],{input:JSON.stringify({base:get(),next}),encoding:"utf8"}); assert.equal(r.status,0,r.stderr);};
+    const reg=get(); reg.chats.owner={id:"owner",project:"P",account:"a",role:"group-owner",status:"active",workgroupId:"A"}; put(reg);
+    let r=f.call("control",["workgroup","--project","P","--workgroup-id","A","--name","Group A","--controller-session-ref","owner","--charter-issue","#31","--dry-run","--confirm"]);
+    assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(r.stdout).dryRun,true); assert.equal(get().projects.P.workgroups.A,undefined);
+    r=f.call("control",["workgroup","--project","P","--workgroup-id","A","--name","Group A","--controller-session-ref","owner","--charter-issue","#31","--confirm"]);
+    assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(r.stdout).readback.workgroup.revision,1);
+    const rt=JSON.parse(spawnSync("python3",[path.resolve("src/state-store.py"),"get",f.config,f.state,"runtime"],{encoding:"utf8"}).stdout);
+    rt.tasks={wg:{taskId:"wg",project:"P",account:"a",role:"worker",sessionId:"worker",workgroupId:"A",status:"RUNNING",controllerSessionRef:"owner",replyToSessionRef:"owner",updatedAt:new Date().toISOString()}};
+    const runtimeBase=JSON.parse(spawnSync("python3",[path.resolve("src/state-store.py"),"get",f.config,f.state,"runtime"],{encoding:"utf8"}).stdout);
+    let putRuntime=spawnSync("python3",[path.resolve("src/state-store.py"),"put",f.config,f.state,"runtime"],{input:JSON.stringify({base:runtimeBase,next:rt}),encoding:"utf8"}); assert.equal(putRuntime.status,0,putRuntime.stderr);
+    r=f.call("result",["--task","wg","--status","COMPLETE","--summary","group done","--result-version","1"]);
+    assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(r.stdout).workgroupId,"A");
+    const row=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('select workgroup_id from task_results where task_id=\\\"wg\\\"').fetchone()[0]); print(d.execute('select workgroup_id from operations where task_id=\\\"wg\\\" and kind=\\\"callback\\\"').fetchone()[0])",path.join(f.state,"bridge.sqlite3")],{encoding:"utf8"});
+    assert.equal(row.status,0,row.stderr); assert.deepEqual(row.stdout.trim().split("\n"),["A","A"]);
+    r=f.call("control",["status","--project","P","--workgroup","A"]); assert.equal(r.status,0,r.stderr);
+    const status=JSON.parse(r.stdout).projects[0].workgroups[0]; assert.equal(status.ownerSessionRef,"owner"); assert.equal(status.results.recorded,1);
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test("older result ACK cannot advance a newer result and duplicate ACK is idempotent", async()=>{
+  const f=await fixture();
+  try{
+    const get=spawnSync("python3",[path.resolve("src/state-store.py"),"get",f.config,f.state,"runtime"],{encoding:"utf8"});
+    const base=JSON.parse(get.stdout), next=structuredClone(base);
+    next.tasks={versioned:{taskId:"versioned",project:"P",account:"a",role:"worker",sessionId:"w1",status:"RUNNING",
+      controllerSessionRef:"controller",replyToSessionRef:"controller",updatedAt:new Date().toISOString()}};
+    const put=spawnSync("python3",[path.resolve("src/state-store.py"),"put",f.config,f.state,"runtime"],{
+      input:JSON.stringify({base,next}),encoding:"utf8"});
+    assert.equal(put.status,0,put.stderr);
+    for(const version of ["1","2"]){
+      const r=f.call("result",["--task","versioned","--status","COMPLETE","--summary","v"+version,"--result-version",version]);
+      assert.equal(r.status,0,r.stderr);
+    }
+    let r=f.call("ack",["--task","versioned","--result-version","1","--caller-ref","controller","--status","ACCEPTED","--message","old"]);
+    assert.equal(r.status,2); assert.match(r.stderr,/STALE_RESULT_ACK/);
+    r=f.call("ack",["--task","versioned","--result-version","2","--caller-ref","controller","--status","ACCEPTED","--message","new"]);
+    assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(r.stdout).status,"ACCEPTED");
+    r=f.call("ack",["--task","versioned","--result-version","2","--caller-ref","controller","--status","ACCEPTED","--message","new"]);
+    assert.equal(r.status,0,r.stderr); assert.equal(JSON.parse(r.stdout).idempotent,true);
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 

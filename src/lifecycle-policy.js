@@ -31,18 +31,39 @@
       !!clean(task.github) && !!clean(task.updatedAt);
   }
 
-  function reconcileCandidate(projectName, project = {}, tasks = [], runtimeProject = {}, nowMs = Date.now()) {
+  function groupProgressTask(task = {}) {
+    return durableProgressTask(task) ||
+      (String(task.status || "").toUpperCase() === "RESULT_RECORDED" &&
+       !!clean(task.resultVersion) && !!clean(task.resultRecordedAt || task.updatedAt));
+  }
+
+  function taskWorkgroupId(task = {}) {
+    return clean(task.workgroupId || task.workgroup || task.scope?.workgroupId);
+  }
+
+  function reconcileCandidate(projectName, project = {}, tasks = [], runtimeProject = {}, nowMs = Date.now(), scope = null) {
     const policy = normalizeLifecycle(project);
     if (!policy.autoReconcile) return null;
-    const projectTasks = (tasks || []).filter(t => t && t.project === projectName);
-    const activeDomain = projectTasks.filter(t => !isTerminal(t) && !isRootTask(t, policy.reconcileRole));
+    const workgroupId = typeof scope === "string" ? clean(scope) : clean(scope?.workgroupId);
+    const legacyOnly = !!(scope && typeof scope === "object" && scope.legacyOnly);
+    const groupScoped = !!workgroupId;
+    const projectTasks = (tasks || []).filter(t => t && t.project === projectName &&
+      (groupScoped ? taskWorkgroupId(t) === workgroupId : (legacyOnly ? !taskWorkgroupId(t) : true)));
+    // RESULT_RECORDED has released the worker slot for group-scoped progression;
+    // its callback/ACK remains durable state and is still reported separately.
+    const settled = task => isTerminal(task) || (groupScoped && String(task.status || "").toUpperCase() === "RESULT_RECORDED");
+    const activeDomain = projectTasks.filter(t => !settled(t) &&
+      (groupScoped ? true : !isRootTask(t, policy.reconcileRole)));
     if (activeDomain.length) return null;
-    const durable = projectTasks.filter(durableProgressTask)
-      .sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)))[0];
+    const durable = projectTasks.filter(groupScoped ? groupProgressTask : durableProgressTask)
+      .sort((a, b) => String(b.resultRecordedAt || b.updatedAt).localeCompare(String(a.resultRecordedAt || a.updatedAt)))[0];
     if (!durable) return null;
-    const progressAt = String(durable.updatedAt);
-    if (runtimeProject.lastReconcileProgressAt &&
-        progressAt <= String(runtimeProject.lastReconcileProgressAt)) return null;
+    const progressAt = String(durable.resultRecordedAt || durable.updatedAt);
+    const eventVersion = clean(durable.resultVersion || durable.resultEventId);
+    const lastProgress = runtimeProject.lastReconcileProgressAt;
+    const lastVersion = clean(runtimeProject.lastReconcileResultVersion);
+    if (lastProgress && progressAt < String(lastProgress)) return null;
+    if (lastProgress && progressAt === String(lastProgress) && (!eventVersion || eventVersion === lastVersion)) return null;
     const last = Date.parse(runtimeProject.lastReconcileNotifiedAt || "");
     const waitSec = Number.isFinite(last)
       ? Math.max(0, policy.minGapSec - (nowMs - last) / 1000)
@@ -51,22 +72,45 @@
       event: "RECONCILE_REQUIRED",
       reason: "DOMAIN_IDLE_WITH_DURABLE_PROGRESS",
       project: projectName,
+      ...(groupScoped ? {workgroupId, ownerSessionRef: clean(scope?.ownerSessionRef)} : {}),
       rootRole: policy.reconcileRole,
       latestTaskId: durable.taskId || null,
       latestGithub: durable.github || null,
       progressAt,
-      eventKey: [projectName, durable.taskId || "", progressAt].join(":"),
+      ...(groupScoped && eventVersion ? {resultVersion: eventVersion} : {}),
+      eventKey: groupScoped
+        ? [projectName, workgroupId, durable.taskId || "", eventVersion || progressAt].join(":")
+        : [projectName, durable.taskId || "", progressAt].join(":"),
       ready: waitSec <= 0,
       waitSec,
       instruction: policy.instruction,
     };
   }
 
+  function reconcileCandidates(projectName, project = {}, tasks = [], runtimeProject = {}, nowMs = Date.now()) {
+    const groups = Object.entries(project.workgroups || {});
+    if (!groups.length) return [reconcileCandidate(projectName, project, tasks, runtimeProject, nowMs)].filter(Boolean);
+    const candidates = [];
+    for (const [workgroupId, group] of groups) {
+      const scopedRuntime = (runtimeProject.workgroups || {})[workgroupId] || {};
+      const candidate = reconcileCandidate(projectName, project, tasks, scopedRuntime, nowMs, {
+        workgroupId,
+        ownerSessionRef: group.controllerSessionRef,
+      });
+      if (candidate) candidates.push(candidate);
+    }
+    const legacy = reconcileCandidate(projectName, project, tasks, runtimeProject, nowMs, { legacyOnly: true });
+    if (legacy) candidates.push(legacy);
+    return candidates;
+  }
+
   globalObject.__CHAT_BRIDGE_LIFECYCLE_POLICY__ = {
     normalizeLifecycle,
     reconcileCandidate,
+    reconcileCandidates,
     isTerminal,
     isRootTask,
     durableProgressTask,
+    taskWorkgroupId,
   };
 })(globalThis);

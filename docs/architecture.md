@@ -183,6 +183,10 @@ Conductor
                     Worker Chat
 ```
 
+Workgroups are scoped projections of the existing project/task/session records. A workgroup carries its charter Issue, optional parent, controller session, and revision/epoch; it does not create a second task database. The root controller approves structure. A delegated controller can submit and reconcile tasks only inside its group, while global, project, and parent controls remain authoritative. A missing `workgroupId` is legacy state and stays legacy.
+
+When present, the same `workgroupId` is carried through logical placement, task/runtime projection, checkpointed rotation, operation/outbox rows, result versions, callbacks, and ACK validation. A root-owned task may retain a group label for admission while its persisted owner remains the root controller.
+
 ### Durable result, callback, and acceptance
 
 ```text
@@ -200,7 +204,7 @@ Worker
           └─ queue ack ACCEPTED / REJECTED / BLOCKED
 ```
 
-A worker result, callback `SENT`, and controller acceptance are distinct states. `RESULT_RECORDED` can release the finished worker Tab after the safety grace period; business `COMPLETE` requires the owning controller's accepted ACK.
+A worker result, callback `SENT`, and controller acceptance are distinct states. `RESULT_RECORDED` can release the finished worker Tab after the safety grace period; business `COMPLETE` requires the owning controller's accepted ACK. Result persistence happens before callback resolution. When the owner is unavailable, `task_results` retains the original owner contract and the callback outbox waits for that owner or an already committed successor; it never falls back to root by guesswork.
 
 ## Synchronous vs asynchronous routing
 
@@ -231,7 +235,7 @@ A conductor should run a bounded orchestration loop:
 5. dispatch;
 6. receive callbacks;
 7. verify GitHub evidence;
-8. continue.
+8. continue. A workgroup's wake-up is scoped to that group; another group's running or awaiting-receipt work does not block it. Queued operations recheck the control scope/epoch before sending. Pause and drain block new business admission only; result recording, callback delivery, ACK, and management recovery remain available.
 
 Only the conductor should normally fan out new work. Worker-to-worker delegation should be exceptional and must preserve task IDs and hop limits.
 

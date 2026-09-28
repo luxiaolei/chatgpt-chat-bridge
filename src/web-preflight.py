@@ -75,40 +75,61 @@ def project_account(reg, project):
 
 
 def reconcile_pending(reg, runtime, project, now=None):
+    return bool(reconcile_pending_scopes(reg, runtime, project, now))
+
+
+def reconcile_pending_scopes(reg, runtime, project, now=None):
     cfg = reg.get("projects", {}).get(project, {})
     if runtime.get("projects", {}).get(project, {}).get("watchdogPausedForUserControl"):
-        return False
+        return []
     policy = cfg.get("lifecycle", {}) or {}
     if policy.get("autoReconcile") is not True:
-        return False
+        return []
     root = str(policy.get("reconcileRole") or cfg.get("rootController") or "conductor").strip()
     terminal = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "RESULT_RECORDED"}
     tasks = [t for t in runtime.get("tasks", {}).values() if t.get("project") == project]
-    for task in tasks:
-        status = str(task.get("status") or "").upper()
-        is_root = str(task.get("role") or "").strip() == root and str(task.get("controller") or root).strip() == root
-        if status not in terminal and not is_root:
-            return False
-    durable = [t for t in tasks if str(t.get("status") or "").upper() == "COMPLETE"
-               and t.get("github") and t.get("updatedAt")]
-    if not durable:
-        return False
-    latest = max(durable, key=lambda t: str(t.get("updatedAt")))
-    rp = runtime.get("projects", {}).get(project, {})
-    progress = str(latest.get("updatedAt"))
-    if rp.get("lastReconcileProgressAt") and progress <= str(rp.get("lastReconcileProgressAt")):
-        return False
+    groups = cfg.get("workgroups") or {}
+    scopes = [(None, [t for t in tasks if not (t.get("workgroupId") or t.get("workgroup") or (t.get("scope") or {}).get("workgroupId"))],
+              runtime.get("projects", {}).get(project, {}))]
+    for group_id in groups:
+        scopes.append((group_id, [t for t in tasks if (t.get("workgroupId") or t.get("workgroup") or (t.get("scope") or {}).get("workgroupId")) == group_id],
+                      (runtime.get("projects", {}).get(project, {}).get("workgroups") or {}).get(group_id, {})))
+    pending = []
     raw_gap = policy.get("minGapSec")
     gap = max(0, float(300 if raw_gap is None else raw_gap))
-    last = rp.get("lastReconcileNotifiedAt")
-    if last:
-        try:
-            last_dt = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
-            if ((now or datetime.now(timezone.utc)) - last_dt).total_seconds() < gap:
-                return False
-        except ValueError:
-            pass
-    return True
+    current = now or datetime.now(timezone.utc)
+    for group_id, scoped, rp in scopes:
+        if rp.get("watchdogPausedForUserControl"):
+            continue
+        if group_id:
+            active = [t for t in scoped if str(t.get("status") or "").upper() not in terminal]
+            durable = [t for t in scoped if str(t.get("status") or "").upper() in {"COMPLETE", "RESULT_RECORDED"}
+                       and (str(t.get("status") or "").upper() != "RESULT_RECORDED" or t.get("resultVersion"))
+                       and ((t.get("github") and t.get("updatedAt")) or ((t.get("resultRecordedAt") or t.get("updatedAt")) and t.get("resultVersion")))]
+        else:
+            active = [t for t in scoped if str(t.get("status") or "").upper() not in terminal and
+                      not (str(t.get("role") or "").strip() == root and str(t.get("controller") or root).strip() == root)]
+            durable = [t for t in scoped if str(t.get("status") or "").upper() == "COMPLETE"
+                       and t.get("github") and t.get("updatedAt")]
+        if active or not durable:
+            continue
+        latest = max(durable, key=lambda t: str(t.get("resultRecordedAt") or t.get("updatedAt")))
+        progress = str(latest.get("resultRecordedAt") or latest.get("updatedAt"))
+        if rp.get("lastReconcileProgressAt") and progress <= str(rp.get("lastReconcileProgressAt")):
+            continue
+        last = rp.get("lastReconcileNotifiedAt")
+        if last:
+            try:
+                if (current - datetime.fromisoformat(str(last).replace("Z", "+00:00"))).total_seconds() < gap:
+                    continue
+            except ValueError:
+                pass
+        owner = (groups.get(group_id) or {}).get("controllerSessionRef") if group_id else None
+        account = project_account(reg, project)
+        if owner:
+            account = (reg.get("chats", {}).get(owner) or {}).get("account") or account
+        pending.append((group_id, account))
+    return pending
 
 
 def terminal_detach_candidates(reg, runtime):
@@ -204,8 +225,9 @@ def run(action, config, state, args):
                 task_rows.append((str(task.get("taskId") or task_key), task_account(reg, task)))
         lifecycle_rows = []
         for name in ([project] if project else reg.get("projects", {})):
-            if name and reconcile_pending(reg, runtime, name):
-                lifecycle_rows.append((name, project_account(reg, name)))
+            if name:
+                lifecycle_rows.extend((name, account) for _group, account in reconcile_pending_scopes(reg, runtime, name))
+        lifecycle_rows = list(dict.fromkeys(lifecycle_rows))
         lifecycle_rows.extend((name, account) for name, account in terminal_detach_candidates(reg, runtime)
                               if (not project or name == project) and (name, account) not in lifecycle_rows)
 

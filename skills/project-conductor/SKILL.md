@@ -5,7 +5,9 @@ description: Operate one Chat as the conductor for a multi-Chat project, using G
 
 # Project Conductor
 
-You are a project controller Chat. A project may use one backward-compatible `conductor`, or a hierarchy with one root controller plus domain controllers. Your job is to keep the work you own moving, not to personally do every task.
+You are a project controller Chat. A project may use one backward-compatible `conductor`, or a hierarchy with one root controller plus domain controllers. The root controller approves durable workgroup structure; a delegated controller independently advances only its assigned group. Your job is to keep the work you own moving, not to personally do every task.
+
+A task without `workgroupId` remains legacy and is not silently assigned to a default group. Each workgroup records its charter Issue, parent group, controller session, and revision/epoch. Reconfiguration is an expected-revision, idempotent change with a read-back; a child controller cannot modify a sibling or relax a parent control. Issue parentage, blocked-by links, workgroup scope, Project/account location, and Chat ownership remain separate records.
 
 If you are the root controller, own cross-domain priorities, ownership transfers, shared-resource conflicts, controller health, and evidence-policy arbitration. If you are a domain controller, own your Issue set, dispatch specialists/workers, recover or replace sessions, request review, and escalate only cross-domain or policy conflicts.
 
@@ -188,7 +190,7 @@ chat-bridge queue result --task TASK_ID --status COMPLETE \
   --summary "concise result" --github "ISSUE_OR_PR_URL"
 ```
 
-Bridge records `RESULT_RECORDED` before callback delivery and resolves the owning controller from persisted task state. The controller reviews durable evidence and sends `queue ack ... --status ACCEPTED`; only then does the task become `COMPLETE`. Callback delivery alone and a worker's self-reported COMPLETE are not acceptance.
+Bridge records `RESULT_RECORDED` before callback delivery and resolves the owning controller from persisted task state. A missing or unreachable owner leaves the result queued for that exact owner contract, without reassignment to root. The controller reviews durable evidence and sends `queue ack ... --status ACCEPTED`; only then does the task become `COMPLETE`. Callback delivery alone and a worker's self-reported COMPLETE are not acceptance.
 
 ## Continuous execution loop
 
@@ -201,7 +203,7 @@ Bridge records `RESULT_RECORDED` before callback delivery and resolves the ownin
 7. Agents update GitHub first and submit `queue result`.
 8. ChatBridge records the result, routes a persistent callback to the current owning controller, and keeps unknown delivery reconcilable.
 9. On callback, the owning controller reconciles GitHub state, reviews evidence, returns `queue ack`, and only then dispatches the next round or escalates.
-10. If project lifecycle auto-reconcile is enabled and all non-root tasks become terminal after new durable progress, treat the bridge `RECONCILE_REQUIRED` event as a prompt to re-read durable state and choose the next genuinely runnable batch. Do not replay completed work and do not let the bridge decide project priorities.
+10. If lifecycle auto-reconcile is enabled, wake the owning workgroup after its own durable progress or receipt; another workgroup's RUNNING/RESULT_RECORDED task does not create a project-wide barrier. Keep the legacy project-level rule for tasks with no group. Re-read durable state and choose the next genuinely runnable batch; the Bridge only emits a mechanical wake-up.
 11. Continue until project-level acceptance criteria are met.
 
 Avoid uncontrolled Chat-to-Chat loops. Only the conductor should normally fan out new work. Lifecycle events are deduped wake-ups, not permission to bypass project governance.

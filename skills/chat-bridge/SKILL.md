@@ -312,6 +312,19 @@ chat-bridge task list --project "PROJECT"
 
 `control status` separates business intent from technical admission. `businessState` / `businessStateReason` describe the owner-facing project state (for example `REPLANNING`, `NOT_STARTED`, `PAUSED`, or `INTERNAL_TEST`), while `control.mode` (`RUNNING`, `PAUSED`, `DRAINING`) only controls whether new Bridge business work may enter. `durableStateRef` is the stable root ledger/index the controller should re-read on reconciliation; it may link to GitHub Issues/PR evidence rather than duplicating all project state in Chat.
 
+Workgroups are durable admission scopes inside a project. The root controller approves each group's charter, parent, controller, and revision; a delegated controller may operate only its own group. Use the existing control plane with `--workgroup GROUP_ID` for group pause, drain, resume, and status. Project and global controls remain stronger than a child-group resume. Queued dispatches recheck the saved scope epoch before sending, so a pause takes effect after enqueueing.
+
+Create or revise a group with an expected revision; preview first and read back the applied record:
+
+```bash
+chat-bridge control workgroup --project "PROJECT" --workgroup-id GROUP_ID \
+  --name "Group name" --controller-session-ref OWNER_SESSION \
+  --charter-issue "#31" --expected-revision 0 --dry-run --confirm
+chat-bridge control workgroup --project "PROJECT" --workgroup-id GROUP_ID \
+  --name "Group name" --controller-session-ref OWNER_SESSION \
+  --charter-issue "#31" --expected-revision 0 --confirm
+```
+
 Admission control is persistent:
 
 ```bash

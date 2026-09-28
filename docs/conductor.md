@@ -15,7 +15,20 @@ root controller
   └─ verification controller → reviewers
 ```
 
-For a small project, the backward-compatible root role remains `conductor`.
+For a small project, the backward-compatible root role remains `conductor`. One root owns cross-group structure and exceptions; delegated controllers own bounded workgroup Issues and may dispatch their own workers with their own registered `callerRef`.
+
+Workgroup configuration includes a charter Issue, optional parent group, controller session, and revision/epoch. Changes use the existing management/configuration entry with an expected revision, idempotent application, and read-back. A child controller cannot change a sibling, elevate itself, or resume through a paused parent. Legacy tasks without a group remain project-scoped.
+
+The root can preview and apply the mapping through the same management plane:
+
+```bash
+chat-bridge control workgroup --project "PROJECT" --workgroup-id GROUP_ID \
+  --name "Group name" --controller-session-ref OWNER_SESSION \
+  --charter-issue "#31" --expected-revision 0 --dry-run --confirm
+chat-bridge control workgroup --project "PROJECT" --workgroup-id GROUP_ID \
+  --name "Group name" --controller-session-ref OWNER_SESSION \
+  --charter-issue "#31" --expected-revision 0 --confirm
+```
 ## Control routing
 
 Initialize a hierarchical project:
@@ -79,7 +92,7 @@ The verification controller/reviewer must return PASS, CHANGES_REQUIRED, BLOCKED
 
 The local watchdog owns only mechanical liveness and conservative recovery. It never decides project completion. `IDLE_COMPLETE` becomes `AWAITING_DURABLE_UPDATE`; the owning controller reconciles GitHub evidence before marking COMPLETE.
 
-If recovery is exhausted, the watchdog notifies the task's control chain. If a domain controller is unreachable, the event falls back to its escalation/root controller.
+If recovery is exhausted, the watchdog notifies the task's control chain. If a domain controller is unreachable, the event remains attached to the persisted owner contract and may follow only an already committed successor; it is not silently reassigned to root. A root notification is escalation evidence, not acceptance authority.
 ## Session policy
 
 Keep one active session per logical role/project/account unless duplicate-role operation is explicitly required. Create a new session when the context is materially different, a workstream is long-lived, or a session is unhealthy/context-saturated. Retire the old session before replacement when practical.
