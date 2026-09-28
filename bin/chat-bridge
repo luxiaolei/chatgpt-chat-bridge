@@ -18,7 +18,7 @@ PREFLIGHT="${MAIN:h}/web-preflight.py"
 CAPACITY_PREFLIGHT="${MAIN:h}/capacity-preflight.py"
 UI_MIN_INTERVAL_SEC="${CHAT_BRIDGE_UI_MIN_INTERVAL_SEC:-10}"
 UI_HEAVY_INTERVAL_SEC="${CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC:-30}"
-MAX_INLINE_WAIT_SEC="${CHAT_BRIDGE_MAX_INLINE_WAIT_SEC:-5}"
+MAX_INLINE_WAIT_SEC="${CHAT_BRIDGE_MAX_INLINE_WAIT_SEC:-12}"
 LOCK_WAIT_SEC="${CHAT_BRIDGE_LOCK_WAIT_SEC:-5}"
 EGO_CLIENT_TIMEOUT_SEC="${CHAT_BRIDGE_EGO_CLIENT_TIMEOUT_SEC:-180}"
 
@@ -29,8 +29,8 @@ if normal < 10:
     raise SystemExit("CHAT_BRIDGE_UI_MIN_INTERVAL_SEC must be >= 10")
 if heavy < 30:
     raise SystemExit("CHAT_BRIDGE_UI_HEAVY_INTERVAL_SEC must be >= 30")
-if max_wait < 0 or max_wait > 5:
-    raise SystemExit("CHAT_BRIDGE_MAX_INLINE_WAIT_SEC must be between 0 and 5")
+if max_wait < 0 or max_wait > 15:
+    raise SystemExit("CHAT_BRIDGE_MAX_INLINE_WAIT_SEC must be between 0 and 15")
 if lock_wait < 0 or lock_wait > 5:
     raise SystemExit("CHAT_BRIDGE_LOCK_WAIT_SEC must be between 0 and 5")
 if ego_timeout < 30 or ego_timeout > 600:
