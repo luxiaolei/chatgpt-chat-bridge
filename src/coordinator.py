@@ -248,6 +248,19 @@ def connection(config, state, initialize=True):
     return db
 
 
+def begin_immediate(db):
+    for attempt in range(6):
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error).lower() or attempt == 5:
+                raise
+            # A failed upgrade can leave a stale read snapshot on this handle.
+            db.rollback()
+            time.sleep(0.05 * (2 ** attempt))
+
+
 def registry(db):
     row = db.execute("SELECT payload FROM documents WHERE kind='registry'").fetchone()
     return json.loads(row[0])
@@ -399,7 +412,7 @@ def submit(db, payload):
     affinity = str(payload.get("affinityKey") or "").strip() or None
     key = "dispatch:" + caller + ":" + request_id
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    db.execute("BEGIN IMMEDIATE")
+    begin_immediate(db)
     try:
         prior = db.execute("SELECT * FROM operations WHERE request_key=?", (key,)).fetchone()
         if prior:
@@ -651,7 +664,7 @@ def callback(db, payload):
     digest = hashlib.sha256(message.encode()).hexdigest()
     stable_event = event_id or digest
     key = "callback:" + task_id + ":" + (target_ref or "UNRESOLVED") + ":" + stable_event
-    db.execute("BEGIN IMMEDIATE")
+    begin_immediate(db)
     try:
         prior = db.execute("SELECT * FROM operations WHERE request_key=?", (key,)).fetchone()
         if prior:
@@ -770,7 +783,7 @@ def result_message(task_id, status, version, summary, github, next_text):
 
 def materialize_pending_callbacks(db):
     """Attach saved results to their original owner once routing is available."""
-    db.execute("BEGIN IMMEDIATE")
+    begin_immediate(db)
     try:
         reg = registry(db)
         rows = db.execute("""SELECT * FROM task_results
@@ -887,7 +900,7 @@ def result(db, payload):
     message = result_message(task_id, status, version, summary, github, next_text)
     operation_id = None
     now = stamp()
-    db.execute("BEGIN IMMEDIATE")
+    begin_immediate(db)
     try:
         prior = db.execute("SELECT * FROM task_results WHERE task_id=? AND result_version=?", (task_id,version)).fetchone()
         if prior:
@@ -974,7 +987,7 @@ def result_ack(db, payload):
     if origin and (not identity or account_id(identity)!=origin):
         raise ValueError("RESULT_ACK_ORIGIN_ACCOUNT_MISMATCH")
     now=stamp()
-    db.execute("BEGIN IMMEDIATE")
+    begin_immediate(db)
     try:
         current=db.execute("SELECT acceptance_status,acceptance_message,accepted_at FROM task_results WHERE task_id=? AND result_version=?",
                            (task_id,version)).fetchone()
@@ -1557,7 +1570,7 @@ def broadcast_management(db, payload):
         f"chat-bridge control ack --event {event_id} --caller-ref YOUR_SESSION_REF --status ACKNOWLEDGED --message <check-result>",
         "[/CHATBRIDGE MANAGEMENT]",
     ])
-    db.execute("BEGIN IMMEDIATE")
+    begin_immediate(db)
     try:
         prior = db.execute("SELECT id FROM management_events WHERE id=?", (event_id,)).fetchone()
         if not prior:
@@ -1647,7 +1660,7 @@ def rotation_prepare(db, payload):
     operation_id, now = str(uuid.uuid4()), stamp()
     task_id = "ROT-" + rotation_id
     key = "rotation:" + rotation_id
-    db.execute("BEGIN IMMEDIATE")
+    begin_immediate(db)
     try:
         db.execute("""INSERT INTO logical_sessions(
             logical_ref,project,role,current_session_ref,workgroup_id,epoch,state,pending_session_ref,handoff_hash,rotation_id,updated_at)
@@ -1745,7 +1758,7 @@ def rotation_ack(db, payload, config, state):
                            row["role"],resume_message,str(task_id),now,now,time.time(),"dispatch",
                            requested_model,requested_effort,live.get("resourcePolicyVersion") or "rotation-v1",
                            live.get("workgroupId"),live.get("affinityKey"),None,resume_message))
-    db.execute("BEGIN IMMEDIATE")
+    begin_immediate(db)
     try:
         db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(next_reg,ensure_ascii=False),))
         db.execute("UPDATE documents SET payload=? WHERE kind='runtime'",(json.dumps(next_rt,ensure_ascii=False),))
@@ -1780,7 +1793,7 @@ def rotation_ack(db, payload, config, state):
 
 
 def claim(db):
-    db.execute("BEGIN IMMEDIATE")
+    begin_immediate(db)
     try:
         db.execute("UPDATE operations SET status='DELIVERY_UNKNOWN',reason='WORKER_INTERRUPTED',updated_at=? WHERE status='DISPATCHING' AND claimed_at<?",
                    (stamp(), time.time() - 300))
@@ -1800,7 +1813,7 @@ def claim(db):
 
 
 def finish(db, row, status, reason=None, retry_after=0, result=None, session_ref=None):
-    db.execute("BEGIN IMMEDIATE")
+    begin_immediate(db)
     try:
         db.execute("""UPDATE operations SET status=?,reason=?,not_before=?,updated_at=?,result=?,session_ref=coalesce(?,session_ref),claimed_at=NULL
                       WHERE id=? AND status='DISPATCHING'""",
@@ -1916,7 +1929,7 @@ def reconcile_delivery(db, operation_id):
     superseded = retired_management_successor(db, row)
     if superseded:
         now = stamp()
-        db.execute("BEGIN IMMEDIATE")
+        begin_immediate(db)
         try:
             current = db.execute("SELECT status FROM operations WHERE id=?", (operation_id,)).fetchone()
             if not current or current["status"] != "DELIVERY_UNKNOWN":
@@ -1973,7 +1986,7 @@ def reconcile_delivery(db, operation_id):
     else:
         evidence = None  # Do not persist unrelated chat contents or an unverified receipt.
     now = stamp()
-    db.execute("BEGIN IMMEDIATE")
+    begin_immediate(db)
     try:
         current = db.execute("SELECT status FROM operations WHERE id=?", (operation_id,)).fetchone()
         if not current or current["status"] != "DELIVERY_UNKNOWN":

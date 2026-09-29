@@ -6,7 +6,7 @@ import pathlib
 import sqlite3
 import sys
 import tempfile
-from urllib.parse import quote
+import time
 
 MISSING = object()
 KINDS = {"registry", "runtime"}
@@ -82,23 +82,44 @@ def read_authoritative(path, kind):
     """Read an initialized store without joining the writer queue."""
     if not path.exists():
         return None
-    uri = "file:" + quote(str(path), safe="/:") + "?mode=ro"
-    try:
-        db = sqlite3.connect(uri, uri=True, timeout=5)
-    except sqlite3.Error:
-        raise
-    try:
-        db.execute("PRAGMA busy_timeout=5000")
-        rows = dict(db.execute("SELECT kind,payload FROM documents").fetchall())
-        if not KINDS.issubset(rows):
-            return None
-        return json.loads(rows[kind])
-    except sqlite3.OperationalError as error:
-        if "no such table" in str(error).lower():
-            return None
-        raise
-    finally:
-        db.close()
+    # A URI read-only handle cannot establish SQLite's WAL shared-memory
+    # index while a writer is rotating it. A normal handle with query_only
+    # keeps this read non-mutating and follows the same WAL path as writers.
+    for attempt in range(4):
+        db = None
+        try:
+            db = sqlite3.connect(path, timeout=5)
+            db.execute("PRAGMA busy_timeout=5000")
+            db.execute("PRAGMA query_only=ON")
+            rows = dict(db.execute("SELECT kind,payload FROM documents").fetchall())
+            if not KINDS.issubset(rows):
+                return None
+            return json.loads(rows[kind])
+        except sqlite3.OperationalError as error:
+            message = str(error).lower()
+            if "no such table" in message:
+                return None
+            transient = "unable to open database file" in message or "database is locked" in message
+            if not transient or attempt == 3:
+                raise
+            time.sleep(0.05 * (2 ** attempt))
+        finally:
+            if db is not None:
+                db.close()
+
+
+def begin_immediate(db):
+    # Keep the total wait below the Node caller's 20 second child timeout.
+    for attempt in range(3):
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error).lower() or attempt == 2:
+                raise
+            # A failed upgrade can leave a stale read snapshot on this handle.
+            db.rollback()
+            time.sleep(0.05 * (2 ** attempt))
 
 
 def main():
@@ -122,11 +143,11 @@ def main():
                 project(destination, current)
                 print(json.dumps(current, ensure_ascii=False))
                 return
-        db = sqlite3.connect(state / "bridge.sqlite3", timeout=30)
+        db = sqlite3.connect(state / "bridge.sqlite3", timeout=5)
     finally:
         os.umask(old_umask)
     try:
-        db.execute("PRAGMA busy_timeout=30000")
+        db.execute("PRAGMA busy_timeout=5000")
         mode = str(db.execute("PRAGMA journal_mode").fetchone()[0]).lower()
         if mode != "wal":
             db.execute("PRAGMA journal_mode=WAL")
@@ -146,7 +167,7 @@ def main():
             # SQLite is authoritative. Repair compatibility projection opportunistically.
             project(destination, current)
         else:
-            db.execute("BEGIN IMMEDIATE")
+            begin_immediate(db)
             current = json.loads(db.execute("SELECT payload FROM documents WHERE kind=?", (kind,)).fetchone()[0])
             current = apply(current, payload["base"], payload["next"])
             db.execute("UPDATE documents SET payload=? WHERE kind=?", (json.dumps(current, ensure_ascii=False), kind))
