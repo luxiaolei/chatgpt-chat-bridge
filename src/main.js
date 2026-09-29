@@ -736,6 +736,57 @@ async function openConversationFromProject(page, binding, projectName, chatId) {
   return (await page.url()).includes("/c/"+chatId);
 }
 
+// Explicit operator recovery: observe the same conversation in its verified managed Space.
+// Never send a message, close an old tab, select a model, or change task identity.
+async function reattachTask(reg, chat, taskId, options={}) {
+  if(options.confirm!==true) throw new Error("REATTACH_REQUIRES_CONFIRM");
+  const before=await loadRuntime(), live=before.tasks?.[taskId];
+  if(!live || live.sessionId!==chat.id || live.project!==chat.project || live.account!==chat.account)
+    throw new Error("REATTACH_TASK_IDENTITY_MISMATCH");
+  if(!activeTaskStatus(live.status)) throw new Error("REATTACH_TASK_NOT_ACTIVE");
+  const binding=bindingFor(reg,chat.project,chat.account,true);
+  const identity=reg.accounts?.[chat.account]?.identity;
+  const info=(await listTaskSpaces()).find(x=>x.name===binding.spaceName);
+  if(!identity || !info || info.ownership!=="agent" || info.createdBy!=="agent" ||
+     !info.name.startsWith("chat-bridge-agent-") || info.profileId!==binding.profileId)
+    throw new Error("REATTACH_REQUIRES_VERIFIED_MANAGED_SPACE");
+  await assertWebAvailable(chat.account);
+  const task=await taskSpace(info.id), tabs=await task.tabs();
+  const candidates=tabs.filter(x=>String(x.url||"").includes("/c/"+chat.id) && x.openedBy==="agent");
+  if(candidates.length>1) throw new Error("REATTACH_AMBIGUOUS_TARGET");
+  let page=candidates.length?task.page(candidates[0].label):null;
+  if(!page) {
+    page=await task.newPage(); // Recovery must not reclaim or close any existing tab.
+    await page.goto(chat.url,{waitUntil:"domcontentloaded",timeout:20000});
+  }
+  await waitForConversationReady(page,20000);
+  await page.waitForFunction(()=>!!document.querySelector('[data-message-author-role], [data-chatgpt-search-unit-key$=":assistant"], [data-chatgpt-search-unit-key$=":user"]'),undefined,{timeout:15000});
+  const url=await page.url();
+  if(!url.includes("/c/"+chat.id) || projectKey(url)!==projectKey(binding.projectUrl))
+    throw new Error("REATTACH_CONVERSATION_MISMATCH");
+  const observedIdentity=await page.evaluate(async()=>{
+    const response=await fetch("/api/auth/session",{credentials:"same-origin",signal:AbortSignal.timeout(5000)});
+    return (await response.json()).user?.id||null;
+  });
+  if(observedIdentity!==identity) throw new Error("REATTACH_LOGIN_MISMATCH");
+  const snapshot=await state(page);
+  if(!snapshot.composerPresent || snapshot.errorTexts?.length || String(snapshot.composerText||"").trim())
+    throw new Error("REATTACH_TARGET_UNHEALTHY_OR_DRAFT");
+  const old={spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page};
+  const next={...chat,spaceName:binding.spaceName,spaceId:task.spaceId,pageSpaceId:task.spaceId,
+    page:page.label,profileId:binding.profileId,attachmentEpoch:Number(chat.attachmentEpoch||0)+1};
+  const committed=coordinated("reattach-commit",{taskId,sessionId:chat.id,expectedChat:chat,expectedTask:live,
+    attachment:{spaceName:next.spaceName,spaceId:next.spaceId,pageSpaceId:next.pageSpaceId,page:next.page,
+      profileId:next.profileId,attachmentEpoch:next.attachmentEpoch},
+    accountIdentity:identity,expectedBinding:binding,resumeWatch:options.resumeWatch===true});
+  reg.chats[chat.id]=committed.chat;
+  const current=committed.task;
+  const observed=await observeSession(next,page,current);
+  await emitTaskEvent(current,"OBSERVATION_REATTACHED",{previous:old,spaceName:next.spaceName,page:next.page,resumeWatch:options.resumeWatch===true,messageSent:false});
+  return {ok:true,taskId,sessionId:chat.id,previous:old,spaceName:next.spaceName,page:next.page,
+    messageSent:false,oldTabUntouched:true,resumeWatch:options.resumeWatch===true,observed};
+}
+
 async function ensurePage(reg, chat, options={}) {
   const configured=reg.projects?.[chat.project]?.bindings?.[chat.account];
   const spaceOverride=chat.spaceName && configured?.spaceName!==chat.spaceName
@@ -819,8 +870,25 @@ async function state(page, includeUserMessages=false, controlAction=null) {
         attributeFilter:["aria-label","aria-disabled","disabled","data-testid","data-state","data-content-search-unit-key","data-chatgpt-search-message-ids"]}); } catch {}
       globalThis.__CHAT_BRIDGE_WATCH=watch;
     }
+    function assistantSource(node,id) {
+      if(!id) return null;
+      const roots=node.matches?.('[data-markdown-text-style="assistant-message"]')?[node]:
+        [...node.querySelectorAll('[data-markdown-text-style="assistant-message"]')];
+      if(roots.length!==1) return null;
+      const conversationId=location.pathname.match(/\/c\/([^/]+)/)?.[1];
+      let fiber=roots[0][Object.keys(roots[0]).find(k=>k.startsWith('__reactFiber'))];
+      for(let i=0;fiber&&i<16;i++,fiber=fiber.return) {
+        const props=fiber.memoizedProps||{};
+        if(props.streamId===conversationId+':'+id && props.conversationId===conversationId && typeof props.children==='string')
+          return {text:props.children,textSource:'message-bound-markdown-source'};
+        const owner=props['data-chatgpt-selection-message-id']||props['data-message-id'];
+        if(owner && owner!==id) return null;
+      }
+      return null;
+    }
     const legacy=[...document.querySelectorAll('[data-message-author-role]')].map(e=>({
-      role:e.getAttribute('data-message-author-role'), id:e.getAttribute('data-message-id')||null, text:(e.innerText||'').trim()
+      role:e.getAttribute('data-message-author-role'), id:e.getAttribute('data-message-id')||null, text:(e.innerText||'').trim(),
+      ...(e.getAttribute('data-message-author-role')==='assistant'?assistantSource(e,e.getAttribute('data-message-id')):null)
     }));
     let ms=legacy;
     if(!ms.length) {
@@ -847,7 +915,8 @@ async function state(page, includeUserMessages=false, controlAction=null) {
           : (unit.querySelector('[data-markdown-text-style="assistant-message"]')||unit.querySelector('[data-chatgpt-selection-message-id]')||unit);
         let text=(content.innerText||content.textContent||'').trim();
         text=text.replace(/^(?:You said:|ChatGPT said:)\s*/i,'').trim();
-        ms.push({role,id,text});
+        const original=role==='assistant'?assistantSource(content,id):null;
+        ms.push({role,id,text,...original});
       }
     }
     const uiVisible=node=>{
@@ -919,6 +988,7 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       errorTexts:[...alerts,...knownErrors].filter((v,i,a)=>a.indexOf(v)===i),
       online:navigator.onLine,visibility:document.visibilityState,pageWasDiscarded:!!document.wasDiscarded,
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,
+      lastAssistantTextSource:lastAssistantMsg?.textSource||'rendered-dom',
       userMessages:includeUserMessages?ms.filter(x=>x.role==='user'):undefined,
       messageCount:ms.length,assistantCount:ms.filter(x=>x.role==='assistant').length,
       assistantChars:lastAssistant?.length||0,
@@ -1947,14 +2017,18 @@ async function pruneManagedOrphanTabs(reg, project=null, account=null) {
   const records=[];
   for(const [name,record] of Object.entries(reg.projects||{})) {
     if(project && name!==project) continue;
-    for(const [alias,binding] of Object.entries(record.bindings||{})) if(sameAccount(alias)) records.push(binding);
+    for(const [alias,binding] of Object.entries(record.bindings||{}))
+      if(sameAccount(alias)) records.push({...binding,account:alias});
   }
-  for(const chat of Object.values(reg.chats||{})) if((!project || chat.project===project) && sameAccount(chat.account)) records.push(chat);
-  const allSpaces=await listTaskSpaces();
-  const inScope=space=>!project && !account || records.some(record=>record.spaceId!=null
-    ? Number(record.spaceId)===Number(space.id) : !!record.spaceName && record.spaceName===space.name &&
-      allSpaces.filter(item=>item.name===record.spaceName).length===1);
-  const spaces=allSpaces.filter(space=>space?.ownership==="agent" && inScope(space));
+  for(const chat of Object.values(reg.chats||{}))
+    if((!project || chat.project===project) && sameAccount(chat.account)) records.push(chat);
+  const spaces=(await listTaskSpaces()).filter(space=>space?.ownership==="agent" && space.createdBy==="agent" &&
+    String(space.name||"").startsWith("chat-bridge-agent-") && records.some(record=>
+      record.spaceName===space.name && record.profileId===space.profileId && reg.accounts?.[record.account]?.identity && (
+        record.spaceId!=null && Number(record.spaceId)===Number(space.id) ||
+        Object.values(reg.spaces||{}).some(observed=>observed.name===space.name && Number(observed.spaceId)===Number(space.id) &&
+          observed.profileId===space.profileId && observed.identity===reg.accounts[record.account].identity)
+      )));
   for(const space of spaces) {
     let task;
     try { task=await taskSpace(space.id); } catch { continue; }
@@ -2486,6 +2560,11 @@ else if(cmd==="space"){
       print(result);
     } else throw new Error("space subcommand must be show, bind, prune, gc, or consolidate");
   }
+}
+else if(cmd==="reattach") {
+  const chat=resolveChat(reg,args[1],project,accountArg);
+  const taskId=opt("task",null); if(!taskId) throw new Error("reattach requires --task");
+  print(await reattachTask(reg,chat,taskId,{confirm:args.includes("--confirm"),resumeWatch:args.includes("--resume-watch")}));
 }
 else if(cmd==="register"){
   const raw=opt("url")||opt("id")||args[1]; if(!raw) throw new Error("url/id required");

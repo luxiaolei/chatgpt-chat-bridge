@@ -15,14 +15,14 @@ async function fixture(reg,spaces,account="a") {
 }
 
 test("account-scoped cleanup cannot visit another login even when Space labels collide",async()=>{
- const reg={accounts:{a:{identity:"one"},b:{identity:"two"}},projects:{P:{bindings:{a:{spaceName:"same",spaceId:7},b:{spaceName:"same",spaceId:8}}}},chats:{}};
- const spaces=[{id:7,name:"same",ownership:"agent"},{id:8,name:"same",ownership:"agent"},{id:9,name:"manual",ownership:"user"}];
+ const reg={accounts:{a:{identity:"one"},b:{identity:"two"}},projects:{P:{bindings:{a:{spaceName:"chat-bridge-agent-same",spaceId:7,profileId:"Profile 1"},b:{spaceName:"chat-bridge-agent-same",spaceId:8,profileId:"Profile 2"}}}},chats:{}};
+ const spaces=[{id:7,name:"chat-bridge-agent-same",ownership:"agent",createdBy:"agent",profileId:"Profile 1"},{id:8,name:"chat-bridge-agent-same",ownership:"agent",createdBy:"agent",profileId:"Profile 2"},{id:9,name:"manual",ownership:"user"}];
  assert.deepEqual(await fixture(reg,spaces),[7]);
 });
 
 test("unknown numeric Space identity with ambiguous names fails closed during cleanup",async()=>{
  const reg={accounts:{a:{identity:"one"}},projects:{P:{bindings:{a:{spaceName:"same"}}}},chats:{}};
- assert.deepEqual(await fixture(reg,[{id:7,name:"same",ownership:"agent"},{id:8,name:"same",ownership:"agent"}]),[]);
+ assert.deepEqual(await fixture(reg,[{id:7,name:"chat-bridge-agent-same",ownership:"agent",createdBy:"agent",profileId:"Profile 1"},{id:8,name:"chat-bridge-agent-same",ownership:"agent",createdBy:"agent",profileId:"Profile 2"}]),[]);
 });
 
 test("state-store failures defer watchdog work without marking the worker failed or writing counters",async()=>{

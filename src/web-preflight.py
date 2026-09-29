@@ -274,7 +274,7 @@ def run(action, config, state, args):
     project = option(args, "--project", None if cmd in ("watch", "projects") else reg.get("defaultProject"))
     explicit = option(args, "--account")
     account = explicit or project_account(reg, project)
-    session_commands = {"read", "status", "send", "ask", "model", "effort", "stop", "retry", "recover", "resend", "archive", "retire", "delete"}
+    session_commands = {"reattach", "read", "status", "send", "ask", "model", "effort", "stop", "retry", "recover", "resend", "archive", "retire", "delete"}
     if cmd in session_commands and len(args) > 1:
         key = args[1].split("/c/")[-1].split("?")[0]
         chats = list(reg.get("chats", {}).values())

@@ -361,3 +361,9 @@ Management authority is distinct from a normal task `callerRef`. Host-local admi
 - Use `send` for callback/event delivery to another Chat.
 - Treat GitHub Issues and PRs as the durable project record; Chat messages are coordination events, not the source of truth.
 - Include a task ID in cross-chat messages to make retries and callbacks idempotent.
+
+## Same-task observation recovery
+
+`chat-bridge reattach ROLE --project PROJECT --account ACCOUNT --task EXACT_TASK --confirm` observes the existing conversation in the account's existing verified Bridge-managed Space. It neither sends/replays a message nor closes old user tabs. `--resume-watch` additionally clears only that exact task's user-control observation pause after a healthy, same-login, empty-composer check. No Project/business pause is cleared; UNKNOWN delivery is not classified as NOT_STARTED. Keep the original task/session identity.
+
+External RPC extraction prefers the exact message-bound Markdown source where available; `lastAssistantTextSource` states whether the source or rendered DOM was used. Unknown source layouts remain explicit fallbacks, never heuristically unescaped or JSON-repaired.
