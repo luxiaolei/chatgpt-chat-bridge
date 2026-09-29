@@ -269,8 +269,11 @@ async function detectWebRateLimit(page, context="ui") {
 }
 
 async function loadRegistry() {
-  const registry=normalizeRegistry(stored("peek","registry"));
-  stateBaselines.set(registry,structuredClone(registry));
+  const raw=stored("peek","registry");
+  // Normalization may relocate legacy attachments in memory. CAS must still
+  // compare the exact stored values; normalize a copy to keep that base intact.
+  const registry=normalizeRegistry(structuredClone(raw));
+  stateBaselines.set(registry,structuredClone(raw));
   return registry;
 }
 async function saveRegistry(reg) {
