@@ -243,9 +243,9 @@ Install the macOS watchdog for all projects:
 ~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 60
 ```
 
-launchd starts a fresh one-shot scan every 60 seconds. A one-shot watchdog exits locally without starting Ego Lite when there are no active tasks. If the relevant Space is currently `user` or `agentDelegatedToUser`, watchdog records `watchdogPausedForUserControl` and stops polling that task without claiming the Space or counting a watch error; later preflight skips it locally, so subsequent scans do not wake Ego for that task. An explicit `send`, `ask`, `retry`, `recover`, or `resend` clears the pause and may continue in a separate managed Agent Space. Recovery is conservative: native Continue/Retry first, then `continue`, then Stop + guarded continue. Original-task replay requires `--aggressive`. UI completion never marks the durable task COMPLETE; it becomes `AWAITING_DURABLE_UPDATE` until GitHub is reconciled.
+launchd starts a fresh one-shot scan every 60 seconds. A one-shot watchdog exits locally without starting Ego Lite when there are no active tasks. If the relevant Space is currently `user` or `agentDelegatedToUser`, watchdog records `watchdogPausedForUserControl` and stops polling that task without claiming the Space or counting a watch error; later preflight skips it locally, so subsequent scans do not wake Ego for that task. An explicit `send`, `ask`, `retry`, `recover`, or `resend` clears the pause and may continue in a separate managed Agent Space. Recovery is conservative: current visible native Continue/Retry for errors, then guarded `continue` for incomplete turns. Quiet generation only warns the owner; Stop + guarded continue and original-task replay require explicit `--aggressive`. UI completion never marks the durable task COMPLETE; it becomes `AWAITING_DURABLE_UPDATE` until GitHub is reconciled.
 
-All bridge commands that touch ChatGPT Web share a cross-process pacing lock. Normal UI operations default to and cannot be configured below a 10-second interval; heavy conversation lifecycle operations (`new`, `archive`, `retire`, `delete`) default to and cannot be configured below 30 seconds. A command never waits more than 5 seconds inline by default: if the remaining pacing/lock wait is longer, it returns machine-readable `PACING_DEFERRED` (exit 75) so the caller can do other work instead of holding a long tool turn. Within one watchdog scan, active tasks are separated by at least 10 seconds. Local registry/runtime reads are not throttled.
+All bridge commands that touch ChatGPT Web share a cross-process pacing lock. Normal UI operations default to and cannot be configured below a 10-second interval; heavy conversation lifecycle operations (`new`, `archive`, `retire`, `delete`) default to and cannot be configured below 30 seconds. The default inline UI pacing budget is 12 seconds, with a separate lock wait of at most 5 seconds: if the remaining pacing/lock wait is longer, it returns machine-readable `PACING_DEFERRED` (exit 75) so the caller can do other work instead of holding a long tool turn. Within one watchdog scan, active tasks are separated by at least 10 seconds. Local registry/runtime reads are not throttled.
 
 If ChatGPT shows `Too many requests` / temporary conversation-access limiting, the runtime records `web-cooldowns/<account-scope-hash>.json` and stops Web work for that account. Cooldown escalates from 3 to 5, 10 and 15 minutes. Manual commands fail fast with `WEB_COOLDOWN_ACTIVE`; watchdog skips cooling identities but continues other accounts. With no eligible tasks it never starts Ego. Use `chat-bridge cooldown status --account secondary` (or `--project`) and `cooldown clear --account secondary --confirm`. The old `web-cooldown.json` protects only the default account during migration. Cross-process browser pacing remains shared; it is not an account quota.
 
@@ -258,7 +258,7 @@ chat-bridge retry implementation-agent --project "My Project"
 chat-bridge recover implementation-agent --project "My Project"
 ```
 
-`recover` stops an active generation, tries a native retry/regenerate action, and falls back to resending the last user message.
+`recover` rechecks the current task, uses current visible native recovery for real errors, and guards continuation against recorded results. A quiet active generation is not stopped unless `--aggressive` is explicitly supplied; inspect durable/tool progress first. A hard context limit requires checkpointed rotation, not retry.
 
 ## Conductor workflow
 
@@ -337,3 +337,7 @@ See [SECURITY.md](SECURITY.md).
 ## License
 
 MIT.
+
+## Local health and reliability
+
+`chat-bridge health` is a global local-only health summary. It distinguishes recent page observations from stale RUNNING records, manual-control pauses, capacity waits, and retained historical errors. It never wakes Ego or claims to be a live browser inspection. Hot state reads no longer rewrite JSON projections; preflight and capacity use SQLite authority. See [repair evidence and deployment gate](docs/local-reliability-20260929.md).

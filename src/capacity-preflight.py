@@ -2,6 +2,13 @@
 from __future__ import annotations
 import argparse, hashlib, json, pathlib, re, sys, time
 
+# Use SQLite authority without rewriting compatibility JSON on hot read paths.
+import importlib.util
+_store_spec = importlib.util.spec_from_file_location("chat_bridge_state_reader", pathlib.Path(__file__).with_name("state-store.py"))
+_store_reader = importlib.util.module_from_spec(_store_spec)
+_store_spec.loader.exec_module(_store_reader)
+read_document = _store_reader.peek_document
+
 TERMINAL = {'COMPLETE','FAILED','CANCELLED','BLOCKED','RESULT_RECORDED'}
 
 def read_json(path, default):
@@ -39,8 +46,8 @@ def binding_execution_ready(project, binding):
 
 def snapshot(config, state, project, now=None):
     now=time.time() if now is None else float(now)
-    reg=read_json(config/'registry.json',{})
-    rt=read_json(state/'runtime.json',{})
+    reg=read_document(config,state,'registry')
+    rt=read_document(config,state,'runtime')
     proj=(reg.get('projects') or {}).get(project) or {}
     accounts=sorted((proj.get('bindings') or {}).keys())
     all_chats=list((reg.get('chats') or {}).values())
@@ -122,8 +129,8 @@ def snapshot(config, state, project, now=None):
 
 def affinity_accounts(config, state, project, key):
     if not key: return []
-    reg=read_json(config/'registry.json',{})
-    rt=read_json(state/'runtime.json',{})
+    reg=read_document(config,state,'registry')
+    rt=read_document(config,state,'runtime')
     found=set()
     for c in (reg.get('chats') or {}).values():
         if c.get('project')==project and c.get('status')=='active' and c.get('affinityKey')==key and c.get('account'): found.add(c['account'])

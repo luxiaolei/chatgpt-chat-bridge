@@ -7,12 +7,14 @@ import pathlib
 import re
 import subprocess
 import sys
+from collections import Counter
+from datetime import datetime, timezone
 
 
 def load_store(config, state, kind):
     script = pathlib.Path(__file__).with_name("state-store.py")
     completed = subprocess.run(
-        [sys.executable, str(script), "get", str(config), str(state), kind],
+        [sys.executable, str(script), "peek", str(config), str(state), kind],
         check=True, capture_output=True, text=True, timeout=20,
     )
     return json.loads(completed.stdout)
@@ -168,12 +170,65 @@ def chat_list(reg,args):
             and (include_all or chat.get("status","active")=="active")]
 
 
+
+def health(reg, runtime, now=None):
+    """Summarize cached observations, never claim to have inspected live pages."""
+    now = now or datetime.now(timezone.utc)
+    terminal = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "RESULT_RECORDED"}
+    rows = list((runtime.get("tasks") or {}).values())
+    statuses = Counter(str(t.get("status") or "UNKNOWN").upper() for t in rows)
+    active = []
+    families = Counter()
+    prefixes = ["STATE_STORE_RUNTIME", "STATE_STORE_REGISTRY", "CONVERSATION_REATTACH_FAILED",
+                "Page budget reached", "USER_DRAFT_PRESENT", "WEB_RATE_LIMITED", "DELIVERY_UNCONFIRMED"]
+    for task in rows:
+        error = str(task.get("lastWatchError") or "")
+        if error:
+            families[next((p for p in prefixes if error.startswith(p)), "OTHER")] += 1
+        status = str(task.get("status") or "UNKNOWN").upper()
+        if status in terminal:
+            continue
+        snapshot = (runtime.get("sessions") or {}).get(task.get("sessionId")) or {}
+        observed = snapshot.get("observedAt") or task.get("stateUpdatedAt")
+        age = None
+        if observed:
+            try:
+                timestamp = datetime.fromisoformat(str(observed).replace("Z", "+00:00"))
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                age = max(0, int((now - timestamp).total_seconds()))
+            except (ValueError, TypeError):
+                pass
+        paused = bool(task.get("watchdogPausedForUserControl"))
+        fresh = age is not None and age <= 180
+        active.append({"taskId":task.get("taskId"), "project":task.get("project"),
+          "role":task.get("role"), "account":task.get("account"), "status":status,
+          "userControlPaused":paused, "observedAt":observed, "observationAgeSec":age,
+          "observationFresh":fresh,
+          "recentlyObservedGenerating":bool(fresh and snapshot.get("generating") and not paused and status in {"RUNNING","DISPATCHED","RECOVERING"}),
+          "sessionState":snapshot.get("sessionState") or task.get("sessionState"),
+          "capacityReason":task.get("capacityReason"),
+          "effortMismatch":snapshot.get("effortMismatch",task.get("effortMismatch")),
+          "lastRecoveryDecision":task.get("lastRecoveryDecision")})
+    return {"schema":"chat-bridge.health.v1", "at":now.isoformat(),
+      "source":"local-authoritative-state-with-cached-browser-observations",
+      "liveBrowserInspected":False, "observationFreshnessSec":180,
+      "taskStatusCounts":dict(statuses), "trackedNonterminalTasks":len(active),
+      "recentlyObservedGenerating":sum(t["recentlyObservedGenerating"] for t in active),
+      "userControlPaused":sum(t["userControlPaused"] for t in active),
+      "staleOrMissingObservations":sum(not t["observationFresh"] for t in active),
+      "historicalLastErrorFamilies":dict(families),
+      "errorCountNote":"Counts task records retaining a last error, not incident frequency or current failed tasks.",
+      "tasks":active}
+
 def main():
     action, config_name, state_name, *args = sys.argv[1:]
     config, state = pathlib.Path(config_name), pathlib.Path(state_name)
     reg = load_store(config, state, "registry")
     runtime = load_store(config, state, "runtime")
-    if action == "topology":
+    if action == "health":
+        value = health(reg, runtime)
+    elif action == "topology":
         value = topology(reg, runtime)
     elif action == "runtime":
         value = runtime

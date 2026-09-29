@@ -88,13 +88,13 @@ def read_authoritative(path, kind):
     for attempt in range(4):
         db = None
         try:
-            db = sqlite3.connect(path, timeout=5)
-            db.execute("PRAGMA busy_timeout=5000")
+            # mode=rw never creates a missing DB; query_only permits no writes.
+            # Four 2s attempts plus backoff remain below the caller's 20s limit.
+            db = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, timeout=2)
+            db.execute("PRAGMA busy_timeout=2000")
             db.execute("PRAGMA query_only=ON")
-            rows = dict(db.execute("SELECT kind,payload FROM documents").fetchall())
-            if not KINDS.issubset(rows):
-                return None
-            return json.loads(rows[kind])
+            row = db.execute("SELECT payload FROM documents WHERE kind=?", (kind,)).fetchone()
+            return json.loads(row[0]) if row is not None else None
         except sqlite3.OperationalError as error:
             message = str(error).lower()
             if "no such table" in message:
@@ -106,6 +106,18 @@ def read_authoritative(path, kind):
         finally:
             if db is not None:
                 db.close()
+
+
+def peek_document(config, state, kind):
+    """Read authoritative state, without initializing or repairing projections."""
+    if kind not in KINDS:
+        raise ValueError("invalid document kind")
+    config, state = pathlib.Path(config), pathlib.Path(state)
+    current = read_authoritative(state / "bridge.sqlite3", kind)
+    if current is not None:
+        return current
+    # Legacy/bootstrap input only. SQLite read errors propagate, never fall back.
+    return read_json((config if kind == "registry" else state) / (kind + ".json"))
 
 
 def begin_immediate(db):
@@ -124,9 +136,12 @@ def begin_immediate(db):
 
 def main():
     command, config_name, state_name, kind = sys.argv[1:]
-    if command not in {"get", "put"} or kind not in KINDS:
-        raise ValueError("usage: state-store.py get|put CONFIG_DIR STATE_DIR registry|runtime")
+    if command not in {"get", "put", "peek"} or kind not in KINDS:
+        raise ValueError("usage: state-store.py get|put|peek CONFIG_DIR STATE_DIR registry|runtime")
     config, state = pathlib.Path(config_name), pathlib.Path(state_name)
+    if command == "peek":
+        print(json.dumps(peek_document(config, state, kind), ensure_ascii=False))
+        return
     state.mkdir(parents=True, exist_ok=True)
     destination = (config if kind == "registry" else state) / (kind + ".json")
     payload = None
