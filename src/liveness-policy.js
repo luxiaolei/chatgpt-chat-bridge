@@ -16,8 +16,25 @@
     return 240;
   }
 
+  // Warning thresholds are not permission to cancel a model/tool turn.
+  function effortName(value = "") {
+    const match = /(?:^|\s)(extra high|instant|medium|high|pro)$/.exec(normalizeModeText(value));
+    return match ? match[1].replace(/\b\w/g, letter => letter.toUpperCase()) : null;
+  }
+  function livenessBudget(raw = {}, task = null, configuredEffort = null) {
+    const requestedEffort = effortName(task?.requestedEffort || configuredEffort);
+    const observedEffort = effortName(raw.mode);
+    const explicit = Number(task?.stallThresholdSec);
+    const threshold = Number.isFinite(explicit) && explicit > 0 ? explicit : Math.max(
+      stallThresholdSec(requestedEffort), stallThresholdSec(observedEffort)
+    );
+    return {stallThresholdSec: threshold, requestedEffort, observedEffort,
+      effortMismatch: !!requestedEffort && !!observedEffort && requestedEffort !== observedEffort};
+  }
   globalObject.__CHAT_BRIDGE_LIVENESS__ = {
     normalizeModeText,
     stallThresholdSec,
+    effortName,
+    livenessBudget,
   };
 })(globalThis);

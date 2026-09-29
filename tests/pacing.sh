@@ -148,14 +148,25 @@ set -e
 "$ROOT/bin/chat-bridge" cooldown clear --confirm >/dev/null
 [[ ! -e "$CHAT_BRIDGE_STATE_DIR/web-cooldown.json" ]]
 
+# Runtime fixtures must use the authority after coordinator initialization.
+set_runtime_fixture() {
+  python3 - "$ROOT/src/state-store.py" "$CHAT_BRIDGE_CONFIG_DIR" "$CHAT_BRIDGE_STATE_DIR" "$1" <<'PY'
+import json,subprocess,sys
+script,config,state,value=sys.argv[1:]
+base=json.loads(subprocess.check_output([sys.executable,script,"get",config,state,"runtime"],text=True))
+subprocess.run([sys.executable,script,"put",config,state,"runtime"],
+               input=json.dumps({"base":base,"next":json.loads(value)}),text=True,check=True,stdout=subprocess.DEVNULL)
+PY
+}
+
 # Idle watchdog skips without starting Ego even when no cooldown is active.
 mkdir -p "$CHAT_BRIDGE_STATE_DIR"
-echo '{"version":2,"projects":{},"tasks":{},"sessions":{}}' > "$CHAT_BRIDGE_STATE_DIR/runtime.json"
+set_runtime_fixture '{"version":2,"projects":{},"tasks":{},"sessions":{}}'
 "$ROOT/bin/chat-bridge" watch --quiet >/dev/null
 [[ "$(wc -l < "$LOG" | tr -d ' ')" == "2" ]]
 
 # An active task with no cooldown reaches Ego/browser work.
-echo '{"version":2,"projects":{},"tasks":{"T-1":{"taskId":"T-1","project":"X","role":"worker","status":"RUNNING"}},"sessions":{}}' > "$CHAT_BRIDGE_STATE_DIR/runtime.json"
+set_runtime_fixture '{"version":2,"projects":{},"tasks":{"T-1":{"taskId":"T-1","project":"X","role":"worker","status":"RUNNING"}},"sessions":{}}'
 python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.last" <<'PY'
 import pathlib,sys,time
 pathlib.Path(sys.argv[1]).write_text(str(time.time()-11)+"\n")

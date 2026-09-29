@@ -274,9 +274,9 @@ chat-bridge watch --project "My Project"
 ~/.local/share/chatgpt-chat-bridge/install-watchdog.sh 60
 ```
 
-launchd 每 60 秒启动一次全新的 one-shot 扫描；如果本地 runtime 没有 active task，watchdog 会在本地直接退出，不启动 Ego Lite/ChatGPT Web。如果目标 Space 当前为 `user` 或 `agentDelegatedToUser`，watchdog 会记录 `watchdogPausedForUserControl` 并停止巡检该 task，不 claim Space，也不累计 watch error；后续 preflight 会在本地直接跳过它，因此不会每分钟再次唤醒 Ego。只有显式执行 `send`、`ask`、`retry`、`recover` 或 `resend` 才会清除此暂停，并可转到独立 managed Agent Space 继续。恢复顺序默认是：原生 Continue/Retry → 发 `continue` → 明确卡死后 Stop + guarded continue。只有 `--aggressive` 才允许重发原始任务。Chat UI 看起来完成时只标记 `AWAITING_DURABLE_UPDATE`，最终 COMPLETE 仍需 GitHub 证据。
+launchd 每 60 秒启动一次全新的 one-shot 扫描；如果本地 runtime 没有 active task，watchdog 会在本地直接退出，不启动 Ego Lite/ChatGPT Web。如果目标 Space 当前为 `user` 或 `agentDelegatedToUser`，watchdog 会记录 `watchdogPausedForUserControl` 并停止巡检该 task，不 claim Space，也不累计 watch error；后续 preflight 会在本地直接跳过它，因此不会每分钟再次唤醒 Ego。只有显式执行 `send`、`ask`、`retry`、`recover` 或 `resend` 才会清除此暂停，并可转到独立 managed Agent Space 继续。恢复只对真实错误/未完成回合使用当前可见的原生 Continue/Retry 或受保护的 `continue`。长时间没有可见输出只向 owning controller 去重提示，不会自动 Stop；Stop + guarded continue 和重放原始任务都需要显式 `--aggressive`，先核对持久状态及工具进展。Chat UI 看起来完成时只标记 `AWAITING_DURABLE_UPDATE`，最终 COMPLETE 仍需 GitHub 证据。
 
-所有会触碰 ChatGPT Web 的 bridge 命令按已验证的登录账号分别使用跨进程节流锁：普通网页操作默认间隔 10 秒且不可配置得更快；`new` / `archive` / `retire` / `delete` 这类重型会话操作默认 30 秒且不可配置得更快。单个 CLI 调用默认最多内联等待 5 秒；如果剩余 pacing/锁等待更长，就快速返回机器可读的 `PACING_DEFERRED`（exit 75），让调用方去做本地/GitHub 工作，而不是把当前 Chat 卡在长 tool wait。单次 watchdog 扫描同一登录账号的多个 active task 时，task 之间至少间隔 10 秒；本地 registry/runtime 读取不节流。
+所有会触碰 ChatGPT Web 的 bridge 命令按已验证的登录账号分别使用跨进程节流锁：普通网页操作默认间隔 10 秒且不可配置得更快；`new` / `archive` / `retire` / `delete` 这类重型会话操作默认 30 秒且不可配置得更快。UI 节流默认内联等待预算为 12 秒，另有最多 5 秒的锁等待预算；如果剩余 pacing/锁等待更长，就快速返回机器可读的 `PACING_DEFERRED`（exit 75），让调用方去做本地/GitHub 工作，而不是把当前 Chat 卡在长 tool wait。单次 watchdog 扫描同一登录账号的多个 active task 时，task 之间至少间隔 10 秒；本地 registry/runtime 读取不节流。
 
 如果 ChatGPT 出现 `Too many requests` / “temporarily limited access to your conversations”，runtime 会写 `web-cooldowns/<账号身份哈希>.json` 并停止该账号的 Web 操作。冷却从 3 分钟起步，连续触发升级为 5、10、15 分钟；人工命令快速返回 `WEB_COOLDOWN_ACTIVE`，watchdog 跳过冷却账号但继续其他账号；没有可巡检任务时不启动 Ego。用 `chat-bridge cooldown status --account secondary`（或 `--project`）查看；清理需 `cooldown clear --account secondary --confirm`。升级保留的旧 `web-cooldown.json` 只保护默认账号。浏览器操作按已验证的账号身份分别加锁，不等于账号额度共享。
 
@@ -289,7 +289,7 @@ chat-bridge status agent --project "My Project"
 chat-bridge recover agent --project "My Project"
 ```
 
-`recover` 会在必要时 Stop，尝试原生 Retry/Regenerate；如果没有 Retry 控件，则回退为重发最后一条用户消息。
+`recover` 先复核最新任务状态，针对真实错误尝试当前回合的可见 Retry/Regenerate，并保护已记录结果不被重复继续。仅长时间安静生成不会自动 Stop；显式 `--aggressive` 才允许 Stop + guarded continue/原始任务重放，且必须先核对持久状态和工具进展。硬上下文上限需要 checkpoint + 会话轮换。
 
 ## 原则
 
@@ -300,3 +300,13 @@ chat-bridge recover agent --project "My Project"
 Worker 不能只在 Chat 里说“完成了”。必须先把结果更新到 Issue/PR，再回调总控。
 
 详见 [docs/architecture.md](docs/architecture.md) 和 [skills/project-conductor/SKILL.md](skills/project-conductor/SKILL.md)。
+
+## 本地健康摘要与可靠性
+
+```bash
+chat-bridge health
+```
+
+这是全局、纯本地的缓存健康摘要，不访问浏览器。它分开显示近期观察到的生成、过期 RUNNING 记录、人工接管暂停、容量等待和历史最后错误；180 秒内的观察也不是实时生成保证。普通读取通过 SQLite `peek`，不再每次重写 JSON 副本；准入和容量判断直接读 SQLite 权威状态。空闲/冷却时不会为了孤立标签清理启动 Ego，逐任务子巡检也不重复全局清理。
+
+修复范围、测试证据和上线门槛见 [本地可靠性修复记录](docs/local-reliability-20260929.md)。
