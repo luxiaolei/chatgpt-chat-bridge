@@ -752,6 +752,10 @@ async function reattachTask(reg, chat, taskId, options={}) {
     throw new Error("REATTACH_REQUIRES_VERIFIED_MANAGED_SPACE");
   await assertWebAvailable(chat.account);
   const task=await taskSpace(info.id), tabs=await task.tabs();
+  const priorAccount=taskAccounts.get(Number(task.spaceId));
+  if(priorAccount && accountScope(reg,priorAccount)!==accountScope(reg,chat.account))
+    throw new Error("REATTACH_ACCOUNT_SCOPE_CONFLICT");
+  taskAccounts.set(Number(task.spaceId),chat.account);
   const candidates=tabs.filter(x=>String(x.url||"").includes("/c/"+chat.id) && x.openedBy==="agent");
   if(candidates.length>1) throw new Error("REATTACH_AMBIGUOUS_TARGET");
   let page=candidates.length?task.page(candidates[0].label):null;
