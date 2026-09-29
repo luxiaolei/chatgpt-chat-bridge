@@ -26,6 +26,9 @@ def account_id(identity):
 EFFORTS = {"Instant", "Medium", "High", "Extra High", "Pro"}
 TERMINAL = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "RESULT_RECORDED"}
 CAPACITY_WAITING = "WAITING_CAPACITY"
+PRE_SEND_RETRY_LIMIT = 3
+PRE_SEND_RETRY_INITIAL_SEC = 5
+PRE_SEND_RETRY_MAX_SEC = 60
 
 
 def ensure_column(db, table, name, declaration):
@@ -1340,6 +1343,10 @@ def control_status(db, project=None, workgroup=None):
                                    if kind=="callback" and status in {"QUEUED","DISPATCHING"})
         unknown_ops = sum(n for (kind,status),n in operation_counts.items()
                           if status in {"DELIVERY_UNKNOWN", "SUPERSEDED"})
+        failed_pre_send = sum(n for (kind,status),n in operation_counts.items() if status == "FAILED_PRE_SEND")
+        pre_send_retrying = db.execute(
+            "SELECT count(*) FROM operations WHERE project=? AND status='QUEUED' AND reason LIKE 'PRE_SEND_RETRY_%'", (name,)
+        ).fetchone()[0]
         reconciled_superseded_ops = sum(n for (kind,status),n in operation_counts.items()
                                         if status == "RECONCILED_SUPERSEDED")
         active_tasks = sum(count for status,count in task_counts.items() if status not in TERMINAL)
@@ -1397,7 +1404,7 @@ def control_status(db, project=None, workgroup=None):
                                   [str(row["recorded_at"] or "") for row in scoped_results], default=None),
             })
 
-        if blocked or failed or unknown_ops or results["callbackUnknown"] or results["rejectedOrBlocked"]:
+        if blocked or failed or failed_pre_send or unknown_ops or results["callbackUnknown"] or results["rejectedOrBlocked"]:
             completion_state = "NEEDS_REVIEW"
         elif active_tasks or pending_business_ops or awaiting_durable:
             completion_state = "IN_PROGRESS"
@@ -1442,6 +1449,8 @@ def control_status(db, project=None, workgroup=None):
             "operations": [{"status": row["status"], "kind": row["kind"], "count": row["n"]} for row in operation_rows],
             "operationSummary": {"pendingBusiness": pending_business_ops, "pendingCallbacks": pending_callback_ops,
                                   "unknown": unknown_ops,
+                                  **({"preSendRetrying": pre_send_retrying} if pre_send_retrying else {}),
+                                  **({"failedPreSend": failed_pre_send} if failed_pre_send else {}),
                                   **({"reconciledSuperseded": reconciled_superseded_ops}
                                      if reconciled_superseded_ops else {})},
             "management": {
@@ -1453,6 +1462,8 @@ def control_status(db, project=None, workgroup=None):
                 "blockedTasks": blocked,
                 "failedTasks": failed,
                 "unknownOperations": unknown_ops,
+                **({"preSendRetrying": pre_send_retrying} if pre_send_retrying else {}),
+                **({"failedPreSend": failed_pre_send} if failed_pre_send else {}),
                 "pendingBusiness": pending_business_ops,
                 "pendingCallbacks": pending_callback_ops,
                 "pendingManagement": pending_management,
@@ -1834,6 +1845,31 @@ def parse_worker_receipt(completed):
     return None
 
 
+def pre_send_retry_after(row, receipt):
+    """Retry only UI readiness failures proven to precede the send control."""
+    if not receipt or receipt.get("deliveryStage") != "PRE_SEND":
+        return None
+    attempt = int(row["attempts"] or 0)
+    if attempt >= PRE_SEND_RETRY_LIMIT:
+        return None
+    code = str(receipt.get("code") or "").strip().upper()
+    retryable = (
+        code in {"MODEL_MENU_NOT_READY", "MODEL_SELECTOR_NOT_READY", "EFFORT_SELECTOR_NOT_READY",
+                 "CONVERSATION_UI_NOT_READY", "PROJECT_UI_NOT_READY"}
+        or code.startswith("CONVERSATION_REATTACH_FAILED")
+        or code.startswith("CONVERSATION UI DID NOT BECOME READY")
+        or code.startswith("PROJECT UI DID NOT BECOME READY")
+        or code.startswith("MODEL/EFFORT BUTTON ")
+        or code.startswith("THINKING EFFORT SLIDER ")
+        or code.startswith("REQUESTED THINKING LEVEL ")
+        or code.startswith("MODEL_MENU_")
+        or code.startswith("EFFORT_")
+    )
+    if not retryable:
+        return None
+    return min(PRE_SEND_RETRY_MAX_SEC, PRE_SEND_RETRY_INITIAL_SEC * (2 ** max(0, attempt - 1)))
+
+
 def retired_management_successor(db, row):
     """Return lifecycle evidence for an obsolete management target.
 
@@ -2025,6 +2061,10 @@ def work_one(db):
         return finish(db, row, "QUEUED", reason, 30)
     if completed.returncode:
         if receipt and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("ok") is False:
+            retry_after = pre_send_retry_after(row, receipt)
+            if retry_after is not None:
+                code = str(receipt.get("code") or "ERROR")[:200]
+                return finish(db, row, "QUEUED", f"PRE_SEND_RETRY_{row['attempts']}_{code}", retry_after)
             return finish(db, row, "FAILED_PRE_SEND", "PRE_SEND_" + str(receipt.get("code") or "ERROR")[:200])
         if receipt and receipt.get("deliveryStage") == "SEND_ATTEMPTED":
             return finish(db, row, "DELIVERY_UNKNOWN", "SEND_ATTEMPTED_" + str(receipt.get("code") or "ERROR")[:200])

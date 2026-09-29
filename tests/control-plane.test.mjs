@@ -29,7 +29,7 @@ async function fixture({twoAccounts=false}={}) {
   await writeFile(fake,`#!/bin/sh
 printf '%s\n' "$*" >> "${log}"
 if [ -n "$CHAT_BRIDGE_TEST_FAIL_STAGE" ]; then
-  printf '[error] {"ok":false,"deliveryStage":"%s","code":"SIMULATED"}\\n' "$CHAT_BRIDGE_TEST_FAIL_STAGE" >&2
+  printf '[error] {"ok":false,"deliveryStage":"%s","code":"%s"}\\n' "$CHAT_BRIDGE_TEST_FAIL_STAGE" "\${CHAT_BRIDGE_TEST_FAIL_CODE:-SIMULATED}" >&2
   exit 1
 fi
 if [ "$1" = "new" ]; then
@@ -146,6 +146,44 @@ test("only a proven pre-send failure can be retried; attempted delivery stays un
     const duplicate=f.call("submit",[],{requestId:"attempt-2",callerRef:"controller",role:"worker-b",taskId:"ATTEMPT-1",message:"again"});
     assert.equal(duplicate.status,2);
     assert.match(duplicate.stderr,/TASK_DELIVERY_UNKNOWN_RECONCILE_REQUIRED/);
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test("transient pre-send transport faults stay queued for a bounded safe retry", async()=>{
+  const f=await fixture();
+  try{
+    const parse=r=>{ assert.equal(r.status,0,r.stderr); return JSON.parse(r.stdout); };
+    const first=parse(f.call("submit",[],{requestId:"pre-transient",callerRef:"controller",role:"worker",taskId:"PRE-TRANSIENT",message:"one"}));
+    const deferred=parse(f.call("work-one",[],null,{CHAT_BRIDGE_TEST_FAIL_STAGE:"PRE_SEND",CHAT_BRIDGE_TEST_FAIL_CODE:"MODEL_MENU_NOT_READY"}));
+    assert.equal(deferred.status,"QUEUED");
+    assert.match(deferred.reason,/PRE_SEND_RETRY/);
+    const status=parse(f.call("control",["status","--project","P"])).projects[0];
+    assert.equal(status.operationSummary.pendingBusiness,1);
+    assert.equal(status.completion.state,"IN_PROGRESS");
+    const wake=spawnSync("python3",["-c","import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute('update operations set not_before=0 where id=?',(sys.argv[2],));db.commit()",path.join(f.state,"bridge.sqlite3"),first.operationId],{encoding:"utf8"});
+    assert.equal(wake.status,0,wake.stderr);
+    assert.equal(parse(f.call("work-one")).status,"SENT");
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test("transient pre-send retry stops at the limit and becomes visible for review", async()=>{
+  const f=await fixture();
+  try{
+    const parse=r=>{ assert.equal(r.status,0,r.stderr); return JSON.parse(r.stdout); };
+    const first=parse(f.call("submit",[],{requestId:"pre-limit",callerRef:"controller",role:"worker",taskId:"PRE-LIMIT",message:"one"}));
+    const fail=()=>f.call("work-one",[],null,{CHAT_BRIDGE_TEST_FAIL_STAGE:"PRE_SEND",CHAT_BRIDGE_TEST_FAIL_CODE:"MODEL_MENU_NOT_READY"});
+    assert.equal(parse(fail()).status,"QUEUED");
+    for(let attempt=0;attempt<1;attempt++){
+      const wake=spawnSync("python3",["-c","import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute('update operations set not_before=0 where id=?',(sys.argv[2],));db.commit()",path.join(f.state,"bridge.sqlite3"),first.operationId],{encoding:"utf8"});
+      assert.equal(wake.status,0,wake.stderr);
+      assert.equal(parse(fail()).status,"QUEUED");
+    }
+    const wake=spawnSync("python3",["-c","import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute('update operations set not_before=0 where id=?',(sys.argv[2],));db.commit()",path.join(f.state,"bridge.sqlite3"),first.operationId],{encoding:"utf8"});
+    assert.equal(wake.status,0,wake.stderr);
+    assert.equal(parse(fail()).status,"FAILED_PRE_SEND");
+    const status=parse(f.call("control",["status","--project","P"])).projects[0];
+    assert.equal(status.operationSummary.failedPreSend,1);
+    assert.equal(status.completion.state,"NEEDS_REVIEW");
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 

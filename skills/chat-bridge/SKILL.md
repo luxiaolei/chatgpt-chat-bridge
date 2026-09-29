@@ -159,7 +159,7 @@ The queue returns a durable operation ID. `QUEUED` is not delivery; `SENT` confi
 
 If a management UNKNOWN targets a retired controller whose committed successor is active for the same Project, reconciliation may record `RECONCILED_SUPERSEDED` from the persisted rotation link. This is lifecycle evidence only: it sends nothing and does not clear ordinary dispatch/callback UNKNOWN records.
 
-A worker failure proven to occur before the send control was triggered becomes `FAILED_PRE_SEND` with its error code. That operation can be manually retried with `chat-bridge queue retry --operation OPERATION_ID`. A failure after a send attempt remains `DELIVERY_UNKNOWN` and cannot use this retry path.
+A worker failure proven to occur before the send control was triggered is safe to retry with the same operation. Transient UI-readiness failures are requeued with bounded backoff (three attempts); other proven pre-send failures become `FAILED_PRE_SEND` and can be manually retried with `chat-bridge queue retry --operation OPERATION_ID`. A failure after a send attempt remains `DELIVERY_UNKNOWN` and cannot use either retry path.
 
 ### Automatic dispatch boundary
 

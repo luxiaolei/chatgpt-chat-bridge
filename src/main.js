@@ -90,6 +90,13 @@ function slug(v="") {
 function projectIdFromUrl(v="") {
   return String(v).match(/\/g\/(g-p-[^/]+)/)?.[1] || null;
 }
+function projectHomeId(value) {
+  try {
+    const url=new URL(value);
+    return url.origin==="https://chatgpt.com" ? url.pathname.match(/^\/g\/(g-p-[0-9a-f]{32})(?:-[^/]+)?\/project\/?$/i)?.[1]?.toLowerCase()||null : null;
+  } catch { return null; }
+}
+function projectKey(value="") { return String(value).match(/g-p-[0-9a-f]{32}/i)?.[0].toLowerCase()||null; }
 function defaultSpaceName(project, account=DEFAULT_ACCOUNT) {
   return `chat-bridge-project-${slug(project)}-${slug(account)}`;
 }
@@ -334,8 +341,51 @@ function bindingObserved(reg, account, binding) {
     .flatMap(space=>space.projects||[]).map(project=>project.id);
   if(!observed.length) return true;
   const projectId=binding?.projectId||projectIdFromUrl(binding?.projectUrl||"");
-  const canonical=value=>String(value||"").match(/g-p-[0-9a-f]{32}/)?.[0]||null;
-  return canonical(projectId) && observed.some(value=>canonical(value)===canonical(projectId));
+  return projectKey(projectId) && observed.some(value=>projectKey(value)===projectKey(projectId));
+}
+async function repairProjectObservation(reg, project, account, binding) {
+  if(!binding?.projectUrl) throw new Error(`PROJECT_NOT_BOUND_FOR_LOGIN: ${project} / ${account}`);
+  const identity=reg.accounts?.[account]?.identity;
+  if(!identity) throw new Error(`TARGET_IDENTITY_UNVERIFIED: ${account}`);
+  if(!SPACE_CATALOG || typeof listTaskSpaces!=="function") throw new Error("PROJECT_OBSERVATION_REPAIR_UNAVAILABLE");
+  const available=await listTaskSpaces();
+  const accountName=Object.values(reg.spaces||{}).find(space=>space.identity===identity&&space.accountName)?.accountName||reg.accounts?.[account]?.label||account;
+  const selected=SPACE_CATALOG.selectManagedSpace(binding,accountName,available,{pauseOnUserControl:true});
+  const info=available.find(space=>space.name===selected.spaceName);
+  const task=await taskSpace(selected.spaceName,!selected.existing&&selected.profileId?{profileId:selected.profileId}:undefined);
+  const prior=taskAccounts.get(Number(task.spaceId));
+  if(prior&&accountScope(reg,prior)!==accountScope(reg,account)) throw new Error("Space is bound to conflicting ChatGPT accounts");
+  taskAccounts.set(Number(task.spaceId),account);
+  const targetId=projectKey(binding.projectId||binding.projectUrl);
+  if(!targetId) throw new Error(`PROJECT_OBSERVATION_REPAIR_FAILED: ${project} / ${account}`);
+  const tabs=typeof task.tabs==="function"?await task.tabs().catch(()=>[]):[];
+  let page=null, session=null;
+  for(const tab of tabs.filter(item=>item.label&&projectHomeId(item.url)===targetId)){
+    const candidate=task.page(tab.label);
+    const url=await Promise.race([candidate.url(),new Promise(resolve=>setTimeout(()=>resolve(""),3000))]).catch(()=>"");
+    const observed=projectHomeId(url)===targetId?await Promise.race([candidate.evaluate(async()=>{
+      const response=await fetch("/api/auth/session",{credentials:"same-origin",signal:AbortSignal.timeout(5000)});
+      const user=(await response.json()).user; return user?.id?{id:user.id,name:user.name||user.id}:null;
+    }),new Promise(resolve=>setTimeout(()=>resolve(null),6000))]).catch(()=>null):null;
+    if(observed?.id===identity){ page=candidate; session=observed; break; }
+    if(tab.openedBy==="agent"&&!tab.active) await candidate.close().catch(()=>{});
+  }
+  if(!page){
+    page=await task.newPage();
+    try {
+      await page.goto(binding.projectUrl,{waitUntil:"domcontentloaded",timeout:20000});
+      session=await page.evaluate(async()=>{
+        const response=await fetch("/api/auth/session",{credentials:"same-origin",signal:AbortSignal.timeout(5000)});
+        const user=(await response.json()).user; return user?.id?{id:user.id,name:user.name||user.id}:null;
+      });
+      if(projectHomeId(await page.url())!==targetId||session?.id!==identity) throw new Error(`PROJECT_OBSERVATION_REPAIR_FAILED: ${project} / ${account}`);
+    } catch(error){ await page.close().catch(()=>{}); throw error; }
+  }
+  binding.spaceName=selected.spaceName; binding.profileId=selected.profileId; binding.spaceId=task.spaceId; binding.controlPage=page.label;
+  SPACE_CATALOG.recordSpace(reg,{name:selected.spaceName,spaceId:task.spaceId,identity,
+    accountName:session.name||accountName,profileId:selected.profileId,ownership:info?.ownership||"agent",urls:[binding.projectUrl]});
+  await saveRegistry(reg);
+  return {task,page};
 }
 function bindingExecutionReadiness(project, binding) {
   const requirements=project?.requirements||{};
@@ -353,10 +403,11 @@ function bindingExecutionReadiness(project, binding) {
 async function openBoundTask(reg, project, account=null, options={}) {
   const canonical=bindingFor(reg,project,account,true);
   const b=options.spaceOverride?{...canonical,...options.spaceOverride,account:canonical.account}:canonical;
-  if(!bindingObserved(reg,b.account,b)) throw new Error(`PROJECT_NOT_OBSERVED_FOR_LOGIN: ${project} / ${b.account}; scan and bind the actual Project before UI work`);
   await assertWebAvailable(b.account);
-  let profileId=b.profileId||null, existingSpace=false;
-  if(!options.spaceOverride && typeof listTaskSpaces==="function") {
+  let repaired=null;
+  if(!options.spaceOverride && !bindingObserved(reg,b.account,b)) repaired=await repairProjectObservation(reg,project,b.account,b);
+  let profileId=b.profileId||null, existingSpace=!!repaired;
+  if(!repaired && !options.spaceOverride && typeof listTaskSpaces==="function") {
     const identity=reg.accounts?.[b.account]?.identity;
     const accountName=Object.values(reg.spaces||{}).find(space=>space.identity===identity&&space.accountName)?.accountName||reg.accounts?.[b.account]?.label||b.account;
     const selected=SPACE_CATALOG.selectManagedSpace(b,accountName,await listTaskSpaces(),{pauseOnUserControl:!!options.pauseOnUserControl});
@@ -365,7 +416,7 @@ async function openBoundTask(reg, project, account=null, options={}) {
     if(selected.changed) { b.spaceName=selected.spaceName; b.spaceId=null; b.controlPage=null; }
     if(selected.changed || b.profileId!==profileId) { b.profileId=profileId; await saveRegistry(reg); }
   }
-  const task=await taskSpace(b.spaceName,!existingSpace&&profileId?{profileId}:undefined);
+  const task=repaired?.task||await taskSpace(b.spaceName,!existingSpace&&profileId?{profileId}:undefined);
   const prior=taskAccounts.get(Number(task.spaceId));
   if(prior&&accountScope(reg,prior)!==accountScope(reg,b.account)) throw new Error("Space is bound to conflicting ChatGPT accounts");
   taskAccounts.set(Number(task.spaceId),b.account);
@@ -557,9 +608,21 @@ async function newManagedPage(reg, project, account, task, binding, excludeChatI
 
 async function controlPage(reg, project, account=null) {
   const {binding,task}=await openBoundTask(reg,project,account), pages=await pagesOf(task);
-  let page=pages.find(p=>p.label===binding.controlPage) || null;
+  const tabs=typeof task.tabs==="function"?await task.tabs().catch(()=>[]):[], targetId=projectKey(binding.projectId||binding.projectUrl);
+  const labels=[binding.controlPage,...tabs.filter(tab=>tab.label&&projectHomeId(tab.url)===targetId).map(tab=>tab.label)]
+    .filter((label,index,array)=>label&&array.indexOf(label)===index);
+  let page=null;
+  for(const label of labels){
+    const tab=tabs.find(item=>item.label===label), candidate=pages.find(item=>item.label===label);
+    if(!candidate) continue;
+    const url=await Promise.race([candidate.url(),new Promise(resolve=>setTimeout(()=>resolve(""),3000))]).catch(()=>"");
+    const responsive=await Promise.race([candidate.evaluate(()=>document.readyState),new Promise(resolve=>setTimeout(()=>resolve(""),3000))]).catch(()=>"");
+    if(!binding.projectUrl || (projectHomeId(url)===targetId&&responsive)){ page=candidate; break; }
+    if(tab?.openedBy==="agent"&&!tab.active) await candidate.close().catch(()=>{});
+  }
+  if(!page&&binding.projectUrl){ const repaired=await repairProjectObservation(reg,project,binding.account,binding); return {binding,task:repaired.task,page:repaired.page}; }
   if(!page){
-    for(const p of pages){ const u=await p.url().catch(()=>""); if(u==="about:blank" || u==="chrome://newtab/"){ page=p; break; } }
+    for(const p of pages){ const u=await Promise.race([p.url(),new Promise(resolve=>setTimeout(()=>resolve(""),3000))]).catch(()=>""); if(u==="about:blank" || u==="chrome://newtab/"){ page=p; break; } }
   }
   if(!page) page=await newManagedPage(reg,project,account,task,binding,null,{allowOverflow:false});
   binding.controlPage=page.label; await saveRegistry(reg); return {binding,task,page};
