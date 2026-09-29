@@ -93,3 +93,16 @@ test('reattach CAS uses raw registry rather than normalized attachment projectio
   const f=await fixture();const normalized={...f.chat,spaceName:'chat-bridge-agent-a',spaceId:null,page:null};
   const r=await f.fn(f.reg,normalized,'T',{confirm:true});assert.equal(r.previous.spaceName,'user-space');
 });
+
+test('message selection excludes zero-area hidden history clones but retains offscreen real messages',()=>{
+  const a=source.indexOf('    function renderedMessage('),z=source.indexOf('    const legacy=',a);
+  const fn=new Function('root','getComputedStyle',source.slice(a,z)+';return renderedMessage;')(
+    {contains:n=>n.inRoot!==false},n=>({display:n.display||'block',visibility:n.visibility||'visible'}));
+  const node=(id,width=768,height=30,extra={})=>({id,closest:()=>false,getBoundingClientRect:()=>({width,height,y:-8000}),...extra});
+  const realOld=node('old'),realNew=node('new'),clone=node('older-hidden-clone',0,0);
+  assert.deepEqual([realOld,realNew,clone].filter(fn).map(n=>n.id),['old','new']);
+  assert.equal(fn(node('outside',768,30,{inRoot:false})),false);
+  assert.equal(fn(node('aria-hidden',768,30,{closest:()=>({})})),false);
+  assert.equal(fn(node('css-hidden',768,30,{visibility:'hidden'})),false);
+  assert.equal(fn(node('display-none',768,30,{display:'none'})),false);
+});
