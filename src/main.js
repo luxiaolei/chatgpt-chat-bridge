@@ -740,6 +740,12 @@ async function openConversationFromProject(page, binding, projectName, chatId) {
 // Never send a message, close an old tab, select a model, or change task identity.
 async function reattachTask(reg, chat, taskId, options={}) {
   if(options.confirm!==true) throw new Error("REATTACH_REQUIRES_CONFIRM");
+  // Compare authoritative bytes, not normalizeRegistry's in-memory relocation projection.
+  const sourceRegistry=stored("peek","registry");
+  const expectedChat=sourceRegistry.chats?.[chat.id];
+  const expectedBinding=sourceRegistry.projects?.[chat.project]?.bindings?.[chat.account];
+  if(!expectedChat || !expectedBinding || expectedChat.project!==chat.project || expectedChat.account!==chat.account)
+    throw new Error("REATTACH_REGISTRY_IDENTITY_MISMATCH");
   const before=await loadRuntime(), live=before.tasks?.[taskId];
   if(!live || live.sessionId!==chat.id || live.project!==chat.project || live.account!==chat.account)
     throw new Error("REATTACH_TASK_IDENTITY_MISMATCH");
@@ -776,13 +782,13 @@ async function reattachTask(reg, chat, taskId, options={}) {
   const snapshot=await state(page);
   if(!snapshot.composerPresent || snapshot.errorTexts?.length || String(snapshot.composerText||"").trim())
     throw new Error("REATTACH_TARGET_UNHEALTHY_OR_DRAFT");
-  const old={spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page};
+  const old={spaceName:expectedChat.spaceName,spaceId:expectedChat.spaceId,page:expectedChat.page};
   const next={...chat,spaceName:binding.spaceName,spaceId:task.spaceId,pageSpaceId:task.spaceId,
     page:page.label,profileId:binding.profileId,attachmentEpoch:Number(chat.attachmentEpoch||0)+1};
-  const committed=coordinated("reattach-commit",{taskId,sessionId:chat.id,expectedChat:chat,expectedTask:live,
+  const committed=coordinated("reattach-commit",{taskId,sessionId:chat.id,expectedChat,expectedTask:live,
     attachment:{spaceName:next.spaceName,spaceId:next.spaceId,pageSpaceId:next.pageSpaceId,page:next.page,
       profileId:next.profileId,attachmentEpoch:next.attachmentEpoch},
-    accountIdentity:identity,expectedBinding:binding,resumeWatch:options.resumeWatch===true});
+    accountIdentity:identity,expectedBinding,resumeWatch:options.resumeWatch===true});
   reg.chats[chat.id]=committed.chat;
   const current=committed.task;
   const observed=await observeSession(next,page,current);

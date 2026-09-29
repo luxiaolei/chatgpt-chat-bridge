@@ -10,13 +10,13 @@ async function fixture(overrides={}) {
   const binding={spaceName:'chat-bridge-agent-a',profileId:'Profile 1',projectUrl:'https://chatgpt.com/g/g-p-'+'a'.repeat(32)+'/project'};
   const task={taskId:'T',sessionId:'sid',project:'P',account:'a',status:'RUNNING',watchdogPausedForUserControl:true};
   const runtime={tasks:{T:task,other:{watchdogPausedForUserControl:true}},projects:{P:{watchdogPausedForUserControl:true}}};
-  const reg={chats:{sid:chat},accounts:{a:{identity:'login-a'}}};
+  const reg={projects:{P:{bindings:{a:binding}}},chats:{sid:chat},accounts:{a:{identity:'login-a'}}};
   let saved=0;
   const page={label:'p7',url:async()=>chat.url,waitForFunction:async()=>{},evaluate:async()=>overrides.login||'login-a',goto:async()=>{throw Error('unexpected navigation');}};
   const space={spaceId:9,tabs:async()=>[{label:'p7',url:chat.url,openedBy:'agent'}],page:()=>page};
   const snapshot={composerPresent:true,composerText:overrides.draft||'',errorTexts:[],generating:false};
   const taskAccounts=new Map(overrides.accountConflict?[[9,'foreign']]:[]);
-  const values={taskAccounts,accountScope:(_reg,alias)=>alias,loadRuntime:async()=>runtime,activeTaskStatus:s=>s==='RUNNING',bindingFor:()=>binding,
+  const values={stored:()=>structuredClone(reg),taskAccounts,accountScope:(_reg,alias)=>alias,loadRuntime:async()=>runtime,activeTaskStatus:s=>s==='RUNNING',bindingFor:()=>binding,
     listTaskSpaces:async()=>[{id:9,name:binding.spaceName,ownership:overrides.ownership||'agent',createdBy:'agent',profileId:'Profile 1'}],
     assertWebAvailable:async()=>{},taskSpace:async()=>space,newManagedPage:async()=>{throw Error('unexpected new page');},waitForConversationReady:async()=>{assert.equal(taskAccounts.get(9),'a');},
     projectKey:url=>url.match(/g-p-[a-f0-9]{32}/)?.[0],state:async()=>snapshot,saveRegistry:async()=>saved++,saveRuntime:async()=>saved++,
@@ -87,4 +87,9 @@ test('failed atomic attachment commit leaves both original registry and pause un
 test('reattach records verified account scope before readiness and rejects conflicting scope',async()=>{
   const f=await fixture({accountConflict:true});await assert.rejects(f.fn(f.reg,f.chat,'T',{confirm:true}),/ACCOUNT_SCOPE_CONFLICT/);
   assert.equal(f.saved,0);
+});
+
+test('reattach CAS uses raw registry rather than normalized attachment projection',async()=>{
+  const f=await fixture();const normalized={...f.chat,spaceName:'chat-bridge-agent-a',spaceId:null,page:null};
+  const r=await f.fn(f.reg,normalized,'T',{confirm:true});assert.equal(r.previous.spaceName,'user-space');
 });
