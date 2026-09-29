@@ -205,19 +205,36 @@ test("runtime stops a cooling identity before browser access and continues anoth
     // Exercise the actual effort control against sliders with different maxima.
     let displayed="5.6 Pro";
     api.modelUI(async()=>{},async()=>({mode:displayed}));
-    const oldDocument=globalThis.document;
+    const oldDocument=globalThis.document,oldGetComputedStyle=globalThis.getComputedStyle;
     try {
       for(const max of [4,5]) {
-        let value=0; const keys=[];
-        globalThis.document={querySelector:()=>({getAttribute:name=>({"aria-valuemin":"0","aria-valuemax":String(max),"aria-valuenow":String(value)})[name]})};
-        const page={evaluate:async fn=>fn(),focus:async()=>{},keyboard:{press:async key=>{keys.push(key);if(key==="End")value=max;}}};
+        let value=0; const keys=[]; let focused=null;
+        const hidden={
+          attrs:{"aria-valuemin":"0","aria-valuemax":String(max),"aria-valuenow":"0"},
+          getAttribute(name){return this.attrs[name]??null;},setAttribute(name,v){this.attrs[name]=v;},removeAttribute(name){delete this.attrs[name];},
+          hasAttribute(name){return Object.hasOwn(this.attrs,name);},getClientRects(){return [];},closest(){return null;}
+        };
+        const visible={
+          attrs:{"aria-valuemin":"0","aria-valuemax":String(max),"aria-valuenow":String(value)},
+          getAttribute(name){return name==="aria-valuenow"?String(value):(this.attrs[name]??null);},setAttribute(name,v){this.attrs[name]=v;},removeAttribute(name){delete this.attrs[name];},
+          hasAttribute(name){return Object.hasOwn(this.attrs,name);},getClientRects(){return [{width:1,height:1}]},closest(){return null;}
+        };
+        globalThis.getComputedStyle=e=>({visibility:e===hidden?"hidden":"visible",display:"block"});
+        globalThis.document={
+          querySelectorAll:selector=>selector==='[role="slider"]'?[hidden,visible]:[hidden,visible].filter(e=>e.getAttribute("data-chat-bridge-effort-slider")==="1"),
+          querySelector:selector=>[hidden,visible].find(e=>selector==='[data-chat-bridge-effort-slider="1"]'&&e.getAttribute("data-chat-bridge-effort-slider")==="1")||null
+        };
+        const page={evaluate:async fn=>fn(),focus:async selector=>{focused=selector;},keyboard:{press:async key=>{keys.push(key);if(key==="End")value=max;}}};
         await api.setEffort(page,"Pro");
+        assert.equal(focused,'[data-chat-bridge-effort-slider="1"]');
+        assert.equal(hidden.getAttribute("data-chat-bridge-effort-slider"),null);
+        assert.equal(visible.getAttribute("data-chat-bridge-effort-slider"),"1");
         assert.equal(value,max);assert.ok(keys.includes("End"));
         displayed="5.6 Extra High";
         await assert.rejects(api.setEffort(page,"Pro"),/not confirmed by the UI/);
         displayed="5.6 Pro";
       }
-    } finally {globalThis.document=oldDocument;}
+    } finally {globalThis.document=oldDocument;globalThis.getComputedStyle=oldGetComputedStyle;}
   } finally {
     globalThis.__CHAT_BRIDGE_CONFIG_DIR__=oldConfig;globalThis.__CHAT_BRIDGE_STATE_DIR__=oldState;
     await rm(dir,{recursive:true,force:true});
