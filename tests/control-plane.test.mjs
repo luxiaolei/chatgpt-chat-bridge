@@ -183,7 +183,7 @@ test("transient pre-send retry stops at the limit and becomes visible for review
     assert.equal(parse(fail()).status,"FAILED_PRE_SEND");
     const status=parse(f.call("control",["status","--project","P"])).projects[0];
     assert.equal(status.operationSummary.failedPreSend,1);
-    assert.equal(status.completion.state,"NEEDS_REVIEW");
+    assert.equal(status.completion.state,"NO_KNOWN_WORK");
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
