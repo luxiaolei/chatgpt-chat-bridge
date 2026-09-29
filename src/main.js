@@ -896,7 +896,13 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       }
       return null;
     }
-    const legacy=[...document.querySelectorAll('[data-message-author-role]')].map(e=>({
+    function renderedMessage(node) {
+      if(!root.contains(node) || node.closest('[hidden],[aria-hidden="true"],[inert]')) return false;
+      const style=getComputedStyle(node), rect=node.getBoundingClientRect();
+      // Offscreen conversation history is valid; display:none fallback/search clones are not.
+      return style.display!=="none" && style.visibility!=="hidden" && rect.width>0 && rect.height>0;
+    }
+    const legacy=[...document.querySelectorAll('[data-message-author-role]')].filter(renderedMessage).map(e=>({
       role:e.getAttribute('data-message-author-role'), id:e.getAttribute('data-message-id')||null, text:(e.innerText||'').trim(),
       ...(e.getAttribute('data-message-author-role')==='assistant'?assistantSource(e,e.getAttribute('data-message-id')):null)
     }));
@@ -904,10 +910,10 @@ async function state(page, includeUserMessages=false, controlAction=null) {
     if(!ms.length) {
       const richUnits=[...document.querySelectorAll(
         '[data-chatgpt-search-unit-key$=":user"], [data-chatgpt-search-unit-key$=":assistant"]'
-      )];
+      )].filter(renderedMessage);
       const units=richUnits.length?richUnits:[...document.querySelectorAll(
         '[data-content-search-unit-key$=":user"], [data-content-search-unit-key$=":assistant"]'
-      )];
+      )].filter(renderedMessage);
       const seen=new Set();
       ms=[];
       for(const unit of units) {
