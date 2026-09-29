@@ -25,7 +25,7 @@ test("global orphan cleanup closes only inactive agent orphan tabs",async()=>{
     {label:"p4",url:"https://chatgpt.com/",active:true,openedBy:"agent"},
   ];
   const fn=await new AsyncFunction("listTaskSpaces","loadRuntime","taskSpace","pagesOf","spaceProtection","samePhysicalSpace","state",code+";return pruneManagedOrphanTabs;")(
-    async()=>[{id:7,name:"managed",ownership:"agent"}],
+    async()=>[{id:7,name:"chat-bridge-agent-a",ownership:"agent",createdBy:"agent",profileId:"Profile 1"}],
     async()=>({tasks:{}}),
     async()=>({pages:async()=>pages,tabs:async()=>tabs}),
     async task=>task.pages(),
@@ -33,7 +33,7 @@ test("global orphan cleanup closes only inactive agent orphan tabs",async()=>{
     ()=>false,
     async()=>({generating:false,composerText:""}),
   );
-  const out=await fn({chats:{}});
+  const out=await fn({chats:{},accounts:{a:{identity:"login-a"}},projects:{P:{bindings:{a:{spaceName:"chat-bridge-agent-a",spaceId:7,profileId:"Profile 1",account:"a"}}}}});
   assert.deepEqual(closed,["p1","p2"]);
   assert.equal(out.length,2);
 });

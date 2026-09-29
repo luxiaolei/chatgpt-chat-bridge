@@ -261,15 +261,26 @@ def run(action, config, state, args):
             if completed.returncode and not result:
                 result = completed.returncode
         if not task_rows and not lifecycle_rows:
-            completed = subprocess.run([script, *command, "--orphan-only", "--skip-tasks", "--skip-lifecycle"], check=False)
-            if completed.returncode and not result:
-                result = completed.returncode
+            eligible = set()
+            for name, cfg in reg.get("projects", {}).items():
+                if project and name != project:
+                    continue
+                for alias, binding in cfg.get("bindings", {}).items():
+                    if (str(binding.get("spaceName", "")).startswith("chat-bridge-agent-")
+                            and binding.get("profileId") and reg.get("accounts", {}).get(alias, {}).get("identity")
+                            and not cooldown(reg, state, alias)["active"]):
+                        eligible.add(alias)
+            for alias in sorted(eligible):
+                completed = subprocess.run([script, *command, "--account", alias,
+                                            "--orphan-only", "--skip-tasks", "--skip-lifecycle"], check=False)
+                if completed.returncode and not result:
+                    result = completed.returncode
         raise SystemExit(result)
     cmd = args[0] if args else "help"
     project = option(args, "--project", None if cmd in ("watch", "projects") else reg.get("defaultProject"))
     explicit = option(args, "--account")
     account = explicit or project_account(reg, project)
-    session_commands = {"read", "status", "send", "ask", "model", "effort", "stop", "retry", "recover", "resend", "archive", "retire", "delete"}
+    session_commands = {"reattach", "read", "status", "send", "ask", "model", "effort", "stop", "retry", "recover", "resend", "archive", "retire", "delete"}
     if cmd in session_commands and len(args) > 1:
         key = args[1].split("/c/")[-1].split("?")[0]
         chats = list(reg.get("chats", {}).values())

@@ -2151,6 +2151,51 @@ def serve(config, state):
                 time.sleep(1)
 
 
+def reattach_commit(db, payload):
+    """CAS both attachment and exact-task pause in one local transaction.
+
+    Called only by the confirmed live-verifying reattach command. Does not send,
+    infer delivery or alter business control; stale observations have no writes.
+    """
+    required = {"taskId", "sessionId", "expectedChat", "expectedTask", "attachment",
+                "accountIdentity", "expectedBinding", "resumeWatch"}
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise ValueError("REATTACH_COMMIT_INVALID")
+    attachment = payload["attachment"]
+    if not isinstance(attachment, dict) or set(attachment) != {
+            "spaceName", "spaceId", "pageSpaceId", "page", "profileId", "attachmentEpoch"}:
+        raise ValueError("REATTACH_ATTACHMENT_INVALID")
+    begin_immediate(db)
+    try:
+        reg, rt = registry(db), runtime(db)
+        sid, tid = payload["sessionId"], payload["taskId"]
+        chat, task = reg.get("chats", {}).get(sid), rt.get("tasks", {}).get(tid)
+        if not chat or not task or chat != payload["expectedChat"] or task != payload["expectedTask"]:
+            raise ValueError("REATTACH_OWNER_CHANGED")
+        if (task.get("sessionId") != sid or task.get("project") != chat.get("project") or
+                task.get("account") != chat.get("account") or str(task.get("status", "")).upper() in TERMINAL):
+            raise ValueError("REATTACH_OWNER_CHANGED")
+        binding = reg.get("projects", {}).get(chat["project"], {}).get("bindings", {}).get(chat["account"])
+        identity = reg.get("accounts", {}).get(chat["account"], {}).get("identity")
+        if (not binding or binding != payload["expectedBinding"] or not identity or identity != payload["accountIdentity"] or
+                not str(attachment["spaceName"]).startswith("chat-bridge-agent-") or
+                attachment["spaceName"] != binding.get("spaceName") or attachment["profileId"] != binding.get("profileId")):
+            raise ValueError("REATTACH_BINDING_CHANGED")
+        chat.update(attachment)
+        if payload["resumeWatch"] is True:
+            for name in ("watchdogPausedForUserControl", "watchdogPausedAt", "watchdogPausedSpace", "watchdogPausedOwnership"):
+                task.pop(name, None)
+            task["observationResumedAt"] = stamp()
+            task["observationResumeReason"] = "operator-confirmed same-task managed attachment; no message sent"
+        db.execute("UPDATE documents SET payload=? WHERE kind='registry'", (json.dumps(reg, ensure_ascii=False),))
+        db.execute("UPDATE documents SET payload=? WHERE kind='runtime'", (json.dumps(rt, ensure_ascii=False),))
+        db.commit()
+        return {"chat": chat, "task": task, "messageSent": False}
+    except Exception:
+        db.rollback()
+        raise
+
+
 def main():
     command, config_name, state_name, *args = sys.argv[1:]
     config, state = pathlib.Path(config_name), pathlib.Path(state_name)
@@ -2202,6 +2247,8 @@ def main():
             else:
                 payload = json.load(sys.stdin)
             value = result_ack(db, payload)
+        elif command == "reattach-commit":
+            value = reattach_commit(db, json.load(sys.stdin))
         elif command == "configure":
             value = configure(config, state, json.loads(args[0]) if args else json.load(sys.stdin))
         elif command == "migration-check":
