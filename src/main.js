@@ -1164,7 +1164,7 @@ async function applyConfiguredSessionModel(page, chat) {
   const effortMatches=!!chat.effort && observed.effort?.toLowerCase()===String(chat.effort).toLowerCase();
   if(chat.model && effortMatches && !observed.model) {
     const previouslyVerified=chat.verifiedModel===chat.model && chat.verifiedEffort?.toLowerCase()===String(chat.effort).toLowerCase();
-    const selectorAvailable=await modelSelectorAvailable(page);
+    const selectorAvailable=previouslyVerified || await modelSelectorAvailable(page);
     if(previouslyVerified || !selectorAvailable) {
       return {
         model:chat.model,
