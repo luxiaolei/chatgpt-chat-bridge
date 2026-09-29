@@ -1309,8 +1309,17 @@ async function setEffort(page, effort) {
   await page.keyboard.press("Escape");
   await openModelMenu(page);
   const bounds=await page.evaluate(()=>{
-    const s=document.querySelector('[role="slider"]');
-    return s?{min:Number(s.getAttribute('aria-valuemin')??0),max:Number(s.getAttribute('aria-valuemax'))}:null;
+    for(const e of document.querySelectorAll('[data-chat-bridge-effort-slider="1"]')) e.removeAttribute('data-chat-bridge-effort-slider');
+    const sliders=[...document.querySelectorAll('[role="slider"]')].filter(e=>{
+      const style=getComputedStyle(e);
+      return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
+        !e.hasAttribute("disabled") && e.getAttribute("aria-disabled")!=="true" &&
+        !e.hasAttribute("inert") && !e.closest("[inert]");
+    });
+    const s=sliders[0];
+    if(!s) return null;
+    s.setAttribute('data-chat-bridge-effort-slider','1');
+    return {min:Number(s.getAttribute('aria-valuemin')??0),max:Number(s.getAttribute('aria-valuemax'))};
   });
   if(!bounds || !Number.isFinite(bounds.max) || bounds.max<=bounds.min){
     await page.keyboard.press("Escape");
@@ -1318,10 +1327,10 @@ async function setEffort(page, effort) {
   }
   const target=key==="pro"?bounds.max:bounds.min+levels[key];
   if(target>bounds.max){ await page.keyboard.press("Escape"); throw new Error("Requested thinking level is unavailable"); }
-  await page.focus('[role="slider"]');
+  await page.focus('[data-chat-bridge-effort-slider="1"]');
   await page.keyboard.press(key==="pro"?"End":"Home");
   if(key!=="pro") for(let i=0;i<levels[key];i++) await page.keyboard.press("ArrowRight");
-  const now=await page.evaluate(()=>Number(document.querySelector('[role="slider"]')?.getAttribute("aria-valuenow")));
+  const now=await page.evaluate(()=>Number(document.querySelector('[data-chat-bridge-effort-slider="1"]')?.getAttribute("aria-valuenow")));
   await page.keyboard.press("Escape");
   if(now!==target) throw new Error("Effort selection was not confirmed");
   if(observedModel((await state(page)).mode).effort?.toLowerCase()!==key) throw new Error("Requested thinking level was not confirmed by the UI: "+effort);
