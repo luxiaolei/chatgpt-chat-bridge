@@ -1885,6 +1885,34 @@ async function detachTerminalTaskPages(reg, project=null, account=null) {
   return closed;
 }
 
+async function pruneManagedOrphanTabs(reg) {
+  if(typeof listTaskSpaces!=="function") return [];
+  const runtime=await loadRuntime(), closed=[];
+  const spaces=(await listTaskSpaces()).filter(space=>space?.ownership==="agent");
+  for(const space of spaces) {
+    let task;
+    try { task=await taskSpace(space.id); } catch { continue; }
+    const pages=await pagesOf(task), tabs=await task.tabs().catch(()=>[]);
+    const binding={spaceName:space.name,spaceId:space.id};
+    const protection=spaceProtection(reg,runtime,binding,task);
+    for(const tab of tabs) if(tab.active&&tab.label) protection.labels.add(tab.label);
+    for(const chat of Object.values(reg.chats||{})) {
+      if(chat.page&&samePhysicalSpace(chat,binding,task)) protection.labels.add(chat.page);
+    }
+    for(const page of pages) {
+      if(!page?.label||protection.labels.has(page.label)) continue;
+      const tab=tabs.find(item=>item.label===page.label);
+      if(!tab||tab.active||tab.openedBy!=="agent") continue;
+      const emptyTab=/^(about:blank|chrome:\/\/newtab\/?$)/i.test(String(tab.url||""));
+      const snapshot=emptyTab?{generating:false,composerText:""}:await state(page).catch(()=>null);
+      if(!snapshot||snapshot.generating||String(snapshot.composerText||"").trim()) continue;
+      try { await page.close(); closed.push({spaceId:space.id,spaceName:space.name,page:page.label}); }
+      catch {}
+    }
+  }
+  return closed;
+}
+
 async function watchOnce(reg, project=null, account=null, options={}) {
   const rt=await loadRuntime(), results=[];
   const taskGapMs=Math.max(10000,Number(process.env.CHAT_BRIDGE_WATCH_TASK_GAP_MS||10000)||10000);
@@ -2031,6 +2059,8 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
   if(options.autoRecover!==false) {
     const closed=await detachTerminalTaskPages(reg,project,account);
     if(closed.length) results.push({state:"TERMINAL_TABS_DETACHED",closed});
+    const orphaned=await pruneManagedOrphanTabs(reg);
+    if(orphaned.length) results.push({state:"ORPHAN_TABS_RECLAIMED",closed:orphaned});
   }
   return results;
 }
@@ -2232,8 +2262,12 @@ else if(cmd==="account"){
     if(!project) throw new Error("account identify requires --project");
     const a=activeAccount(reg,project,accountArg), {task,binding}=await openBoundTask(reg,project,a);
     let page=null;
-    for(const candidate of await pagesOf(task)){
-      if(new URL(await candidate.url()).origin==="https://chatgpt.com"){ page=candidate; break; }
+    if(binding.projectUrl&&reg.accounts?.[a]?.identity){
+      page=(await repairProjectObservation(reg,project,a,binding)).page;
+    } else {
+      for(const candidate of await pagesOf(task)){
+        if(new URL(await candidate.url()).origin==="https://chatgpt.com"){ page=candidate; break; }
+      }
     }
     if(!page) throw new Error("Open an existing ChatGPT page in the bound Space before identifying the account");
     await detectWebRateLimit(page,"account-identify");
@@ -2348,6 +2382,8 @@ else if(cmd==="space"){
   } else if(sub==="consolidate") {
     const a=accountArg||reg.defaultAccount||DEFAULT_ACCOUNT;
     print(await consolidateAccountSpace(reg,a,{confirm:args.includes("--confirm"),profileId:opt("profile",null)}));
+  } else if(sub==="prune" && args.includes("--all")) {
+    print({ok:true,closed:await pruneManagedOrphanTabs(reg)});
   } else {
     const p=project; if(!p) throw new Error("--project required");
     const a=activeAccount(reg,p,accountArg), b=bindingFor(reg,p,a,true);

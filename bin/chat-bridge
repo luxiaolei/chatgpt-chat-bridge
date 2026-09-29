@@ -177,15 +177,17 @@ esac
 
 # Watch all requested accounts locally; one cooling account must not mask another.
 if [[ "$CMD" == "watch" ]]; then
-  if (( ${@[(Ie)--loop]} )); then
+  if (( ${@[(Ie)--orphan-only]} )); then
+    :
+  elif (( ${@[(Ie)--loop]} )); then
     exec python3 "$PREFLIGHT" loop "$CONFIG_DIR" "$STATE_DIR" "$0" "$@"
-  fi
-  if (( ! ${@[(Ie)--account]} )); then
+  elif (( ! ${@[(Ie)--account]} )); then
     exec python3 "$PREFLIGHT" watch-all "$CONFIG_DIR" "$STATE_DIR" "$0" "$@"
-  fi
-  HAS_ACTIVE="$(python3 "$PREFLIGHT" watch "$CONFIG_DIR" "$STATE_DIR" "$@")"
-  if [[ "$HAS_ACTIVE" != "1" ]]; then
-    exit 0
+  else
+    HAS_ACTIVE="$(python3 "$PREFLIGHT" watch "$CONFIG_DIR" "$STATE_DIR" "$@")"
+    if [[ "$HAS_ACTIVE" != "1" ]]; then
+      exit 0
+    fi
   fi
 fi
 

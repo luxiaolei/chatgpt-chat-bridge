@@ -260,6 +260,10 @@ def run(action, config, state, args):
             completed = subprocess.run([script, *command, *extra], check=False)
             if completed.returncode and not result:
                 result = completed.returncode
+        if not task_rows and not lifecycle_rows:
+            completed = subprocess.run([script, *command, "--orphan-only", "--skip-tasks", "--skip-lifecycle"], check=False)
+            if completed.returncode and not result:
+                result = completed.returncode
         raise SystemExit(result)
     cmd = args[0] if args else "help"
     project = option(args, "--project", None if cmd in ("watch", "projects") else reg.get("defaultProject"))
