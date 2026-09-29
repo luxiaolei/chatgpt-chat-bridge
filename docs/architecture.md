@@ -124,9 +124,9 @@ IDLE_COMPLETE   ERROR_RECOVERABLE   recovery ladder
 IDLE_INCOMPLETE                     or BLOCKED
 ```
 
-`lastProgressAt` and per-task baselines are stored in runtime state. Per-task `stallThresholdSec` can override the effort-based defaults. A new result is identified primarily by ChatGPT's stable `data-message-id`, with count/hash/length as additional signals.
+`lastProgressAt` and per-task baselines are stored in runtime state. Per-task `stallThresholdSec` can override the effort-based warning defaults. Without an override, the budget is at least the maximum of requested/configured and UI-observed effort defaults; a selector showing Medium cannot silently shorten an Extra High task budget. Quiet thresholds do not authorize Stop. One owner notice is queued per quiet episode; explicit aggressive recovery is required for Stop + guarded continue. A new result is identified primarily by ChatGPT's stable `data-message-id`, with count/hash/length as additional signals.
 
-The watchdog never marks a project task COMPLETE from UI state alone. `IDLE_COMPLETE` becomes `AWAITING_DURABLE_UPDATE`; the owning controller must reconcile GitHub Issue/PR/callback evidence. A Space in `user` or `agentDelegatedToUser` ownership is a hard automation boundary: watchdog does not claim it, persists `watchdogPausedForUserControl`, and later local preflight suppresses that task before browser startup. Explicit user-directed `send`/`ask`/`retry`/`recover`/`resend` clears the pause and allows work to continue through the normal managed-Agent-Space selection path. Mechanical recovery is conservative: native recovery control, then `continue`, then Stop + guarded continue. Original-task replay requires explicit aggressive mode. Exhausted recovery becomes `BLOCKED` and routes an event through `replyTo → controller → escalationTo → rootController`.
+The watchdog never marks a project task COMPLETE from UI state alone. `IDLE_COMPLETE` becomes `AWAITING_DURABLE_UPDATE`; the owning controller must reconcile GitHub Issue/PR/callback evidence. A Space in `user` or `agentDelegatedToUser` ownership is a hard automation boundary: watchdog does not claim it, persists `watchdogPausedForUserControl`, and later local preflight suppresses that task before browser startup. Explicit user-directed `send`/`ask`/`retry`/`recover`/`resend` clears the pause and allows work to continue through the normal managed-Agent-Space selection path. Mechanical recovery is conservative: a current visible native recovery control, then guarded `continue` for a real incomplete/error turn. Quiet UI alone never triggers Stop. Stop + guarded continue and original-task replay require explicit aggressive mode. Recovery checks the current task before acting and will not knowingly re-run a recorded result; this is not a global exactly-once guarantee for external side effects. Exhausted recovery becomes `BLOCKED` and routes an event through `replyTo → controller → escalationTo → rootController`.
 
 For continuous local operation, macOS launchd runs a fresh one-shot `chat-bridge watch --quiet` periodically. A fresh process reloads registry/runtime each scan, so newly created sessions and account/Space rebindings are visible without restarting a daemon.
 
@@ -220,7 +220,7 @@ The bridge exposes:
 - `stop`: stop an active generation
 - `retry`: use a visible Retry/Regenerate control
 - `resend`: resend the latest user message
-- `recover`: combine stop → retry → resend fallback
+- `recover`: inspect current task/UI; use native recovery for errors, guarded continuation for incomplete turns, and defer quiet generation without stopping unless explicitly aggressive
 
 Project state survives a broken chat because the authoritative task record is expected to be in GitHub.
 
@@ -256,3 +256,15 @@ For tasks that do not need local state, prefer direct Chat + GitHub work.
 The runtime controls a logged-in browser profile. Any process with access to the same user account and local browser control surface may be able to affect that session.
 
 Do not expose the local runtime to untrusted users and do not commit browser state or the local registry.
+
+## Local reliability and read efficiency
+
+Runtime and registry authority is SQLite; JSON is a compatibility projection. Hot read paths use `state-store.py peek`, which neither initializes missing stores nor rewrites projections. Legacy uninitialized deployments may read JSON; SQLite errors propagate rather than falling back to stale JSON. Explicit `get` repairs projections and `put` retains transactional conflict checks. Preflight and capacity readers consult SQLite authority. A store error defers watchdog work rather than escalating a healthy worker or amplifying contention with failure-counter writes.
+
+`chat-bridge health` reports cached observation freshness, manual ownership, capacity waiting, and retained historical errors without touching Ego. Generation counts are labeled `recentlyObservedGenerating`, not live activity.
+
+Conversation attachment compares the conversation ID, origin, and any available canonical Project IDs, not the full URL string. Slug/query changes do not reload a running tab. A reused page label belonging to another conversation is never navigated away; the Bridge first looks for the same conversation, then uses the existing safe page pool. Readiness failure on an existing same-conversation tab does not trigger a Project navigation fallback.
+
+Orphan cleanup does not create an idle-browser wakeup or bypass a cooling account. Cleanup inside a scan is scoped to the admitted account/Project and is not repeated by every per-task child. Terminal tab safety, active generations, drafts, user ownership, and UNKNOWN delivery reconciliation remain protected. This intentionally favors effective completed work over maximum open tabs.
+
+See `docs/local-reliability-20260929.md` for the repair evidence, limitations, and deployment gate.

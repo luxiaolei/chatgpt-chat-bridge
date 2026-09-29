@@ -38,7 +38,7 @@ if(!PAGE_POOL) throw new Error("chat-bridge page pool module was not loaded");
 const { pageDetachCandidates, orphanManagedPageCandidates } = PAGE_POOL;
 const LIVENESS = globalThis.__CHAT_BRIDGE_LIVENESS__;
 if(!LIVENESS) throw new Error("chat-bridge liveness policy module was not loaded");
-const { stallThresholdSec } = LIVENESS;
+const { stallThresholdSec, livenessBudget } = LIVENESS;
 const TASK_POLICY = globalThis.__CHAT_BRIDGE_TASK_POLICY__;
 if(!TASK_POLICY) throw new Error("chat-bridge task policy module was not loaded");
 const { activeTaskStatus, normalizeCompletionMode, assertTaskId, assertActiveTaskTarget, activeSessionConflict, assertComposerSafe, isPreSendDefer } = TASK_POLICY;
@@ -57,7 +57,7 @@ if(!MODEL_POLICY) throw new Error("chat-bridge model policy module was not loade
 const {modelPreset,observedModel,selectModelLabel}=MODEL_POLICY;
 const SESSION_POLICY=globalThis.__CHAT_BRIDGE_SESSION_POLICY__;
 if(!SESSION_POLICY) throw new Error("chat-bridge session policy module was not loaded");
-const {recoveryRequired,contextExhausted}=SESSION_POLICY;
+const {recoveryRequired,contextExhausted,sameConversationUrl}=SESSION_POLICY;
 const EVENT_JOURNAL=globalThis.__CHAT_BRIDGE_EVENTS__ || {appendEvent:async()=>null,listEvents:async()=>[]};
 const {appendEvent,listEvents}=EVENT_JOURNAL;
 const SPACE_CATALOG=globalThis.__CHAT_BRIDGE_SPACE_CATALOG__;
@@ -173,7 +173,7 @@ function capacityWaitError(binding, value, reason=null) {
   error.nextRetryAt=value?.nextRetryAt||null; return error;
 }
 async function loadRuntime() {
-  const runtime=normalizeRuntime(stored("get","runtime"));
+  const runtime=normalizeRuntime(stored("peek","runtime"));
   stateBaselines.set(runtime,structuredClone(runtime));
   return runtime;
 }
@@ -269,7 +269,7 @@ async function detectWebRateLimit(page, context="ui") {
 }
 
 async function loadRegistry() {
-  const registry=normalizeRegistry(stored("get","registry"));
+  const registry=normalizeRegistry(stored("peek","registry"));
   stateBaselines.set(registry,structuredClone(registry));
   return registry;
 }
@@ -793,15 +793,27 @@ async function ensurePage(reg, chat, options={}) {
     ? {spaceName:chat.spaceName,spaceId:chat.spaceId,profileId:chat.profileId||null} : null;
   const {binding,task}=await openBoundTask(reg,chat.project,chat.account,{...options,spaceOverride}), pages=await pagesOf(task);
   let page=pages.find(p=>p.label===chat.page) || null;
-  if(!page) page=await newManagedPage(reg,chat.project,chat.account,task,binding,chat.id,{allowOverflow:false});
+  // Page labels are recyclable: never navigate somebody else's existing tab.
+  if(page && !sameConversationUrl(await page.url().catch(()=>""),chat.url)) page=null;
+  if(!page && typeof task.tabs==="function") {
+    const tabs=await task.tabs().catch(()=>[]);
+    const existing=tabs.find(tab=>tab.openedBy==="agent" && sameConversationUrl(tab.url,chat.url));
+    const candidate=existing?pages.find(p=>p.label===existing.label):null;
+    if(candidate && sameConversationUrl(await candidate.url().catch(()=>""),chat.url)) page=candidate;
+  }
+  const allocated=!page;
+  if(allocated) page=await newManagedPage(reg,chat.project,chat.account,task,binding,chat.id,{allowOverflow:false});
   chat.spaceName=binding.spaceName; chat.spaceId=task.spaceId; chat.lastUsedAt=new Date().toISOString();
   let attached=false;
   try {
-    if((await page.url())!==chat.url) await page.goto(chat.url,{waitUntil:"load",timeout:20000});
+    if(allocated) await page.goto(chat.url,{waitUntil:"load",timeout:20000});
     await waitForConversationReady(page,20000);
-    attached=(await page.url()).includes("/c/"+chat.id);
-  } catch {}
-  if(!attached) attached=await openConversationFromProject(page,binding,chat.project,chat.id);
+    attached=sameConversationUrl(await page.url(),chat.url);
+  } catch(error) {
+    // A same-conversation tab may still have a live stream or tool call.
+    if(!allocated) throw error;
+  }
+  if(!attached && allocated) attached=await openConversationFromProject(page,binding,chat.project,chat.id);
   if(!attached) {
     chat.page=null;
     chat.detachedAt=new Date().toISOString();
@@ -838,8 +850,8 @@ async function expandEvidenceMessages(page) {
   }
 }
 
-async function state(page, includeUserMessages=false) {
-  return await page.evaluate((includeUserMessages) => {
+async function state(page, includeUserMessages=false, controlAction=null) {
+  return await page.evaluate(({includeUserMessages,controlAction}) => {
     const root=document.querySelector('main') || document.querySelector('[role="main"]') || document.body;
     const messageSelector='[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]';
     if(!globalThis.__CHAT_BRIDGE_WATCH || globalThis.__CHAT_BRIDGE_WATCH.root!==root) {
@@ -907,19 +919,50 @@ async function state(page, includeUserMessages=false) {
         ms.push({role,id,text,...original});
       }
     }
-    const buttons=[...document.querySelectorAll('button')];
-    const norm=b=>((b.getAttribute('aria-label')||'')+' '+(b.getAttribute('data-testid')||'')+' '+(b.innerText||'')).trim();
-    const stop=buttons.find(b=>/\bstop\b/i.test(norm(b)) || /stop/i.test(b.getAttribute('data-testid')||''));
-    const send=buttons.find(b=>b.getAttribute('data-testid')==='send-button' || /\bsend\b/i.test(norm(b)));
+    const uiVisible=node=>{
+      const style=getComputedStyle(node);
+      return node.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
+        style.opacity!=="0" && !node.closest('[inert], [hidden], [aria-hidden="true"]');
+    };
+    const roleOf=node=>node?.getAttribute('data-message-author-role') ||
+      /:(user|assistant)$/.exec(node?.getAttribute('data-chatgpt-search-unit-key')||node?.getAttribute('data-content-search-unit-key')||'')?.[1];
+    const containers=[...document.querySelectorAll(messageSelector)].filter(node=>['user','assistant'].includes(roleOf(node)));
+    const lastContainer=containers[containers.length-1];
+    const currentUi=node=>{
+      const owner=node.closest(messageSelector);
+      if(!owner) return true;
+      return roleOf(owner)==='assistant' && !!lastContainer &&
+        (owner===lastContainer || owner.contains(lastContainer) || lastContainer.contains(owner));
+    };
+    const buttons=[...document.querySelectorAll('button')].filter(b=>uiVisible(b) && !b.disabled && b.getAttribute('aria-disabled')!=='true');
+    const norm=b=>(b.getAttribute('aria-label')||b.innerText||b.getAttribute('data-testid')||'').trim();
+    const isStop=b=>/(?:^|-)stop(?:-|$)/i.test(b.getAttribute('data-testid')||'') ||
+      /^(?:Stop(?: generating| generation| streaming)?|停止(?:生成|回答|输出)?)$/i.test(norm(b));
+    const stop=buttons.find(b=>!b.closest(messageSelector) && isStop(b));
+    const send=buttons.find(b=>!b.closest(messageSelector) && (b.getAttribute('data-testid')==='send-button' || /^Send(?: prompt| message)?$/i.test(norm(b))));
     const recoveryWords=["continue generating","try again","retry","regenerate"];
-    const recoveryControls=buttons.map(b=>({label:norm(b),disabled:!!b.disabled||b.getAttribute('aria-disabled')==='true'}))
-      .filter(x=>!x.disabled && recoveryWords.some(k=>x.label.toLowerCase().includes(k)));
+    const recoverableButtons=buttons.filter(currentUi).filter(b=>recoveryWords.some(k=>norm(b).toLowerCase().includes(k)));
+    const recoveryControls=recoverableButtons.map(b=>({label:norm(b),disabled:false}));
+    if(controlAction==="stop") {
+      if(!stop) return {stopped:false};
+      const label=norm(stop); stop.click(); return {stopped:true,label};
+    }
+    if(controlAction==="retry") {
+      for(const key of recoveryWords) {
+        const button=[...recoverableButtons].reverse().find(b=>norm(b).toLowerCase().includes(key));
+        if(button) { const label=norm(button); button.click(); return {clicked:true,label,kind:key}; }
+      }
+      return {clicked:false};
+    }
     const alerts=[...document.querySelectorAll('[role="alert"], [data-testid*="error" i]')]
+      .filter(node=>uiVisible(node) && currentUi(node))
       .map(x=>(x.innerText||'').trim()).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).slice(-8);
     const errorWords=["something went wrong","error generating","network error","unable to load conversation","try again later",
+      "resume stream unavailable","error in message stream","stream error","error occurred while connecting to the websocket",
       "context too long","maximum context length","conversation is too long","maximum length for this conversation","reached the maximum"];
     const knownErrors=[...document.querySelectorAll('main div, main span, main p, [role="main"] div, [role="main"] span, [role="main"] p')]
-      .filter(x=>!x.closest(messageSelector)).map(x=>(x.innerText||'').trim()).filter(v=>v && v.length<300)
+      .filter(x=>uiVisible(x) && !x.closest(messageSelector) && !x.querySelector(messageSelector))
+      .map(x=>(x.innerText||'').trim()).filter(v=>v && v.length<300)
       .filter(v=>errorWords.some(k=>v.toLowerCase().includes(k))).filter((v,i,a)=>a.indexOf(v)===i).slice(-5);
     const form=document.querySelector('form');
     const composerEl=document.querySelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]');
@@ -943,7 +986,7 @@ async function state(page, includeUserMessages=false) {
       sendAvailable:!!send && !send.disabled && send.getAttribute('aria-disabled')!=='true',
       inputReady:composer && !stop,composerPresent:composer,composerText,recoveryControls,
       errorTexts:[...alerts,...knownErrors].filter((v,i,a)=>a.indexOf(v)===i),
-      online:navigator.onLine,visibility:document.visibilityState,
+      online:navigator.onLine,visibility:document.visibilityState,pageWasDiscarded:!!document.wasDiscarded,
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,
       lastAssistantTextSource:lastAssistantMsg?.textSource||'rendered-dom',
       userMessages:includeUserMessages?ms.filter(x=>x.role==='user'):undefined,
@@ -953,18 +996,19 @@ async function state(page, includeUserMessages=false) {
       mutationLastAt:new Date(globalThis.__CHAT_BRIDGE_WATCH.lastMutationAt).toISOString(),
       observerStartedAt:new Date(globalThis.__CHAT_BRIDGE_WATCH.startedAt).toISOString()
     };
-  },includeUserMessages);
+  },{includeUserMessages,controlAction});
 }
 
 function classifySnapshot(raw, heartbeat, task=null, effort=null) {
   const quietForSec=heartbeat.quietForSec||0;
-  const threshold=Number(task?.stallThresholdSec)||stallThresholdSec(effort||raw.mode);
+  const budget=livenessBudget(raw,task,effort);
+  const threshold=budget.stallThresholdSec;
   let sessionState="IDLE", recommendation="NONE";
   if(contextExhausted(raw)) { sessionState="CONTEXT_EXHAUSTED"; recommendation="ROTATE_SESSION"; }
   else if(!raw.online || !raw.composerPresent) { sessionState="BLOCKED"; recommendation="ESCALATE"; }
   else if(recoveryRequired(raw)) { sessionState="ERROR_RECOVERABLE"; recommendation="RECOVER_NATIVE"; }
   else if(raw.generating) {
-    if(quietForSec>=threshold) { sessionState="SUSPECT_STALL"; recommendation="STOP_AND_CONTINUE"; }
+    if(quietForSec>=threshold) { sessionState="SUSPECT_STALL"; recommendation="INSPECT_WITHOUT_STOP"; }
     else if(quietForSec<=45) { sessionState="RUNNING_ACTIVE"; recommendation="WAIT"; }
     else { sessionState="RUNNING_QUIET"; recommendation="WAIT"; }
   } else if(task) {
@@ -975,7 +1019,7 @@ function classifySnapshot(raw, heartbeat, task=null, effort=null) {
     if(hasNewAssistant) { sessionState="IDLE_COMPLETE"; recommendation="RECONCILE_DURABLE_STATE"; }
     else { sessionState="IDLE_INCOMPLETE"; recommendation="CONTINUE"; }
   }
-  return {sessionState,recommendation,stallThresholdSec:threshold,quietForSec};
+  return {sessionState,recommendation,...budget,quietForSec};
 }
 
 async function observeSession(chat,page,task=null) {
@@ -1001,11 +1045,12 @@ async function observeSession(chat,page,task=null) {
     if(!liveTask.baselineAssistantHash) liveTask.baselineAssistantHash=assistantHash;
     if(!liveTask.baselineAssistantId) liveTask.baselineAssistantId=raw.lastAssistantId||null;
   }
-  Object.assign(hb,classifySnapshot(raw,hb,liveTask,raw.mode||chat.effort));
+  Object.assign(hb,classifySnapshot(raw,hb,liveTask,chat.effort));
   rt.sessions[chat.id]=hb;
   if(liveTask?.taskId && rt.tasks[liveTask.taskId]) {
     Object.assign(liveTask,{sessionState:hb.sessionState,recommendation:hb.recommendation,lastProgressAt:hb.lastProgressAt,
-      quietForSec:hb.quietForSec,runningForSec:hb.runningForSec,stateUpdatedAt:hb.observedAt,updatedAt:hb.observedAt});
+      quietForSec:hb.quietForSec,runningForSec:hb.runningForSec,stateUpdatedAt:hb.observedAt,
+      observedEffort:hb.observedEffort,effortMismatch:hb.effortMismatch,effectiveStallThresholdSec:hb.stallThresholdSec});
     rt.tasks[liveTask.taskId]=liveTask;
   }
   await saveRuntime(rt);
@@ -1668,36 +1713,23 @@ async function syncProject(reg, page, projectName, account, binding) {
 }
 
 async function stopGeneration(page) {
-  return await page.evaluate(() => {
-    const bs=[...document.querySelectorAll("button")];
-    const b=bs.find(x=>{
-      const s=((x.getAttribute("aria-label")||"")+" "+(x.innerText||"")+" "+(x.getAttribute("data-testid")||"")).toLowerCase();
-      return s.includes("stop");
-    });
-    if(!b) return {stopped:false};
-    const label=(b.getAttribute("aria-label")||b.innerText||b.getAttribute("data-testid")||"stop").trim();
-    b.click();
-    return {stopped:true,label};
-  });
+  return await state(page,false,"stop");
 }
 
 async function nativeRetry(page) {
-  return await page.evaluate(() => {
-    const buttons=[...document.querySelectorAll("button")];
-    const priorities=["continue generating","try again","retry","regenerate"];
-    const norm=b=>((b.getAttribute("aria-label")||"")+" "+(b.innerText||"")+" "+(b.getAttribute("data-testid")||"")).trim().toLowerCase();
-    for(const key of priorities) {
-      const b=[...buttons].reverse().find(x=>norm(x).includes(key) && !x.disabled && x.getAttribute('aria-disabled')!=='true');
-      if(b){ const label=(b.getAttribute("aria-label")||b.innerText||b.getAttribute('data-testid')||key).trim(); b.click(); return {clicked:true,label,kind:key}; }
-    }
-    return {clicked:false};
-  });
+  return await state(page,false,"retry");
 }
 
 async function waitForGenerationStop(page, timeout=7000) {
   return await page.waitForFunction(()=>{
     const bs=[...document.querySelectorAll('button')];
-    const stop=bs.some(b=>/\bstop\b/i.test(((b.getAttribute('aria-label')||'')+' '+(b.innerText||'')+' '+(b.getAttribute('data-testid')||''))));
+    const stop=bs.some(b=>{
+      const style=getComputedStyle(b);
+      if(!b.getClientRects().length || style.visibility==="hidden" || style.display==="none" || style.opacity==="0" ||
+        b.disabled || b.getAttribute('aria-disabled')==='true' || b.closest('[inert], [hidden], [aria-hidden="true"], [data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]')) return false;
+      const label=(b.getAttribute('aria-label')||b.innerText||'').trim();
+      return /(?:^|-)stop(?:-|$)/i.test(b.getAttribute('data-testid')||'') || /^(?:Stop(?: generating| generation| streaming)?|停止(?:生成|回答|输出)?)$/i.test(label);
+    });
     return !stop;
   },undefined,{timeout}).then(()=>true).catch(()=>false);
 }
@@ -1849,7 +1881,27 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
 
 async function gradedRecover(reg, chat, page, task, observed, options={}) {
   const rt=await loadRuntime();
-  const live=rt.tasks[task.taskId]||task;
+  const live=rt.tasks[task.taskId];
+  if(!live || !activeTaskStatus(live.status) || live.watchdogPausedForUserControl ||
+      (live.sessionId && live.sessionId!==chat.id)) {
+    return {action:"SKIPPED",reason:"TASK_NO_LONGER_RECOVERABLE",status:live?.status||null};
+  }
+  if(contextExhausted(observed)) return {action:"SKIPPED",reason:"CONTEXT_EXHAUSTED",recommendation:"ROTATE_SESSION"};
+  if(observed.sessionState==="SUSPECT_STALL" && !options.aggressive) {
+    // Quiet UI alone is not proof of failure. Notify once per quiet episode.
+    const noticeKey=[chat.id,observed.lastUserId||"",observed.lastProgressAt||""].join(":");
+    const lastAttempt=Date.parse(live.stallNoticeAttemptAt||"");
+    let notification=null;
+    if(live.stallNoticeKey!==noticeKey && (!Number.isFinite(lastAttempt) || Date.now()-lastAttempt>=300000)) {
+      live.stallNoticeAttemptAt=new Date().toISOString();
+      notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: SUSPECT_STALL\nrole: ${live.role||chat.role}\nsummary: No visible progress beyond the warning threshold. Generation was NOT stopped. Inspect durable/tool progress before explicitly recovering; do not replay completed work.`);
+      if(notification?.queued || notification?.sent || notification?.operationId) live.stallNoticeKey=noticeKey;
+      live.lastRecoveryDecision="QUIET_GENERATION_DEFERRED";
+      await saveRuntime(rt);
+      await emitTaskEvent(live,"RECOVERY_DEFERRED",{reason:"QUIET_GENERATION_IS_NOT_FAILURE",quietForSec:observed.quietForSec,effortMismatch:observed.effortMismatch||false});
+    }
+    return {action:"DEFERRED",reason:"QUIET_GENERATION_IS_NOT_FAILURE",notification};
+  }
   const maxAttempts=Number(options.maxAttempts??3), maxTotalRecoveries=Number(options.maxTotalRecoveries??8), cooldownSec=Number(options.cooldownSec??45), aggressive=!!options.aggressive;
   const attempts=Number(live.recoveryAttempts||0), totalAttempts=Number(live.totalRecoveryAttempts||0), now=new Date(), last=live.lastRecoveryAt?new Date(live.lastRecoveryAt):null;
   if(last && (now-last)/1000<cooldownSec) return {action:"COOLDOWN",attempts};
@@ -1879,7 +1931,9 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
     }
   } else if(observed.sessionState==="SUSPECT_STALL") {
     detail=await stopGeneration(page);
-    await waitForGenerationStop(page,7000);
+    if(!detail.stopped || !await waitForGenerationStop(page,7000)) return {action:"DEFERRED",reason:"GENERATION_STOP_NOT_CONFIRMED",detail};
+    const current=(await loadRuntime()).tasks[task.taskId];
+    if(!current || !activeTaskStatus(current.status) || current.watchdogPausedForUserControl) return {action:"SKIPPED",reason:"TASK_CHANGED_DURING_STOP"};
     await sendMessage(page,"continue from where you left off. Do not restart or duplicate completed work; inspect the current task/GitHub state first.");
     method="stop-and-continue";
   } else {
@@ -1955,17 +2009,25 @@ async function detachTerminalTaskPages(reg, project=null, account=null) {
   return closed;
 }
 
-async function pruneManagedOrphanTabs(reg, account=null) {
+async function pruneManagedOrphanTabs(reg, project=null, account=null) {
   if(typeof listTaskSpaces!=="function") return [];
   const runtime=await loadRuntime(), closed=[];
-  const bindings=Object.values(reg.projects||{}).flatMap(p=>Object.values(p.bindings||{})).filter(b=>!account||b.account===account);
+  const identity=account?reg.accounts?.[account]?.identity:null;
+  const sameAccount=alias=>!account || alias===account || (!!identity && reg.accounts?.[alias]?.identity===identity);
+  const records=[];
+  for(const [name,record] of Object.entries(reg.projects||{})) {
+    if(project && name!==project) continue;
+    for(const [alias,binding] of Object.entries(record.bindings||{}))
+      if(sameAccount(alias)) records.push({...binding,account:alias});
+  }
+  for(const chat of Object.values(reg.chats||{}))
+    if((!project || chat.project===project) && sameAccount(chat.account)) records.push(chat);
   const spaces=(await listTaskSpaces()).filter(space=>space?.ownership==="agent" && space.createdBy==="agent" &&
-    String(space.name||"").startsWith("chat-bridge-agent-") && bindings.some(binding=>
-      binding.spaceName===space.name && binding.profileId===space.profileId &&
-      reg.accounts?.[binding.account]?.identity && (
-        binding.spaceId!=null && Number(binding.spaceId)===Number(space.id) ||
-        Object.values(reg.spaces||{}).some(record=>record.name===space.name && Number(record.spaceId)===Number(space.id) &&
-          record.profileId===space.profileId && record.identity===reg.accounts[binding.account].identity)
+    String(space.name||"").startsWith("chat-bridge-agent-") && records.some(record=>
+      record.spaceName===space.name && record.profileId===space.profileId && reg.accounts?.[record.account]?.identity && (
+        record.spaceId!=null && Number(record.spaceId)===Number(space.id) ||
+        Object.values(reg.spaces||{}).some(observed=>observed.name===space.name && Number(observed.spaceId)===Number(space.id) &&
+          observed.profileId===space.profileId && observed.identity===reg.accounts[record.account].identity)
       )));
   for(const space of spaces) {
     let task;
@@ -2020,6 +2082,11 @@ async function watchOnce(reg, project=null, account=null, options={}) {
       if(!task.sessionId) task.sessionId=chat.id;
       const {page}=await ensurePage(reg,chat,{pauseOnUserControl:true});
       const observed=await observeSession(chat,page,task);
+      const current=(await loadRuntime()).tasks[task.taskId];
+      if(!current || !activeTaskStatus(current.status) || current.watchdogPausedForUserControl || (current.sessionId && current.sessionId!==chat.id)) {
+        results.push({taskId:task.taskId,state:"TASK_CHANGED",status:current?.status||null});
+        continue;
+      }
       let recovery={action:"NONE"}, notification=null;
       if(observed.sessionState==="CONTEXT_EXHAUSTED") {
         const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
@@ -2040,7 +2107,8 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
       } else if(options.autoRecover!==false && ["ERROR_RECOVERABLE","IDLE_INCOMPLETE","SUSPECT_STALL","BLOCKED"].includes(observed.sessionState)) {
         recovery=await gradedRecover(reg,chat,page,task,observed,options);
       } else if(observed.sessionState==="IDLE_COMPLETE") {
-        const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
+        const latest=await loadRuntime(), live=latest.tasks[task.taskId];
+        if(!live || !activeTaskStatus(live.status) || live.watchdogPausedForUserControl) continue;
         live.recoveryAttempts=0; live.watchErrorCount=0;
         if((live.completionMode||"durable")==="external") {
           live.status="RUNNING";
@@ -2080,6 +2148,12 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
       results.push({taskId:task.taskId,role:task.role,sessionId:chat.id,state:observed.sessionState,recommendation:observed.recommendation,
         quietForSec:observed.quietForSec,runningForSec:observed.runningForSec,recovery,notification});
     } catch(error) {
+      // Local infrastructure failure is not proof that the worker Chat failed.
+      // Do not amplify store contention by writing failure counters back to it.
+      if(/^STATE_STORE_(?:RUNTIME|REGISTRY):/.test(String(error?.message||""))) {
+        results.push({taskId:task.taskId,role:task.role,state:"STATE_STORE_DEFERRED",error:error.message});
+        continue;
+      }
       if(error?.code==="WEB_RATE_LIMITED"){ results.push({taskId:task.taskId,account:error.account,role:task.role,state:"WEB_COOLDOWN",reason:"CHATGPT_RATE_LIMIT"}); continue; }
       if(error?.code==="SPACE_IN_USER_CONTROL") {
         const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
@@ -2097,7 +2171,11 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
           state:"USER_CONTROLLED",paused:true,spaceName:live.watchdogPausedSpace,ownership:live.watchdogPausedOwnership});
         continue;
       }
-      const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
+      const latest=await loadRuntime(), live=latest.tasks[task.taskId];
+      if(!live || !activeTaskStatus(live.status)) {
+        results.push({taskId:task.taskId,state:"TASK_CHANGED",status:live?.status||null});
+        continue;
+      }
       live.watchErrorCount=Number(live.watchErrorCount||0)+1; live.lastWatchError=error.message; live.lastWatchErrorAt=new Date().toISOString();
       let notification=null;
       if(options.autoRecover!==false && live.watchErrorCount>=3 && live.status!=="BLOCKED") {
@@ -2134,10 +2212,12 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
       if(lifecycle) { lastVisitedAt=Date.now(); results.push({project:p,workgroupId:workgroupId||null,projectLifecycle:lifecycle}); }
     }
   }
-  if(options.autoRecover!==false) {
+  // Per-task children hold an account pacing lane; do not repeat a global
+  // cleanup in every child or touch a different/cooling login's browser.
+  if(options.autoRecover!==false && !options.skipLifecycle) {
     const closed=await detachTerminalTaskPages(reg,project,account);
     if(closed.length) results.push({state:"TERMINAL_TABS_DETACHED",closed});
-    const orphaned=await pruneManagedOrphanTabs(reg,account);
+    const orphaned=await pruneManagedOrphanTabs(reg,project,account);
     if(orphaned.length) results.push({state:"ORPHAN_TABS_RECLAIMED",closed:orphaned});
   }
   return results;
@@ -2592,7 +2672,7 @@ else if(cmd==="watch"){
   const quiet=args.includes("--quiet");
   const results=await watchOnce(reg,project,accountArg,{autoRecover,maxAttempts,maxTotalRecoveries,cooldownSec,aggressive,
     taskId:opt("task-id",null),skipTasks:args.includes("--skip-tasks"),skipLifecycle:args.includes("--skip-lifecycle")});
-  const noteworthy=results.some(r=>r.state==="WATCH_ERROR" || r.notification?.sent || r.projectLifecycle?.state==="SENT" || r.projectLifecycle?.state==="NOT_SENT" || (r.recovery?.action&&!["NONE","COOLDOWN"].includes(r.recovery.action)));
+  const noteworthy=results.some(r=>["WATCH_ERROR","STATE_STORE_DEFERRED"].includes(r.state) || r.notification?.sent || r.projectLifecycle?.state==="SENT" || r.projectLifecycle?.state==="NOT_SENT" || (r.recovery?.action&&!["NONE","COOLDOWN"].includes(r.recovery.action)));
   if(!quiet || noteworthy) print({at:new Date().toISOString(),project:project||null,iteration:1,autoRecover,results});
 }
 else if(["archive","retire","delete","forget"].includes(cmd)){
@@ -2766,7 +2846,8 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     const observed=await observeSession(chat,page,linked||null);
     if(linked) print(await gradedRecover(reg,chat,page,linked,observed,{maxAttempts:Number(opt("max-recovery","3"))||3,cooldownSec:0,aggressive:args.includes("--aggressive")}));
     else if(observed.sessionState==="ERROR_RECOVERABLE") print(await nativeRetry(page));
-    else if(observed.generating){const stopped=await stopGeneration(page);await waitForGenerationStop(page,7000);await sendMessage(page,"continue");print({ok:true,method:"stop-and-continue",stopped});}
+    else if(observed.generating && !args.includes("--aggressive")) print({ok:false,action:"DEFERRED",reason:"QUIET_GENERATION_IS_NOT_FAILURE",recommendation:"INSPECT_WITHOUT_STOP"});
+    else if(observed.generating){const stopped=await stopGeneration(page);const confirmed=stopped.stopped&&await waitForGenerationStop(page,7000);if(confirmed)await sendMessage(page,"continue");print({ok:!!confirmed,method:confirmed?"stop-and-continue":"stop-unconfirmed",stopped});}
     else {await sendMessage(page,args.includes("--aggressive")&&observed.lastUser?observed.lastUser:"continue");print({ok:true,method:args.includes("--aggressive")?"resend-last-user":"continue"});}
   }
   if(cmd==="resend"){const st=await state(page);if(!st.lastUser)throw new Error("no last user message");await sendMessage(page,st.lastUser);print({ok:true,resent:st.lastUser});}

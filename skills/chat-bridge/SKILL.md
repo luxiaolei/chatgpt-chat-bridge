@@ -263,7 +263,7 @@ chat-bridge watch --project "PROJECT NAME" --dry-run
 chat-bridge watch --project "PROJECT NAME"
 ```
 
-The watchdog uses multiple signals: Stop/Send/composer controls, stable ChatGPT message IDs, assistant text/hash/length, a page-side MutationObserver, recovery/error UI, and elapsed time since real progress. Normal quiet thinking is not interrupted until the task's stall threshold is crossed. If the bound Space is `user` or `agentDelegatedToUser`, watchdog must not claim or switch that Space: it records `watchdogPausedForUserControl`, and later preflight suppresses that task locally until an explicit `send`, `ask`, `retry`, `recover`, or `resend` clears the pause.
+The watchdog uses multiple signals: Stop/Send/composer controls, stable ChatGPT message IDs, assistant text/hash/length, a page-side MutationObserver, recovery/error UI, and elapsed time since real progress. Quiet thresholds are warnings, not automatic cancellation deadlines. `SUSPECT_STALL` returns `INSPECT_WITHOUT_STOP` and queues one owner notice per quiet episode without consuming recovery attempts. Requested and observed effort are recorded separately; a lower observed effort cannot shorten the requested effort's default warning budget. If the bound Space is `user` or `agentDelegatedToUser`, watchdog must not claim or switch that Space: it records `watchdogPausedForUserControl`, and later preflight suppresses that task locally until an explicit `send`, `ask`, `retry`, `recover`, or `resend` clears the pause.
 
 Install the macOS launchd watchdog (all projects, one-shot scan every 60 seconds):
 
@@ -273,9 +273,9 @@ Install the macOS launchd watchdog (all projects, one-shot scan every 60 seconds
 
 Remove it with `~/.local/share/chatgpt-chat-bridge/uninstall-watchdog.sh`.
 
-Recovery ladder is deliberately conservative: native Continue/Try again/Retry/Regenerate → `continue` → Stop + guarded continue. Re-sending the original task is only enabled with `--aggressive`. Repeated failures mark the task `BLOCKED` and wake the owning controller/root escalation chain for GitHub reconciliation.
+Recovery uses current visible native Continue/Try again/Retry/Regenerate controls, then a guarded `continue` for an actually incomplete/error turn. Quiet generation alone is never stopped automatically. Stop + guarded continue and original-task replay require explicit `--aggressive`; inspect current durable/tool progress first. Recovery rechecks task state and will skip results already recorded or accepted. Repeated failures mark the task `BLOCKED` and wake the owning controller/root escalation chain for GitHub reconciliation.
 
-ChatGPT-Web-touching commands are serialized per verified login identity, including aliases of the same account; different logins have separate pacing gates. Normal UI work cannot run faster than 10 seconds; `new`, `archive`, `retire`, and `delete` cannot run faster than 30 seconds. Calls wait at most 5 seconds inline; longer pacing/lock waits return `PACING_DEFERRED` (exit 75). Watchdog separates tasks on the same login by at least 10 seconds. `Too many requests` creates an adaptive 3–15 minute account-scoped cooldown; manual commands return `WEB_COOLDOWN_ACTIVE`. Watchdog skips that identity but continues others, and never starts Ego when no eligible tasks remain. Use `cooldown status --account ALIAS` (or `--project NAME`) and `cooldown clear --account ALIAS --confirm`. Legacy global cooldown protects only the default account. A pacing lock is not an account quota.
+ChatGPT-Web-touching commands are serialized per verified login identity, including aliases of the same account; different logins have separate pacing gates. Normal UI work cannot run faster than 10 seconds; `new`, `archive`, `retire`, and `delete` cannot run faster than 30 seconds. The default UI pacing inline budget is 12 seconds and the separate lock-wait budget is at most 5 seconds; longer waits return `PACING_DEFERRED` (exit 75). Watchdog separates tasks on the same login by at least 10 seconds. `Too many requests` creates an adaptive 3–15 minute account-scoped cooldown; manual commands return `WEB_COOLDOWN_ACTIVE`. Watchdog skips that identity but continues others, and never starts Ego when no eligible tasks remain. Use `cooldown status --account ALIAS` (or `--project NAME`) and `cooldown clear --account ALIAS --confirm`. Legacy global cooldown protects only the default account. A pacing lock is not an account quota.
 
 Stop an active generation:
 
@@ -304,11 +304,14 @@ Running tasks stay attached by default. Once a task has a durable `RESULT_RECORD
 Local status/topology/runtime/task/event reads do not wake Ego:
 
 ```bash
+chat-bridge health
 chat-bridge control status
 chat-bridge topology
 chat-bridge runtime
 chat-bridge task list --project "PROJECT"
 ```
+
+`health` is a global local-only summary, not a live browser scan. It separates historical errors, nonterminal task records, user-control pauses, and page observations fresh within 180 seconds. `recentlyObservedGenerating` is a cached observation, not proof that a remote model is still running. Routine local reads use SQLite `peek` without rewriting compatibility JSON. `state-store.py get` remains the explicit projection-repair path. An idle/cooling watchdog never starts Ego just to scan orphan tabs; admitted maintenance is account-scoped and is not repeated after every task child.
 
 `control status` separates business intent from technical admission. `businessState` / `businessStateReason` describe the owner-facing project state (for example `REPLANNING`, `NOT_STARTED`, `PAUSED`, or `INTERNAL_TEST`), while `control.mode` (`RUNNING`, `PAUSED`, `DRAINING`) only controls whether new Bridge business work may enter. `durableStateRef` is the stable root ledger/index the controller should re-read on reconciliation; it may link to GitHub Issues/PR evidence rather than duplicating all project state in Chat.
 

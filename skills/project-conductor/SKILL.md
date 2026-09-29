@@ -135,19 +135,21 @@ chat-bridge task clear TASK_ID --project "PROJECT"
 Before normal orchestration after an upgrade, use the persistent management plane rather than sending ad-hoc chat instructions: pause/drain admission, install/check, broadcast a versioned reload request, collect per-controller ACKs, canary, then resume the acknowledged scope. `control status` distinguishes active work, durable results awaiting ACK, unknown delivery, blockers, and known completion; an empty queue alone is not project completion.
 
 
+Use `chat-bridge health` for cheap cached monitoring; do not confuse a stale RUNNING record or a manual-ownership pause with a live browser failure. State-store contention is `STATE_STORE_DEFERRED`, not proof of a failed worker.
+
 Every dispatched work item should be tracked with `--task TASK_ID`. The local watchdog owns mechanical liveness/recovery; the conductor owns project decisions.
 
 Use these states:
 
 - `RUNNING_ACTIVE`: generation has recent message/DOM progress.
 - `RUNNING_QUIET`: still generating, quiet but below the stall threshold; do not disturb it.
-- `SUSPECT_STALL`: Stop is still present but no meaningful progress beyond the threshold.
+- `SUSPECT_STALL`: generation is still visible but no observed progress beyond a warning threshold. Do not mechanically Stop or resend. Inspect durable state and tool progress after the deduplicated owner notice; only explicitly use aggressive recovery after deciding it is necessary.
 - `ERROR_RECOVERABLE`: Retry/Continue/error UI is present.
 - `IDLE_INCOMPLETE`: the turn stopped without a new assistant result for the tracked task.
 - `IDLE_COMPLETE`: a new assistant message ID/result exists; reconcile GitHub before declaring task completion.
 - `BLOCKED`: page/login/connectivity is unhealthy or recovery attempts are exhausted.
 
-Run one scan with `chat-bridge watch --project "PROJECT"`; the installed macOS watchdog runs one scan every 60 seconds across all projects. If there are no active tasks it exits locally without starting Ego Lite. Active tasks inside one scan are separated by at least 10 seconds. UI pacing/lock waits longer than 5 seconds return `PACING_DEFERRED` rather than holding a long tool call. A ChatGPT `Too many requests` event creates an adaptive shared 3–15 minute Web cooldown; during it, controllers should continue local/GitHub work and let watchdog skip Web access. Recovery remains conservative and idempotency-aware. After repeated failure, the watchdog marks the task BLOCKED and routes the event through `replyTo → controller → escalationTo → rootController` rather than inventing a project decision.
+Run one scan with `chat-bridge watch --project "PROJECT"`; the installed macOS watchdog runs one scan every 60 seconds across all projects. If there are no active tasks it exits locally without starting Ego Lite. Active tasks inside one scan are separated by at least 10 seconds. UI pacing beyond the default 12-second inline budget or lock waits beyond 5 seconds return `PACING_DEFERRED` rather than holding a long tool call. A ChatGPT `Too many requests` event creates an adaptive shared 3–15 minute Web cooldown; during it, controllers should continue local/GitHub work and let watchdog skip Web access. Recovery remains conservative and idempotency-aware. After repeated failure, the watchdog marks the task BLOCKED and routes the event through `replyTo → controller → escalationTo → rootController` rather than inventing a project decision.
 
 ### 7. Model and Thinking allocation
 

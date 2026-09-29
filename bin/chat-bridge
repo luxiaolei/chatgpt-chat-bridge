@@ -70,7 +70,9 @@ fi
 
 LOCAL_QUERY="${MAIN:h}/local-query.py"
 if [[ -f "$LOCAL_QUERY" ]]; then
-  if [[ "$CMD" == "topology" ]]; then
+  if [[ "$CMD" == "health" ]]; then
+    exec python3 "$LOCAL_QUERY" health "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
+  elif [[ "$CMD" == "topology" ]]; then
     exec python3 "$LOCAL_QUERY" topology "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
   elif [[ "$CMD" == "runtime" ]]; then
     exec python3 "$LOCAL_QUERY" runtime "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
@@ -177,9 +179,7 @@ esac
 
 # Watch all requested accounts locally; one cooling account must not mask another.
 if [[ "$CMD" == "watch" ]]; then
-  if (( ${@[(Ie)--orphan-only]} )); then
-    :
-  elif (( ${@[(Ie)--loop]} )); then
+  if (( ${@[(Ie)--loop]} )); then
     exec python3 "$PREFLIGHT" loop "$CONFIG_DIR" "$STATE_DIR" "$0" "$@"
   elif (( ! ${@[(Ie)--account]} )); then
     exec python3 "$PREFLIGHT" watch-all "$CONFIG_DIR" "$STATE_DIR" "$0" "$@"

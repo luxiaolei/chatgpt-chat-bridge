@@ -18,6 +18,13 @@ def read_json(path):
         return {}
 
 
+# Use SQLite authority without rewriting compatibility JSON on hot read paths.
+import importlib.util
+_store_spec = importlib.util.spec_from_file_location("chat_bridge_state_reader", pathlib.Path(__file__).with_name("state-store.py"))
+_store_reader = importlib.util.module_from_spec(_store_spec)
+_store_spec.loader.exec_module(_store_reader)
+read_document = _store_reader.peek_document
+
 def scope(reg, account):
     identity = reg.get("accounts", {}).get(account, {}).get("identity")
     key = "identity:" + identity if identity else "alias:" + account
@@ -171,7 +178,7 @@ def run(action, config, state, args):
             if iterations and count >= iterations:
                 return
             time.sleep(interval)
-    reg = read_json(config / "registry.json")
+    reg = read_document(config, state, "registry")
     if action == "origin-account":
         identity = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID", "")
         if not identity or not re.fullmatch(r"[0-9a-f]{64}", identity):
@@ -211,7 +218,7 @@ def run(action, config, state, args):
     if action == "watch-all":
         script, *command = args
         project = option(command, "--project")
-        runtime = read_json(state / "runtime.json")
+        runtime = read_document(config, state, "runtime")
         terminal = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "RESULT_RECORDED"}
         task_rows = []
         for task_key, task in runtime.get("tasks", {}).items():
@@ -260,21 +267,8 @@ def run(action, config, state, args):
             completed = subprocess.run([script, *command, *extra], check=False)
             if completed.returncode and not result:
                 result = completed.returncode
-        if not task_rows and not lifecycle_rows:
-            eligible = set()
-            for name, cfg in reg.get("projects", {}).items():
-                if project and name != project:
-                    continue
-                for alias, binding in cfg.get("bindings", {}).items():
-                    if (str(binding.get("spaceName", "")).startswith("chat-bridge-agent-")
-                            and binding.get("profileId") and reg.get("accounts", {}).get(alias, {}).get("identity")
-                            and not cooldown(reg, state, alias)["active"]):
-                        eligible.add(alias)
-            for alias in sorted(eligible):
-                completed = subprocess.run([script, *command, "--account", alias,
-                                            "--orphan-only", "--skip-tasks", "--skip-lifecycle"], check=False)
-                if completed.returncode and not result:
-                    result = completed.returncode
+        # No eligible work means no browser wake-up. Orphan cleanup runs with
+        # admitted account-scoped maintenance, never through an idle bypass.
         raise SystemExit(result)
     cmd = args[0] if args else "help"
     project = option(args, "--project", None if cmd in ("watch", "projects") else reg.get("defaultProject"))
@@ -299,7 +293,7 @@ def run(action, config, state, args):
         if len(matches) == 1:
             account = matches[0].get("account") or account
     if action == "watch":
-        runtime = read_json(state / "runtime.json")
+        runtime = read_document(config, state, "runtime")
         terminal = {"COMPLETE", "FAILED", "CANCELLED", "BLOCKED", "RESULT_RECORDED"}
         task_filter = option(args, "--task-id")
         if "--skip-tasks" not in args:
