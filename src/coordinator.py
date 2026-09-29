@@ -1404,7 +1404,7 @@ def control_status(db, project=None, workgroup=None):
                                   [str(row["recorded_at"] or "") for row in scoped_results], default=None),
             })
 
-        if blocked or failed or failed_pre_send or unknown_ops or results["callbackUnknown"] or results["rejectedOrBlocked"]:
+        if blocked or failed or unknown_ops or results["callbackUnknown"] or results["rejectedOrBlocked"]:
             completion_state = "NEEDS_REVIEW"
         elif active_tasks or pending_business_ops or awaiting_durable:
             completion_state = "IN_PROGRESS"
