@@ -6,6 +6,7 @@ import pathlib
 import sqlite3
 import sys
 import tempfile
+from urllib.parse import quote
 
 MISSING = object()
 KINDS = {"registry", "runtime"}
@@ -77,6 +78,29 @@ def project(path, document):
             os.unlink(temporary)
 
 
+def read_authoritative(path, kind):
+    """Read an initialized store without joining the writer queue."""
+    if not path.exists():
+        return None
+    uri = "file:" + quote(str(path), safe="/:") + "?mode=ro"
+    try:
+        db = sqlite3.connect(uri, uri=True, timeout=5)
+    except sqlite3.Error:
+        raise
+    try:
+        db.execute("PRAGMA busy_timeout=5000")
+        rows = dict(db.execute("SELECT kind,payload FROM documents").fetchall())
+        if not KINDS.issubset(rows):
+            return None
+        return json.loads(rows[kind])
+    except sqlite3.OperationalError as error:
+        if "no such table" in str(error).lower():
+            return None
+        raise
+    finally:
+        db.close()
+
+
 def main():
     command, config_name, state_name, kind = sys.argv[1:]
     if command not in {"get", "put"} or kind not in KINDS:
@@ -91,6 +115,13 @@ def main():
             raise ValueError("base and next must be objects")
     old_umask = os.umask(0o077)
     try:
+        if command == "get":
+            current = read_authoritative(state / "bridge.sqlite3", kind)
+            if current is not None:
+                # The compatibility projection is outside the SQLite read handle.
+                project(destination, current)
+                print(json.dumps(current, ensure_ascii=False))
+                return
         db = sqlite3.connect(state / "bridge.sqlite3", timeout=30)
     finally:
         os.umask(old_umask)
