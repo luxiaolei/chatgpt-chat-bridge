@@ -36,7 +36,10 @@ test("hidden model selector with matching effort skips forced model reapply",asy
 test("verified resource selection skips transient model menu reopen",async()=>{
   const api=await runtimeApi("Extra High",true);
   const chat={model:"GPT-5.6 Sol",effort:"Extra High",verifiedModel:"GPT-5.6 Sol",verifiedEffort:"Extra High"};
+  let selectorProbeCalls=0;
+  api.page.evaluate=async()=>{selectorProbeCalls+=1; return true;};
   const result=await api.applyConfiguredSessionModel(api.page,chat);
+  assert.equal(selectorProbeCalls,0);
   assert.equal(api.calls(),0);
   assert.equal(result.model,"GPT-5.6 Sol");
   assert.equal(result.effort,"Extra High");
