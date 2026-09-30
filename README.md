@@ -124,6 +124,18 @@ chat-bridge new \
 
 The bridge captures the real conversation ID and project-scoped URL. Multiple Projects and sessions for one verified ChatGPT login/Profile normally share **one Bridge-managed Ego Space**. Logical role/controller identity is long-lived; each concrete conversation is a replaceable generation, while the Ego page/tab attachment is recyclable. A finished/result-recorded task may be detached after the safety grace period when its page is inactive, Bridge-managed, not generating, and has no draft/user ownership; running tasks remain attached by default. A new Space is not a concurrency mechanism.
 
+## GitHub Projects v2 management
+
+A logical ChatBridge project may optionally bind to a GitHub Projects v2 board without changing its ChatGPT Project/session placement. Controllers can use the board as the first portfolio/status read surface, then verify the selected source Issue/PR and evidence.
+
+```bash
+chat-bridge github-project bind --project "My Project" --owner OWNER --number 8
+chat-bridge github-project inspect --project "My Project"
+chat-bridge github-project refresh --project "My Project"        # preview
+```
+
+The binding does **not** create/configure a GitHub board or Auto-add workflow. Safe remote refresh writes are explicit (`--apply`) and require configured open-source queries/status mappings; terminal/acceptance-like status writes are refused. Existing projects without a binding keep the legacy Issue-first behavior. See [GitHub Projects integration](docs/github-projects.md).
+
 ## Project, account, and Space binding
 
 A logical project can have multiple ChatGPT account bindings. Each binding has its own ChatGPT Project URL and stable Ego Space name. The numeric Ego `spaceId` is treated as a runtime cache and may change when Ego recreates a Space.
