@@ -28,9 +28,24 @@ test('vision input and model labels never imply generation or verified capabilit
 });
 test('feature-specific assisted/native evidence is route-bound',()=>{
  const r=normalizeImageRequest(input());
- const c=classifyImageCapabilities(r.route,{version:'fixture/v1',observedAt:'2026-09-30T00:00:00Z',features:{generate:{mode:'ASSISTED',evidence:['artifact:fixture:probe']}}});
+ const c=classifyImageCapabilities(r.route,{version:'fixture/v1',observedAt:'2026-09-30T00:00:00Z',modelSelection:{model:'Latest',effort:'Pro',raw:'Pro',verified:true},features:{generate:{mode:'ASSISTED',evidence:['artifact:fixture:probe']}}});
  assert.deepEqual(imageCapabilityGate(r,c,'2026-09-30T01:00:00Z'),{allowed:true,mode:'ASSISTED'});
  assert.equal(imageCapabilityGate({...r,route:{...r.route,accountId:'c'.repeat(64)}},c).reason,'CAPABILITY_ROUTE_MISMATCH');
+});
+test('positive model-dependent capabilities reject mismatched, unverified and absent resource identity',()=>{
+ const r=normalizeImageRequest(input());
+ for (const mode of ['NATIVE','ASSISTED']) {
+  const c=classifyImageCapabilities(r.route,{version:'fixture/v1',observedAt:'2026-09-30T00:00:00Z',modelSelection:{model:'Latest',effort:'Pro',raw:'Pro',verified:true},features:{generate:{mode,evidence:['artifact:fixture:probe']}}});
+  for (const selection of [{model:'Other',effort:'Pro',raw:'Pro',verified:true},{model:'Latest',effort:'High',raw:'High',verified:true},{model:'Latest',effort:'Pro',raw:'Pro',verified:false},{model:null,effort:null,raw:null,verified:true}]) {
+   assert.match(imageCapabilityGate(r,{...c,modelSelection:selection}).reason,/CAPABILITY_MODEL_(MISMATCH|UNVERIFIED):generate/);
+  }
+  const {modelSelection,...missing}=c;assert.throws(()=>imageCapabilityGate(r,missing),/IMAGE_SCHEMA/);
+ }
+});
+test('only assisted original export is model-independent; native export still needs verified matching resources',()=>{
+ const r=normalizeImageRequest(input()),c=classifyImageCapabilities(r.route,{version:'fixture/v1',observedAt:'2026-09-30T00:00:00Z',features:{export:{mode:'ASSISTED',evidence:['artifact:fixture:official-save']}}});
+ assert.deepEqual(imageCapabilityGate({...r,operation:'export'},c),{allowed:true,mode:'ASSISTED'});
+ assert.match(imageCapabilityGate({...r,operation:'export'},{...c,features:{...c.features,export:{...c.features.export,mode:'NATIVE'}}}).reason,/CAPABILITY_MODEL_UNVERIFIED:export/);
 });
 test('client separates ImageJob and controller queue commands without creating a scheduler',()=>{
  const calls=[];const api=createImageJobAPI({coordinated:(...args)=>calls.push(args)});const r=normalizeImageRequest(input()),key=imageJobKey(r,'grant-1');

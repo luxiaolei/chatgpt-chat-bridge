@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFile,rm,access} from 'node:fs/promises';
+import path from 'node:path';
 import {fixture} from './image-persistence-fixtures.mjs';
 import {normalizeImageRequest,unknownImageCapabilities,imageJobKey,validateImageShape,applyImageEvent} from '../src/capabilities/image/contract.js';
 const withFixture = fn => async()=>{const f=await fixture();try{await fn(f);}finally{await f.close();}};
@@ -160,4 +162,116 @@ test('a second same-request grant cannot silently renew an already bound attempt
  const event={type:'reconcile',eventId:'cross-grant',expectedRevision:job.revision,attemptId:'attempt-1',route:r.route,status:'SUBMISSION_UNKNOWN',evidenceRef:'artifact:fixture:inconclusive'};
  f.fail('image-apply',{...imageJobKey(r,g2.grantId),event},/IMAGE_ATTEMPT_GRANT_MISMATCH/);
  assert.equal(f.api.inspect(key).grantId,g.grantId);
+}));
+
+test('mismatched capability resource evidence blocks persistence admission even when current UI matches',withFixture(f=>{
+ for (const [i,modelSelection] of [{model:'Other',effort:'Pro',raw:'Pro',verified:true},{model:'Latest',effort:'High',raw:'High',verified:true},{model:null,effort:null,raw:null,verified:false}].entries()) {
+  const r=f.request({jobId:'mismatch-'+i}),g=f.grant(r,'mismatch-grant-'+i);g.capabilities.modelSelection=modelSelection;
+  const {key,job}=f.setup(r,g);assert.equal(job.status,'BLOCKED');assert.match(job.reason,/CAPABILITY_MODEL_/);
+  assert.throws(()=>f.begin(key,job),/CAPABILITY_MODEL_/);assert.equal(f.api.inspect(key).attempts.length,0);
+ }
+ assert.equal(f.sql('select count(*) from image_events')[0][0],0);
+}));
+
+test('different jobs race transactionally for one real session; restart and same-job replay do not regrant Send',withFixture(async f=>{
+ const a=f.setup(),r=f.request({jobId:'image-2'}),b=f.setup(r,f.grant(r,'grant-2'));
+ const event={type:'beginAttempt',eventId:'reserve',expectedRevision:1,attemptId:'a1',baselineTurnIds:[],modelSelection:{model:'Latest',effort:'Pro',raw:'Pro',verified:true}};
+ const replies=await Promise.all([a,b].map(x=>f.callAsync('image-apply',{...x.key,event})));
+ assert.deepEqual(replies.map(x=>x.code).sort(),[0,2]);assert.match(replies.find(x=>x.code===2).err,/IMAGE_SESSION_BUSY/);
+ const winner=[a,b][replies.findIndex(x=>x.code===0)],loser=[a,b][replies.findIndex(x=>x.code===2)];
+ assert.equal(JSON.parse(replies.find(x=>x.code===0).out).effectAdmission,'NEWLY_RESERVED');
+ assert.equal(f.call('image-apply',{...winner.key,event}).effectAdmission,'RECONCILE_ONLY');
+ assert.equal(f.api.inspect(loser.key).attempts.length,0);
+ assert.deepEqual(f.api.sessionOccupancy(r.route),{occupied:true,reservedByJob:false});
+ assert.deepEqual(f.api.sessionOccupancy(r.route,winner.key),{occupied:true,reservedByJob:true});
+ assert.deepEqual(f.api.sessionOccupancy(r.route,loser.key),{occupied:true,reservedByJob:false});
+}));
+
+test('real-session occupancy crosses account/session aliases, callers and tenants without disclosing job details',withFixture(f=>{
+ const first=f.setup();f.begin(first.key,first.job);
+ const op=f.call('submit',{callerRef:f.owner,requestId:'control-alias',taskId:'control-alias',project:'P',sessionRef:'w-alias',message:'OFFLINE CONTROL ONLY',model:'Latest',effort:'Pro'});assert.equal(f.call('work-one',{}).status,'SENT');
+ const r=f.request({caller:{kind:'codex',ref:f.owner},scope:{tenantId:'t2',namespace:'private',purpose:'fixture',workgroupId:null},controllerTaskId:op.taskId,route:{...first.r.route,accountAlias:'a2',sessionRef:'w-alias'}});
+ const g=f.grant(r,'other-scope',{controllerOperationId:op.operationId,controllerTaskId:op.taskId}),second=f.setup(r,g);
+ assert.throws(()=>f.begin(second.key,second.job),/IMAGE_SESSION_BUSY/);
+ assert.deepEqual(f.api.sessionOccupancy(r.route,second.key),{occupied:true,reservedByJob:false});
+ assert.deepEqual(f.api.sessionOccupancy({...r.route,accountId:'b'.repeat(64)}),{occupied:false,reservedByJob:false});
+ const busy=f.raw('image-apply',{...second.key,event:{type:'beginAttempt',eventId:'busy',expectedRevision:1,attemptId:'a1',baselineTurnIds:[],modelSelection:{model:'Latest',effort:'Pro',raw:'Pro',verified:true}}});
+ assert.deepEqual(JSON.parse(busy.stderr),{ok:false,error:'IMAGE_SESSION_BUSY'});
+}));
+
+test('cancel, expiry, revocation and failure alone do not release UNKNOWN; positive late completion remains quarantined',withFixture(f=>{
+ let {r,g,key,job}=f.setup();job=f.begin(key,job);
+ const other=f.request({jobId:'image-2'}),pending=f.setup(other,f.grant(other,'grant-2'));
+ job=f.api.cancel(key,{eventId:'cancel',expectedRevision:job.revision});
+ f.call('image-revoke',{issuerRef:f.owner,grantId:g.grantId});
+ f.sql("UPDATE image_jobs SET document=json_set(document,'$.request.budget.deadlineAt','2000-01-01T00:00:00Z','$.attempts[0].startedAt','2000-01-01T00:00:00Z') WHERE job_id='image-1'");
+ job=f.api.inspect(key);job=f.api.reconcile(key,{eventId:'inconclusive',expectedRevision:job.revision,attemptId:'attempt-1',route:r.route,status:'SUBMISSION_UNKNOWN',evidenceRef:'artifact:fixture:unknown'});
+ assert.deepEqual(f.api.sessionOccupancy(r.route,key),{occupied:true,reservedByJob:true});assert.throws(()=>f.begin(pending.key,pending.job),/IMAGE_SESSION_BUSY/);
+ job=f.api.reconcile(key,{eventId:'failed-without-settlement',expectedRevision:job.revision,attemptId:'attempt-1',route:r.route,status:'FAILED',evidenceRef:'artifact:fixture:failure'});
+ assert.equal(f.api.sessionOccupancy(r.route).occupied,true);
+ job=f.generated(key,job);assert.equal(job.status,'CANCEL_REQUESTED');assert.equal(job.outputs.length,0);assert.match(job.warnings.join(','),/LATE_RESULT_NOT_ADOPTED/);
+ assert.deepEqual(f.api.sessionOccupancy(r.route,key),{occupied:false,reservedByJob:false});assert.equal(f.begin(pending.key,pending.job).effectAdmission,'NEWLY_RESERVED');
+}));
+
+test('proven pre-send failure releases only its reservation and legacy conflicting rows deny exclusive ownership',withFixture(f=>{
+ let {r,key,job}=f.setup();job=f.begin(key,job);
+ f.sql("INSERT INTO image_jobs SELECT 'legacy-caller','legacy-job',controller_operation_id,request_digest,revision,status,json_set(document,'$.caller.ref','legacy-caller','$.jobId','legacy-job'),created_at,updated_at FROM image_jobs WHERE job_id='image-1'");
+ assert.deepEqual(f.api.sessionOccupancy(r.route,key),{occupied:true,reservedByJob:false});
+ f.sql("DELETE FROM image_jobs WHERE job_id='legacy-job'");
+ job=f.api.reconcile(key,{eventId:'not-sent',expectedRevision:job.revision,attemptId:'attempt-1',route:r.route,status:'FAILED_PRE_SEND',beforeSend:true,evidenceRef:'artifact:fixture:before-send'});
+ assert.deepEqual(f.api.sessionOccupancy(r.route,key),{occupied:false,reservedByJob:false});
+ const other=f.request({jobId:'image-2'}),pending=f.setup(other,f.grant(other,'grant-2'));assert.equal(f.begin(pending.key,pending.job).effectAdmission,'NEWLY_RESERVED');
+}));
+
+test('occupancy reads enforce origin/key scope and never initialize image tables, stores or projections',withFixture(async f=>{
+ const r=f.request(),session={accountId:r.route.accountId,conversationId:r.route.conversationId},query={session};
+ const before=f.sql('select name from sqlite_master order by name'),projection=await readFile(path.join(f.config,'registry.json'),'utf8');
+ assert.deepEqual(f.api.sessionOccupancy(session),{occupied:false,reservedByJob:false});assert.deepEqual(f.sql('select name from sqlite_master order by name'),before);
+ assert.equal(await readFile(path.join(f.config,'registry.json'),'utf8'),projection);
+ f.fail('image-session-occupancy',query,/IMAGE_ACCESS_DENIED/,{CHAT_BRIDGE_FROM_ACCOUNT_ID:'f'.repeat(64)});
+ f.fail('image-session-occupancy',query,/IMAGE_ORIGIN_UNVERIFIED/,{CHAT_BRIDGE_FROM_SPACE:'unknown'});
+ const {key,job}=f.setup();f.begin(key,job);
+ assert.deepEqual(f.call('image-session-occupancy',query,{CHAT_BRIDGE_FROM_ACCOUNT_ID:f.accountId}),{occupied:true,reservedByJob:false});
+ f.fail('image-session-occupancy',{session,key:{...key,scope:{...key.scope,tenantId:'t2'}}},/IMAGE_ACCESS_DENIED/);
+ f.fail('image-session-occupancy',{session:{...session,conversationId:'root'},key},/IMAGE_ACCESS_DENIED/);
+ f.fail('image-session-occupancy',{session,key:{...key,grantId:'missing'}},/IMAGE_ACCESS_DENIED/);
+ f.fail('image-session-occupancy',{session,extra:true},/IMAGE_SCHEMA/);
+ await rm(path.join(f.state,'bridge.sqlite3'));await rm(path.join(f.state,'bridge.sqlite3-wal'),{force:true});await rm(path.join(f.state,'bridge.sqlite3-shm'),{force:true});
+ assert.deepEqual(f.api.sessionOccupancy(session),{occupied:false,reservedByJob:false});await assert.rejects(access(path.join(f.state,'bridge.sqlite3')));
+ f.fail('image-session-occupancy',{session,key},/IMAGE_ACCESS_DENIED/);await assert.rejects(access(path.join(f.state,'bridge.sqlite3')));
+}));
+
+test('external control-only owner can bootstrap the exact target without self-send or a premature terminal task result',withFixture(f=>{
+ const r=f.request({caller:{kind:'codex',ref:f.owner}}),{key,job}=f.setup(r);assert.notEqual(r.caller.ref,r.route.sessionRef);
+ assert.equal(f.begin(key,job).effectAdmission,'NEWLY_RESERVED');assert.equal(f.sql('select count(*) from task_results')[0][0],0);
+ const wrong=f.request({jobId:'wrong-target',route:{...r.route,sessionRef:'root',conversationId:'root'}});
+ f.fail('image-authorize',{issuerRef:f.owner,grant:f.grant(wrong,'wrong-target')},/IMAGE_ROUTE_NOT_GRANTED/);
+}));
+
+test('read-only I/O admission rechecks the exact current grant after awaited work, while revoked jobs stay inspectable',withFixture(f=>{
+ const {r,g,key,job}=f.setup();const before=f.sql("select kind,payload from documents order by kind");
+ const proof=f.api.authorizeIO(key);assert.equal(proof.allowed,true);assert.equal(Date.parse(proof.expiresAt),Math.min(Date.parse(g.expiresAt),Date.parse(r.budget.deadlineAt)));
+ assert.deepEqual(f.sql("select kind,payload from documents order by kind"),before);
+ const other=f.grant(r,'other-grant');f.authorize(other);assert.throws(()=>f.api.authorizeIO(imageJobKey(r,other.grantId)),/IMAGE_ACCESS_DENIED/);
+ f.fail('image-io-admission',key,/IMAGE_ACCESS_DENIED/,{CHAT_BRIDGE_FROM_ACCOUNT_ID:'f'.repeat(64)});
+ f.control('pause');assert.throws(()=>f.api.authorizeIO(key),/ADMISSION_PAUSED/);f.control('resume');
+ const reserved=f.begin(key,job),bounded=f.api.authorizeIO(key);
+ assert.equal(Date.parse(bounded.expiresAt),Math.min(Date.parse(g.expiresAt),Date.parse(r.budget.deadlineAt),Date.parse(reserved.attempts[0].startedAt)+r.budget.maxDurationMs));
+ f.call('image-revoke',{issuerRef:f.owner,grantId:g.grantId});assert.equal(f.api.inspect(key).revision,reserved.revision);
+ assert.equal(f.api.inspect(key).status,'SUBMISSION_UNKNOWN');
+ assert.throws(()=>f.api.authorizeIO(key),/IMAGE_GRANT_EXPIRED_OR_REVOKED/);
+}));
+
+test('I/O admission rejects cancel, expired deadline, unknown capabilities and completed bootstrap',withFixture(f=>{
+ const first=f.setup();f.api.cancel(first.key,{eventId:'cancel',expectedRevision:1});assert.throws(()=>f.api.authorizeIO(first.key),/IMAGE_CANCEL_REQUESTED/);
+ const r=f.request({jobId:'expired'}),second=f.setup(r,f.grant(r,'expired-grant'));
+ f.sql("UPDATE image_grants SET payload=json_set(payload,'$.request.budget.deadlineAt','2000-01-01T00:00:00-11:00') WHERE grant_id='expired-grant'");
+ assert.throws(()=>f.api.authorizeIO(second.key),/IMAGE_GRANT_EXPIRED_OR_REVOKED/);
+ const timed=f.request({jobId:'timed'}),limited=f.setup(timed,f.grant(timed,'timed-grant'));f.begin(limited.key,limited.job);
+ f.sql("UPDATE image_jobs SET document=json_set(document,'$.attempts[0].startedAt','2000-01-01T00:00:00+11:00') WHERE job_id='timed'");
+ assert.throws(()=>f.api.authorizeIO(limited.key),/IMAGE_ATTEMPT_DEADLINE/);assert.equal(f.api.sessionOccupancy(timed.route).occupied,true);
+ const unknown=f.request({jobId:'unknown'}),g=f.grant(unknown,'unknown-grant',{capabilities:unknownImageCapabilities(unknown.route)}),third=f.setup(unknown,g);
+ assert.throws(()=>f.api.authorizeIO(third.key),/CAPABILITY_UNKNOWN/);
+ const active=f.request({jobId:'active'}),last=f.setup(active,f.grant(active,'active-grant'));
+ f.call('result',{taskId:f.op.taskId,status:'COMPLETE',summary:'synthetic terminal bootstrap'});assert.throws(()=>f.api.authorizeIO(last.key),/IMAGE_CONTROLLER_RESULT_RECORDED/);
 }));

@@ -12,7 +12,7 @@ import time
 import uuid
 import fcntl
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 
 def stamp():
@@ -2581,6 +2581,91 @@ def image_admission(db, row, request):
     return source_turn_id
 
 
+def image_session_reservations(db, session):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='image_jobs'").fetchone():
+        return []
+    # ponytail: scan saved jobs; index real session identity if job volume makes this hot.
+    # Failure/cancel/deadline is not remote settlement. GENERATED/PARTIAL are positive
+    # native completion observations; an export-only job never sends a generation.
+    return db.execute("""SELECT caller_ref,job_id,document FROM image_jobs
+        WHERE json_extract(document,'$.route.accountId')=?
+          AND json_extract(document,'$.route.conversationId')=?
+          AND json_extract(document,'$.request.operation')!='export'
+          AND EXISTS (SELECT 1 FROM json_each(image_jobs.document,'$.attempts')
+            WHERE json_extract(value,'$.status') NOT IN ('FAILED_PRE_SEND','GENERATED','PARTIAL'))""",
+        (session["accountId"],session["conversationId"])).fetchall()
+
+
+def image_local_read(config, state, command, payload):
+    occupancy = command == "image-session-occupancy"
+    payload = image_contract("occupancy-query" if occupancy else "key", payload)
+    session, key = (payload["session"], payload.get("key")) if occupancy else (None, payload)
+    origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+    if occupancy and origin and origin != session["accountId"]:
+        raise ValueError("IMAGE_ACCESS_DENIED")
+    if not origin and os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+        raise ValueError("IMAGE_ORIGIN_UNVERIFIED")
+    empty = {"occupied": False, "reservedByJob": False}
+    path = state / "bridge.sqlite3"
+    if not path.exists():
+        if key:
+            raise ValueError("IMAGE_ACCESS_DENIED")
+        return empty
+    # Same query-only WAL read pattern as state-store.py peek. mode=rw cannot
+    # create a missing store; no schema initialization or JSON projection repair.
+    db = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, timeout=2)
+    db.row_factory = sqlite3.Row
+    try:
+        db.execute("PRAGMA query_only=ON")
+        db.execute("BEGIN")
+        if key:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='image_grants'").fetchone():
+                raise ValueError("IMAGE_ACCESS_DENIED")
+            saved = db.execute("SELECT * FROM image_grants WHERE grant_id=?", (key["grantId"],)).fetchone()
+            if not saved:
+                raise ValueError("IMAGE_ACCESS_DENIED")
+            grant = json.loads(saved["payload"])
+            operation = image_access(db, grant, key)
+            route = grant["request"]["route"]
+            if occupancy and any(session[field] != route[field] for field in session):
+                raise ValueError("IMAGE_ACCESS_DENIED")
+            if not occupancy:
+                row = db.execute("SELECT document FROM image_jobs WHERE caller_ref=? AND job_id=?", (key["callerRef"],key["jobId"])).fetchone()
+                if not row:
+                    raise ValueError("IMAGE_JOB_NOT_FOUND")
+                record = json.loads(row["document"])
+                if (record["grantId"] != key["grantId"] or record["requestDigest"] != grant["request"]["requestDigest"]
+                        or record["controllerOperationId"] != grant["controllerOperationId"] or record["scope"] != key["scope"]):
+                    raise ValueError("IMAGE_ACCESS_DENIED")
+                instant = datetime.now(timezone.utc)
+                now = instant.isoformat()
+                expires = min(datetime.fromisoformat(t.replace("Z", "+00:00"))
+                              for t in (grant["expiresAt"],grant["request"]["budget"]["deadlineAt"]))
+                if saved["revoked_at"] or expires <= instant:
+                    raise ValueError("IMAGE_GRANT_EXPIRED_OR_REVOKED")
+                if record["cancelRequestedAt"]:
+                    raise ValueError("IMAGE_CANCEL_REQUESTED")
+                if record["attempts"]:
+                    attempt_expires = datetime.fromisoformat(record["attempts"][-1]["startedAt"].replace("Z", "+00:00")) + timedelta(milliseconds=grant["request"]["budget"]["maxDurationMs"])
+                    if attempt_expires <= instant:
+                        raise ValueError("IMAGE_ATTEMPT_DEADLINE")
+                    expires = min(expires, attempt_expires)
+                image_admission(db, operation, grant["request"])
+                gate = image_contract("gate", {"request": grant["request"], "capabilities": grant["capabilities"], "at": now})
+                if not gate["allowed"]:
+                    raise ValueError(gate["reason"])
+                return {"allowed": True, "expiresAt": expires.isoformat()}
+        rows = image_session_reservations(db, session)
+        owned = False
+        if key and len(rows) == 1 and (rows[0]["caller_ref"],rows[0]["job_id"]) == (key["callerRef"],key["jobId"]):
+            record = json.loads(rows[0]["document"])
+            owned = (record["grantId"] == key["grantId"] and record["requestDigest"] == grant["request"]["requestDigest"]
+                     and record["controllerOperationId"] == grant["controllerOperationId"] and record["scope"] == key["scope"])
+        return {"occupied": bool(rows), "reservedByJob": owned}
+    finally:
+        db.close()
+
+
 def image_api(db, command, payload):
     image_tables(db)
     begin_immediate(db)
@@ -2663,6 +2748,8 @@ def image_api(db, command, payload):
                         else:
                             if event.get("type") == "beginAttempt":
                                 image_admission(db, operation, request)
+                                if any((r["caller_ref"],r["job_id"]) != identity for r in image_session_reservations(db, request["route"])):
+                                    raise ValueError("IMAGE_SESSION_BUSY")
                             value = image_contract("apply", {"record": record, "event": event, "grant": grant, "at": now, "grantActive": active})
                             encoded = json.dumps(value)
                             changed = db.execute("""UPDATE image_jobs SET revision=?,status=?,document=?,updated_at=?
@@ -2685,6 +2772,9 @@ def image_api(db, command, payload):
 def main():
     command, config_name, state_name, *args = sys.argv[1:]
     config, state = pathlib.Path(config_name), pathlib.Path(state_name)
+    if command in {"image-session-occupancy", "image-io-admission"}:
+        print(json.dumps(image_local_read(config, state, command, json.load(sys.stdin))))
+        return
     db = connection(config, state)
     try:
         if command in {"image-authorize", "image-revoke", "image-submit", "image-inspect", "image-result", "image-apply"}:

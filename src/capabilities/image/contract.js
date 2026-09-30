@@ -118,6 +118,12 @@ export function imageCapabilityGate(request, capabilities, at = new Date().toISO
     const item = capabilities.features[feature];
     if (!['NATIVE','ASSISTED'].includes(item.mode)) return {allowed:false,reason:`CAPABILITY_${item.mode}:${feature}`};
     if (!item.evidence.length || capabilities.version === 'unobserved/v1' || !capabilities.observedAt || Date.parse(capabilities.observedAt) > Date.parse(at)) return {allowed:false,reason:`CAPABILITY_UNVERIFIED:${feature}`};
+    // Assisted official-original handoff reads an existing asset independently of the model.
+    if (feature !== 'export' || item.mode !== 'ASSISTED') {
+      const selection = capabilities.modelSelection;
+      if (!selection.verified || !selection.model || !selection.effort) return {allowed:false,reason:`CAPABILITY_MODEL_UNVERIFIED:${feature}`};
+      if (selection.model !== request.requestedModel || selection.effort !== request.requestedEffort) return {allowed:false,reason:`CAPABILITY_MODEL_MISMATCH:${feature}`};
+    }
   }
   return {allowed:true,mode:required.some(f=>capabilities.features[f].mode === 'ASSISTED')?'ASSISTED':'NATIVE'};
 }
@@ -140,6 +146,8 @@ export function createImageJobAPI({coordinated}) {
     submit:(request,{grantId})=>coordinated('image-submit',{grantId,request:normalizeImageRequest(request)}),
     inspect:key=>read('image-inspect',key),
     result:key=>read('image-result',key),
+    authorizeIO:key=>read('image-io-admission',key),
+    sessionOccupancy:(session,key)=>coordinated('image-session-occupancy',validateImageShape(copy({session:{accountId:session.accountId,conversationId:session.conversationId},...(key === undefined ? {} : {key})}),'SessionOccupancyQuery')),
     beginAttempt:(key,event)=>apply('beginAttempt',key,event),
     record:(key,event)=>apply('observation',key,event),
     export:(key,event)=>apply('export',key,event),
@@ -321,7 +329,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       action === 'grant'?normalizeImageGrant(value.grant,value.at):
       action === 'initial'?initialImageJob(value.grant,value.at):
       action === 'apply'?applyImageEvent(value.record,value.event,value.grant,{at:value.at,grantActive:value.grantActive}):
-      action === 'result'?imageJobResult(value.record):fail('IMAGE_CONTRACT_ACTION');
+      action === 'result'?imageJobResult(value.record):
+      action === 'gate'?imageCapabilityGate(value.request,value.capabilities,value.at):
+      action === 'key'?validateImageShape(value,'Key'):
+      action === 'occupancy-query'?validateImageShape(value,'SessionOccupancyQuery'):fail('IMAGE_CONTRACT_ACTION');
     process.stdout.write(JSON.stringify(result));
   } catch (error) {process.stderr.write(JSON.stringify({error:error.message}));process.exitCode=2;}
 }
