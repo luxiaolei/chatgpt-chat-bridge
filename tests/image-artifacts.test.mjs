@@ -142,6 +142,46 @@ test('concurrent conflicting publication never overwrites the winning bytes',asy
   assert.ok(results.some(r=>r.status==='fulfilled'));assert.ok(['a','b'].includes((await s.store.read('race.bin')).toString()));
   assert.equal((await fs.readdir(s.root)).filter(n=>n.startsWith('.image-tmp-')).length,0);
 });
+test('complete publication is readable and reusable while its own temporary link is live',async t=>{
+  const d=await scratch(t),root=join(d,'store');let linked,release;
+  const published=new Promise(r=>{linked=r;}),gate=new Promise(r=>{release=r;});
+  const writer=await createControlledImageStore({root,targetRef:'store:race',io:{...fs,async link(...args){await fs.link(...args);linked();await gate;}}});
+  const peer=await createControlledImageStore({root,targetRef:'store:race'}),bytes=Buffer.from('complete');
+  const pending=writer.putImmutable('race.bin',bytes);await published;
+  try {
+    assert.equal((await fs.stat(join(root,'race.bin'))).nlink,2);
+    const entries=await fs.readdir(root);
+    assert.deepEqual(await peer.read('race.bin'),bytes);
+    assert.equal((await peer.putImmutable('race.bin',bytes)).reused,true);
+    await assert.rejects(peer.putImmutable('race.bin',Buffer.from('conflict')),/STORE_CONFLICT/);
+    assert.deepEqual(await fs.readdir(root),entries);
+  } finally {release();await pending;}
+  assert.equal((await fs.stat(join(root,'race.bin'))).nlink,1);
+});
+test('owned writer SIGKILL after publication leaves complete final bytes readable on restart',async t=>{
+  const d=await scratch(t),root=join(d,'store'),moduleURL=new URL('../src/capabilities/image/exporter.js',import.meta.url).href;
+  const code=`import * as fs from 'node:fs/promises';import {createControlledImageStore} from ${JSON.stringify(moduleURL)};
+    const store=await createControlledImageStore({root:${JSON.stringify(root)},targetRef:'store:crash',io:{...fs,async link(...args){await fs.link(...args);process.kill(process.pid,'SIGKILL');}}});
+    await store.putImmutable('crash.bin',Buffer.from('complete'));`;
+  assert.throws(()=>execFileSync(process.execPath,['--input-type=module','-e',code],{stdio:['ignore','pipe','pipe']}),e=>e.signal==='SIGKILL');
+  const store=await createControlledImageStore({root,targetRef:'store:crash'}),entries=await fs.readdir(root);
+  assert.equal((await fs.stat(join(root,'crash.bin'))).nlink,2);
+  assert.equal((await store.read('crash.bin')).toString(),'complete');
+  assert.equal((await store.putImmutable('crash.bin',Buffer.from('complete'))).reused,true);
+  assert.deepEqual(await fs.readdir(root),entries);
+});
+test('unbound, misbound and additional hard links are rejected and retained',async t=>{
+  const uuid='11111111-1111-4111-8111-111111111111';
+  for(const alias of [`.image-tmp-${uuid}`,`.image-tmp-other.bin-${uuid}`,`.image-tmp-file.bin-${uuid}`]) {
+    const d=await scratch(t),root=join(d,'store'),store=await createControlledImageStore({root,targetRef:'store:unsafe'});
+    await store.putImmutable('file.bin',Buffer.from('private'));await fs.link(join(root,'file.bin'),join(root,alias));
+    if(alias.startsWith('.image-tmp-file.bin-'))await fs.link(join(root,'file.bin'),join(d,'external-link'));
+    const entries=await fs.readdir(root);
+    await assert.rejects(store.read('file.bin'),/STORE_UNSAFE/);
+    await assert.rejects(store.putImmutable('file.bin',Buffer.from('private')),/STORE_UNSAFE/);
+    assert.deepEqual(await fs.readdir(root),entries);
+  }
+});
 
 test('official assisted original exports produce exact contract fields but no remote receipt',async t=>{
   const s=await setup(t);const r=await s.exporter.exportOriginals(s.options);
@@ -187,7 +227,22 @@ test('external authorized flag/digest cannot replace independent current grant',
   const s=await setup(t,{authorize:async()=>({allowed:true,bindingDigest:'0'.repeat(64),expiresAt:FUTURE})});
   s.options.request={...s.req,authorized:true};await assert.rejects(s.exporter.exportOriginals(s.options),/AUTHORIZATION_DENIED/);
   assert.equal(s.calls.size,0);assert.deepEqual(await fs.readdir(s.root),[]);
-  await assert.rejects(authorizeArtifactBinding(async b=>({...await authorize(b),expiresAt:AT}),{x:1},AT),/AUTHORIZATION_EXPIRED/);
+  await assert.rejects(authorizeArtifactBinding(async b=>({...await authorize(b),expiresAt:AT}),{x:1},clock),/AUTHORIZATION_EXPIRED/);
+});
+test('authorization proof expires at the trusted clock after the awaited hook returns',async()=>{
+  let now=Date.parse(AT),calls=0;const expiry=new Date(now+500).toISOString();
+  const auth=async b=>{calls++;const proof={...await authorize(b),expiresAt:expiry};await Promise.resolve();now+=1000;return proof;};
+  await assert.rejects(authorizeArtifactBinding(auth,{x:1},()=>new Date(now).toISOString(),{at:AT}),/AUTHORIZATION_EXPIRED/);
+  assert.equal(calls,1);
+  await assert.rejects(authorizeArtifactBinding(authorize,{x:1},AT),/AUTHORIZATION_DENIED/);
+});
+test('exporter expired async authorization cannot reach source I/O or publication',async t=>{
+  const s=await setup(t);let now=Date.parse(AT);
+  const exporter=createImageExporter({...s.config,clock:()=>new Date(now).toISOString(),authorize:async b=>{
+    const proof={...await authorize(b),expiresAt:new Date(now+500).toISOString()};await Promise.resolve();now+=1000;return proof;
+  }});
+  await assert.rejects(exporter.exportOriginals(s.options),/AUTHORIZATION_EXPIRED/);
+  assert.equal(s.calls.size,0);assert.deepEqual(await fs.readdir(s.root),[]);
 });
 test('output over-count, duplicate ids and wrong bound turn are rejected before any I/O',async t=>{
   const s=await setup(t);s.options.outputs=[slot(),slot('out-2')];await assert.rejects(s.exporter.exportOriginals(s.options),/OUTPUT_COUNT_MISMATCH/);
@@ -272,6 +327,36 @@ test('consumer independently fetches, decodes and durably stores before RECEIVED
 test('consumer current authorization is checked even for duplicate receipt replay',async t=>{
   const s=await setup(t),c=await receiveSetup(t,s);await c.receiver.receive(c.args);
   const denied=createImageConsumerReceiver({...c.config,authorize:async()=>({allowed:false})});await assert.rejects(denied.receive(c.args),/AUTHORIZATION_DENIED/);assert.equal(c.fetches(),1);
+});
+test('consumer refuses proofs expiring during each async authorization boundary',async t=>{
+  for(const expiryCall of [1,2,3]) {
+    const s=await setup(t),c=await receiveSetup(t,s);let now=Date.parse(AT),calls=0;
+    const expiresAt=new Date(now+500).toISOString();
+    const receiver=createImageConsumerReceiver({...c.config,decode:fixtureDecode,clock:()=>new Date(now).toISOString(),authorize:async b=>{
+      const proof={...await authorize(b),expiresAt};calls++;if(calls===expiryCall){await Promise.resolve();now+=1000;}return proof;
+    }});
+    await assert.rejects(receiver.receive(c.args),/AUTHORIZATION_EXPIRED/);
+    assert.equal(calls,expiryCall);
+    const entries=await fs.readdir(join(s.directory,'consumer'));
+    assert.equal(entries.some(n=>n.startsWith('receipt-')),false);
+    assert.equal(entries.some(n=>n.startsWith('received-')),expiryCall===3);
+  }
+});
+test('consumer revocation during durable bytes blocks both new receipt and prior receipt replay',async t=>{
+  for(const prior of [false,true]) {
+    const s=await setup(t),c=await receiveSetup(t,s);const first=prior?await c.receiver.receive(c.args):null;
+    let active=true,calls=0;
+    const receiver=createImageConsumerReceiver({...c.config,decode:fixtureDecode,
+      authorize:async b=>{calls++;return active?authorize(b):{allowed:false};},
+      store:{...c.store,async putImmutable(name,bytes){const result=await c.store.putImmutable(name,bytes);if(name.startsWith('received-'))active=false;return result;}}});
+    await assert.rejects(receiver.receive(c.args),/AUTHORIZATION_DENIED/);assert.equal(calls,3);
+    const entries=await fs.readdir(join(s.directory,'consumer'));
+    assert.equal(entries.some(n=>n.startsWith('received-')),true);
+    assert.equal(entries.filter(n=>n.startsWith('receipt-')).length,prior?1:0);
+    const resumed=await c.receiver.receive(c.args);
+    if(prior){assert.equal(resumed.reused,true);assert.deepEqual(resumed.receipt,first.receipt);}
+    else assert.equal(resumed.receipt.status,'RECEIVED');
+  }
 });
 test('consumer wrong bytes or dimensions never creates receipt',async t=>{
   const s=await setup(t),c=await receiveSetup(t,s,{resolveArtifact:async()=>({bytes:png({rgba:[0,0,0,255]}),mimeType:'image/png'})});

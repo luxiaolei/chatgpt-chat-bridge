@@ -34,6 +34,7 @@ capability.
 | `manifest.js` | `publicImageManifest(manifest)` | Separate, redacted public schema and canonical snapshot digest. |
 | `manifest.js` | `imageExportEvent(result, metadata)` | Builds #77 export evidence; does not call its coordinator. |
 | `manifest.js` | `createImageConsumerReceiver(dependencies)` | Receiver-side `receive(input)`, independent verification and durable receipt. |
+| `manifest.js` | `authorizeArtifactBinding(authorize,binding,clock,context)` | Samples the trusted clock after the asynchronous authorizer returns. |
 
 All production factories use trusted, host-selected dependencies. Request fields
 cannot select an executable, install a decoder, choose a local destination path,
@@ -134,7 +135,10 @@ synthetic tests, not in production integration. An external caller's `authorized
 namespace, grant ID, job ID or request digest cannot grant access.
 
 Permission is rechecked before source I/O, before publication, on replay and before
-manifest persistence. A pinned capability snapshot is not replaced by a fresh
+manifest persistence. Every proof expiry is compared to the trusted injected clock
+after the awaited hook resolves; a request/context timestamp cannot select that
+permission clock. Direct helper callers must pass a clock function, not a sampled
+timestamp. A pinned capability snapshot is not replaced by a fresh
 unrelated observation on retry. There is no arbitrary default capability TTL:
 current grant validity governs its pinned snapshot. A trusted host may explicitly
 configure `maxCapabilityAgeMs`; future-dated, unobserved, missing or unsupported
@@ -188,11 +192,18 @@ The host, not an ImageJob request, configures the absolute storage root and port
 target reference. The root is private (0700), owned by the current user and pinned
 by device/inode. Ancestors must be non-symlink directories owned by root/current
 user; writable non-sticky ancestors are rejected. Files are private (0600),
-regular, single-link files. Path components, absolute filenames, symlinks, hard-link
-aliases and directory substitution detected during checks are rejected.
+regular and owned by the current user. Path components, absolute filenames,
+symlinks, unrelated hard links and directory substitution detected during checks
+are rejected.
 
 Writes snapshot caller Buffers, create a unique temporary file exclusively with
 `O_NOFOLLOW`, write and sync bytes, then publish with a no-overwrite hard link.
+The temporary name binds the exact final filename and a UUID. Readers normally
+require one link; exactly two links are accepted only when the private same-owner
+regular temporary alias for that final name has the same device/inode. This keeps
+complete bytes readable during publication and after a writer dies before unlink.
+Extra or unbound links remain unsafe. Reads/retries never delete an alias, so a
+live publishing writer retains ownership of its cleanup.
 The temporary name is removed, the directory is synced, and the published file is
 read back. Existing identical data is reusable; different data is a conflict,
 never an overwrite. Disk/I/O/permission errors remain failures. Only this write's
@@ -205,7 +216,11 @@ is outside this deployment's local trust boundary. This code does not claim a
 kernel-enforced filesystem sandbox or protection against privileged writers.
 Abrupt process death can leave a private temporary file; automatic sweeping of
 unknown temporary files is deliberately not implemented because it could race a
-live writer. Live-request write-failure cleanup is tested.
+live writer. The earlier unbound `.image-tmp-<UUID>` naming is not sufficient proof
+of a published alias and remains rejected and preserved. This offline branch was
+not installed/deployed; no legacy recovery migration is implemented. Live-request
+write-failure cleanup, concurrent reads/retries and an owned-child SIGKILL followed
+by a newly constructed store are tested.
 
 Each immutable original record binds request digest, output, attempt, turn,
 original reference, expected dimensions, original hash and verification evidence.
@@ -263,7 +278,10 @@ controlled store, `authorize`, `resolveArtifact` and decoder. Its `receive` meth
 accepts `{jobId,requestDigest,output,consumerRef,authorizationContext}`. The output
 must satisfy A's shape and be technically VERIFIED. The receiver independently
 resolves authorized bytes, decodes, checks original hash/MIME/dimensions/length,
-rechecks permission, and durably stores bytes before creating a RECEIVED receipt.
+rechecks permission, and durably stores bytes. It rechecks permission again after
+that awaited durable byte write and before publishing or replaying a RECEIVED
+receipt. Revocation/expiry at that boundary preserves already written bytes and
+any prior receipt, but does not issue or return a successful receipt.
 
 The receipt has A's exact `chatbridge.image.receipt.v1` shape. Repeated same-output
 receiving preserves the receipt ID and original receivedAt; changed hash/reference
@@ -279,7 +297,8 @@ and tested. Neither technical VERIFIED nor RECEIVED means APPROVED/PUBLISHED.
 
 ## Evidence and unrun work
 
-On this branch, `npm run check && npm test` passed: **265/265 Node tests**, including
+At the original fixed delivery `f4fcba4aeffbbbdd7a4ed7adaca1e545763ad4dd`,
+`npm run check && npm test` passed: **265/265 Node tests**, including
 **54 new artifact tests**, zero failures/skips, plus static and pacing/cooldown
 checks. All images were synthetic, non-sensitive offline fixtures. Full PNG/JPEG/
 WebP decoding used the installed decoder. Contract tests loaded both fixed Git
@@ -294,6 +313,18 @@ checks, public redaction and receiver idempotency/failure. A first short-tool fu
 suite attempt timed out without a terminal result; it is not counted as a pass.
 The separate complete foreground rerun produced the counts above.
 
+The local correction of independent review findings ART-01/02/03 adds seven
+regression tests. The artifact run passes **61/61**, covering proof expiry during
+each receiving authorization await, export denial before source I/O, revocation
+after durable bytes for fresh and replayed receipts, live publication reads and
+retries, an actual owned-child SIGKILL/restart, and conservative unrelated-link
+rejection. Full repository revision evidence is retained in the handoff separately
+from the original delivery evidence: `npm run check && npm test` passed **272/272**
+with zero failures/skips, plus static and pacing/cooldown checks. The test log is
+`tests/image-artifacts-revision-full.log` (SHA-256
+`5ae533d519695b94902bbaf30ca68c26f4c891e7aff1d4c169784aa229cc9262`);
+the preceding `npm run check` success is captured in the local tool receipt.
+
 Model evidence for this development task: requested Latest + Pro. The exact bound
 session's native status read at `2026-09-30T06:33:36.076Z` observed effort Pro;
 its folded live model label was null. The same read returned
@@ -304,7 +335,8 @@ attempted.
 
 **NOT_RUN:** real image generation or source upload; real original-provider export
 canary; installed A/B/C runtime/CLI integration; real authenticated cross-host
-artifact delivery or external consumer receipt; independent non-author review;
+artifact delivery or external consumer receipt; independent non-author review of
+the correction (the original fixed delivery was independently reviewed);
 installation/rollback; native multi-reference/mask/batch capability validation;
 HZ adoption, publishing, channels or production. No paid API, merge or owner ACK
 was performed. Those remain separate controller-owned review/integration gates.
