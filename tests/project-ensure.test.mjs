@@ -31,10 +31,10 @@ test("Project Ensure is conservative until create+confirm and records real bindi
   };
   const touchRuntime=async(...args)=>touched.push(args);
   const ensure=await new AsyncFunction(
-    "projectRecord","bindingObserved","accountManagedTask","pagesOf","openProjectPage","saveRegistry",
+    "projectRecord","bindingObserved","accountManagedTask","pagesOf","openProjectPage","saveRegistry","newManagedPage",
     "createProjectViaUI","bindingFor","touchRuntime","projectIdFromUrl","bindingExecutionReadiness",
     code+"; return ensureProjectLocation;"
-  )(projectRecord,bindingObserved,accountManagedTask,pagesOf,openProjectPage,saveRegistry,createProjectViaUI,bindingFor,touchRuntime,
+  )(projectRecord,bindingObserved,accountManagedTask,pagesOf,openProjectPage,saveRegistry,async()=>page,createProjectViaUI,bindingFor,touchRuntime,
     value=>String(value).match(/\/g\/(g-p-[^/]+)/)?.[1]||null,
     ()=>({ready:true,missing:[]}));
 
@@ -50,6 +50,27 @@ test("Project Ensure is conservative until create+confirm and records real bindi
   assert.equal(reg.projects.P.bindings.a.profileId,"Profile 1");
   assert.match(reg.projects.P.bindings.a.projectId,/^g-p-[a-f0-9]{32}/);
   assert.equal(saved.length,1); assert.equal(touched.length,1);
+});
+
+test("Project Ensure preserves existing conversation and draft tabs on both setup paths", async()=>{
+  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  const projectUrl="https://chatgpt.com/g/g-p-"+"a".repeat(32)+"-p/project";
+  for (const bound of [false,true]) {
+    const existing={label:"p2",url:"https://chatgpt.com/c/existing",draft:"unsent human text",generating:true};
+    const before=structuredClone(existing),setup={label:"p3"},task={spaceId:7,newPage:async()=>setup};
+    const reg={accounts:{a:{identity:"one"}},projects:{P:{bindings:bound?{a:{projectUrl}}:{}}}};
+    const ensure=await new AsyncFunction("projectRecord","bindingObserved","accountManagedTask","pagesOf",
+      "newManagedPage","openProjectPage","saveRegistry","createProjectViaUI","bindingFor","touchRuntime",
+      "projectIdFromUrl","bindingExecutionReadiness",extract("ensureProjectLocation","syncProject")+"; return ensureProjectLocation;"
+    )((r,p)=>r.projects[p],()=>bound,async()=>({task,spaceName:"managed",profileId:"P1"}),async()=>[existing],
+      async(_r,_p,_a,t)=>t.newPage(),async page=>{
+        assert.equal(page,setup,"must not navigate a pre-existing conversation");return projectUrl;
+      },async()=>{},async()=>{throw Error("existing project must be reused");},(r,p,a)=>r.projects[p].bindings[a]||= {account:a},
+      async()=>{},()=>"g-p-"+"a".repeat(32),()=>({ready:true,missing:[]}));
+    assert.equal((await ensure(reg,"P","a")).status,"READY");
+    assert.deepEqual(existing,before);
+    assert.equal(reg.projects.P.bindings.a.controlPage,"p3");
+  }
 });
 
 test("managed Space is one per verified login/Profile and user ownership is a hard boundary", async()=>{

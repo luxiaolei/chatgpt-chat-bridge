@@ -1710,11 +1710,12 @@ async function ensureProjectLocation(reg, projectName, account, options={}) {
   if(current?.projectUrl && bindingObserved(reg,account,current)) {
     try {
       const {task,spaceName,profileId}=await accountManagedTask(reg,account,current?.profileId||null);
-      const page=(await pagesOf(task))[0]||await task.newPage();
+      const page=await newManagedPage(reg,projectName,account,task,{...current,spaceName,profileId,spaceId:task.spaceId});
       const url=await openProjectPage(page,projectName,current.projectUrl);
       current.spaceName=spaceName;
       current.profileId=profileId;
       current.spaceId=task.spaceId;
+      current.controlPage=page.label;
       current.projectUrl=url;
       current.projectBase=url.replace(/\/project$/,'');
       current.projectId=projectIdFromUrl(url);
@@ -1729,7 +1730,7 @@ async function ensureProjectLocation(reg, projectName, account, options={}) {
     }
   }
   const {task,spaceName,profileId}=await accountManagedTask(reg,account,current?.profileId||null);
-  const page=(await pagesOf(task))[0]||await task.newPage();
+  const page=await newManagedPage(reg,projectName,account,task,{...current,spaceName,profileId,spaceId:task.spaceId});
   let url=null;
   let created=false;
   try {
