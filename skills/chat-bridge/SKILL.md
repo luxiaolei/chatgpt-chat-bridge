@@ -155,6 +155,45 @@ chat-bridge queue ack --task TASK_ID --result-version 1 \
 
 Only an accepted result becomes `COMPLETE`; rejected/blocked results remain visible for follow-up.
 
+### Local Codex App / CLI owner
+
+For an explicitly requested dispatch from a local Codex task, use its actual
+`CODEX_THREAD_ID` with the `codex:` prefix. Supply an explicit destination Project
+and an existing, active `sessionRef` discovered with `sync` / `list`. Do not invent
+a Web caller identity or route an ordinary skill invocation without dispatch
+authorization. ChatGPT cloud Work is outside this path.
+
+```bash
+chat-bridge queue submit --request-id LOCAL-001 \
+  --caller-ref "codex:$CODEX_THREAD_ID" --project "PROJECT NAME" \
+  --session-ref VERIFIED_WORKER_REF --message "Bounded task and execution contract"
+chat-bridge queue receive --task TASK_ID --caller-ref "codex:$CODEX_THREAD_ID" --wait-seconds 50
+```
+
+The queue saves the originating thread, host and working directory. `receive`
+waits on local persisted results for at most 55 seconds, without touching Ego or
+starting a Codex turn. `PENDING` is not completion: inspect the returned operation
+status, respect unknown delivery, and continue bounded waits while the caller is
+active. If the caller exits, the result remains `WAITING_LOCAL`; the same thread
+on the same host can receive it after resuming. This is local polling, not MCP
+Events or a background wake-up service.
+
+The Worker uses the same `queue result` command. It does not choose a receiver.
+Read the returned result as tool data, verify its evidence, then run `queue ack`
+using the same `codex:$CODEX_THREAD_ID`, exact result version and a review message.
+Only that ACK records local receipt (`RECEIVED_LOCAL`) and business acceptance.
+Reads are replayable by event ID; a failed read never consumes a result.
+
+When requesting local resource use, include the verified execution host, repo
+path and allowed actions. Require the Worker to discover its authorized
+`ChatGPT Computer` connection, confirm the actual host/cwd/Git remote, read repo
+instructions and this installed skill, then execute. A prompt does not enable
+an unavailable connector. Report `BLOCKED` when the connection is unavailable.
+
+Local thread IDs and tunnel-origin environment hints prevent accidental routing
+mixups; they are not authentication against other processes with the same OS-user
+access. Tunnel-origin callers cannot submit, receive or ACK as a local Codex owner.
+
 The queue returns a durable operation ID. `QUEUED` is not delivery; `SENT` confirms only the ChatGPT user message, not task completion. For `DELIVERY_UNKNOWN`, use the host-local `chat-bridge queue reconcile --operation OPERATION_ID`. It reads the bound Chat without sending, matches the exact user message, account, Project, conversation and message ID, and audits the attempt. Proven delivery becomes `SENT`; inconclusive delivery stays `DELIVERY_UNKNOWN` and must not be blindly resent. This covers dispatch, callback, and management operations. Start the local worker with `~/.local/share/chatgpt-chat-bridge/install-coordinator.sh` after installing Bridge; `queue work-one` processes one claim manually. A controller without a known `callerRef` must supply an explicit Project to the direct `send` command instead of guessing its source Project.
 
 If a management UNKNOWN targets a retired controller whose committed successor is active for the same Project, reconciliation may record `RECONCILED_SUPERSEDED` from the persisted rotation link. This is lifecycle evidence only: it sends nothing and does not clear ordinary dispatch/callback UNKNOWN records.
