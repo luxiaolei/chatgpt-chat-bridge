@@ -263,6 +263,8 @@ Runtime and registry authority is SQLite; JSON is a compatibility projection. Ho
 
 `chat-bridge health` reports cached observation freshness, manual ownership, capacity waiting, and retained historical errors without touching Ego. Generation counts are labeled `recentlyObservedGenerating`, not live activity.
 
+`control status` counts a durable result awaiting owner ACK even when its callback could not be sent. An acknowledged callback's old pre-send failure remains in the operation ledger and `historicalFailedPreSend`, but no longer counts as an unresolved send fault. Fresh generation takes precedence in the execution label while unresolved faults remain separate counters. An idle label describes the absence of dispatched work, not the absence of business opportunities. A resumed scope retains its persisted epoch and reason; stronger parent controls still govern admission.
+
 Conversation attachment compares the conversation ID, origin, and any available canonical Project IDs, not the full URL string. Slug/query changes do not reload a running tab. A reused page label belonging to another conversation is never navigated away; the Bridge first looks for the same conversation, then uses the existing safe page pool. Readiness failure on an existing same-conversation tab does not trigger a Project navigation fallback.
 
 Orphan cleanup does not create an idle-browser wakeup or bypass a cooling account. Cleanup inside a scan is scoped to the admitted account/Project and is not repeated by every per-task child. Terminal tab safety, active generations, drafts, user ownership, and UNKNOWN delivery reconciliation remain protected. This intentionally favors effective completed work over maximum open tabs.

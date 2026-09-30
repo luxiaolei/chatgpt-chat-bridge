@@ -733,8 +733,14 @@ test("control status distinguishes no work, in progress, awaiting ACK and comple
     const awaiting=JSON.parse(r.stdout).projects[0];
     assert.equal(awaiting.completion.state,"AWAITING_ACK");
     assert.equal(awaiting.execution.state,"QUEUED");
+    assert.equal(awaiting.results.awaitingControllerAck,1);
 
-    r=f.call("work-one"); assert.equal(r.status,0,r.stderr);
+    r=f.call("work-one",[],null,{CHAT_BRIDGE_TEST_FAIL_STAGE:"PRE_SEND"});
+    assert.equal(r.status,0,r.stderr);
+    assert.equal(JSON.parse(r.stdout).status,"FAILED_PRE_SEND");
+    const undelivered=JSON.parse(f.call("control",["status","--project","P"]).stdout).projects[0];
+    assert.equal(undelivered.results.awaitingControllerAck,1);
+    assert.equal(undelivered.attention.awaitingControllerAck,1);
     r=f.call("ack",["--task","ts","--result-version","1","--caller-ref","controller","--status","ACCEPTED","--message","ok"]);
     assert.equal(r.status,0,r.stderr);
     r=f.call("control",["status","--project","P"]);
@@ -742,7 +748,45 @@ test("control status distinguishes no work, in progress, awaiting ACK and comple
     assert.equal(final.completion.state,"COMPLETE");
     assert.equal(final.completion.knownComplete,true);
     assert.equal(final.execution.state,"IDLE");
+    assert.equal(final.execution.failedPreSend,0);
+    assert.equal(final.execution.historicalFailedPreSend,1);
+    assert.equal(final.operations.find(op=>op.status==="FAILED_PRE_SEND").count,1);
   } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test("resumed control retains its persisted scope and epoch", async()=>{
+  const f=await fixture();
+  try {
+    const parse=r=>{assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);};
+    parse(f.call("control",["pause","--project","P","--reason","maintenance","--confirm"]));
+    parse(f.call("control",["resume","--project","P","--reason","ready","--confirm"]));
+    const control=parse(f.call("control",["status","--project","P"])).projects[0].control;
+    assert.equal(control.mode,"RUNNING");
+    assert.equal(control.epoch,2);
+    assert.equal(control.scope,"project:P");
+    assert.equal(control.reason,"ready");
+    assert.ok(control.updatedAt);
+    parse(f.call("control",["pause","--all","--reason","global hold","--confirm"]));
+    assert.equal(parse(f.call("control",["status","--project","P"])).projects[0].control.scope,"global");
+  } finally {await rm(f.root,{recursive:true,force:true});}
+});
+
+test("current generation stays visible beside historical transport faults", async()=>{
+  const r=spawnSync("python3",["-c",`
+import importlib.util,json,sys
+spec=importlib.util.spec_from_file_location('coordinator',sys.argv[1]); m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+rt={'sessions':{'s':{'generating':True,'observedAt':m.stamp()}}}
+task={'sessionId':'s','status':'RUNNING'}
+def summary(mode):
+    return m.execution_summary(rt,[task],mode,0,0,0,0,5,1,0,0,0,0)
+print(json.dumps({'running':summary('RUNNING'),'paused':summary('PAUSED')}))
+`,coordinator],{encoding:"utf8"});
+  assert.equal(r.status,0,r.stderr);
+  const value=JSON.parse(r.stdout);
+  assert.equal(value.running.state,"GENERATING");
+  assert.equal(value.running.failedPreSend,5);
+  assert.equal(value.running.deliveryUnknown,1);
+  assert.equal(value.paused.state,"PAUSED");
 });
 
 test("a task id cannot be dispatched twice, including when prior delivery is unknown", async()=>{
