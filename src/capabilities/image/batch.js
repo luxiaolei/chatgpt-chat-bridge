@@ -1,5 +1,7 @@
 /** Offline recommendations over authoritative ImageJob/receipt snapshots. No I/O or reservations. */
 import {createHash} from 'node:crypto';
+import {readFileSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
 import {canonicalImageJSON, normalizeImageRequest, imageJobKey, validateImageShape,
   validateImageOutput, validateImageReceipt} from './contract.js';
 import {assertImageId, immutableArtifactValue} from './manifest.js';
@@ -12,6 +14,7 @@ function fields(value, names) {
   requireValue(value && Object.getPrototypeOf(value) === Object.prototype &&
     Object.keys(value).length === names.length && names.every(k=>Object.hasOwn(value,k)), 'SHAPE');
 }
+
 function time(value) {
   requireValue(typeof value === 'string' && /^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(value) &&
     Number.isFinite(Date.parse(value)), 'TIME');
@@ -45,7 +48,7 @@ export function normalizeImageBatch(input) {
 function reasonCategory(reason) {
   if (/QUOTA/.test(reason)) return 'QUOTA';
   if (/RATE|COOLDOWN|PACING/.test(reason)) return 'RATE_LIMIT';
-  if (/AUTH|LOGIN|ACCESS_DENIED|GRANT_EXPIRED|REVOKED/.test(reason)) return 'AUTH';
+  if (/AUTH|LOGIN|ACCESS_DENIED|GRANT_EXPIRED|REVOKED|ROUTE_NOT_GRANTED|ORIGIN_UNVERIFIED/.test(reason)) return 'AUTH';
   if (/CAPABILITY/.test(reason)) return 'CAPABILITY';
   if (/USER_CONTROL|USER_DRAFT|MANUAL|TARGET_BUSY/.test(reason)) return 'MANUAL_PAUSE';
   if (/ADMISSION_PAUSED|ADMISSION_DRAINING|PROJECT_PAUSE/.test(reason)) return 'PROJECT_CONTROL';
@@ -187,4 +190,17 @@ export function imageBatchDecision(input,{jobs,receipts,admissions,at} = {}) {
     expectedCount:batch.items.length,validatedCount,uniqueCount:verified.size,missingCount:batch.items.length-validatedCount,
     receivedCount:items.filter(i=>i.action === 'AWAIT_CONTROLLER_ACK').length,duplicateItemIds,
     businessApproval:'NOT_EVALUATED',budgetUsage:{attempts,generationCallReservations:calls},items});
+}
+
+// Stateless child of the existing coordinator, like contract.js. No input is
+// authenticated here; the public batch API loads snapshots inside SQLite.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  try {
+    const raw=readFileSync(0,'utf8');
+    requireValue(Buffer.byteLength(raw)<=2_000_000,'PAYLOAD_TOO_LARGE');
+    const input=JSON.parse(raw),action=process.argv[2];
+    const result=action==='normalize'?normalizeImageBatch(input.batch):
+      action==='decision'?imageBatchDecision(input.batch,input.snapshots):requireValue(false,'ACTION');
+    process.stdout.write(JSON.stringify(result));
+  } catch (error) {process.stderr.write(JSON.stringify({error:error.message}));process.exitCode=2;}
 }

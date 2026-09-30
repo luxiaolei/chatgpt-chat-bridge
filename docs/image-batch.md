@@ -1,11 +1,42 @@
-# Offline image batch policy (#81)
+# Image batch policy and local coordination (#81)
 
 `src/capabilities/image/batch.js` groups 1–16 explicitly linked, existing
-`count=1` ImageJobs. It provides pure recommendations and performs no browser,
-filesystem, database, queue, receipt, generation or controller action. This is
-an offline increment; it does not complete #81 or enable native multi-output
-generation. GitHub remains development state, Bridge holds technical jobs and
-receipts, and the consumer/controller owns business acceptance.
+`count=1` ImageJobs. The module provides pure recommendations; the existing
+coordinator persists fixed batch linkage and enforces budgets. Local batch
+commands make no browser, generation, queue-send, consumer or controller action.
+This is an offline increment; it does not complete #81 or enable native
+multi-output generation. GitHub remains development state, Bridge holds
+technical jobs and receipts, and the consumer/controller owns business acceptance.
+
+## Local entry
+
+```sh
+chat-bridge image batch create < batch-create.json
+chat-bridge image batch inspect < batch-query.json
+chat-bridge image batch decision < batch-query.json
+```
+
+Create accepts only `{issuerRef,batch,keys}`. `batch` is the envelope below and
+`keys` contains each existing job's exact `imageJobKey(request,grantId)`.
+Every job/grant/digest must belong to that authenticated host-local owner and
+one identical scope; the jobs must already exist. A job may belong to one
+batch. Replaying the same envelope is idempotent; changed budget/linkage or
+another owner's job is rejected. Create does not authorize generation.
+
+Inspect/decision accept only `{batchId,issuerRef}` and use a single query-only
+SQLite snapshot without creating a missing store or repairing projections.
+They load current jobs/grants and independently recheck current I/O admission;
+expired/revoked rights remain holds while historical job/late evidence stays
+visible to its authenticated owner. `revision` is the persisted batch budget
+revision, and `budgetUsage` comes from persisted ImageJob attempts.
+
+The current host has no configured authenticated receiver ledger/read
+integration. The loader explicitly reports
+`receiverEvidence:RECEIVER_EVIDENCE_UNAVAILABLE`, passes an empty receipt array,
+and preserves `RECEIVE_EXISTING`. It rejects caller-provided receipts,
+admissions and job snapshots. Producer manifests and caller JSON cannot create
+`RECEIVED`. The pure function below remains the future integration point for an
+independently authorized receiver loader; that receiver is still unimplemented.
 
 ```js
 const batch = normalizeImageBatch({
@@ -77,13 +108,35 @@ are deterministic. Repeating a decision changes nothing and refunds nothing.
 `recommendationsOnly:true` and `reservationsPersisted:false` are explicit:
 these decisions do **not** prove atomic or durable budget reservations.
 
-Coordinator integration remains pending. Its single writer must persist the
-batch envelope/linkage and CAS revision in the existing SQLite database;
-re-read authoritative jobs/receipts/admission and reserve batch budget in the
-same transaction as `beginAttempt` before any possible Send. Concurrent stale
-recommendations must lose that CAS, not send twice. The existing scheduler,
-account pacing/cooldown, session occupancy, operation/outbox and user controls
-remain the execution path; no second scheduler or waiting UI lease is added.
+The coordinator stores `image_batches` and `image_batch_items` in the existing
+SQLite database. Job, request digest and item linkage are immutable. Attempt,
+turn, output and late evidence remain in the original authoritative ImageJob;
+their identities are not copied into a competing state machine.
+
+Every linked job's ordinary `image-apply/beginAttempt` checks current whole-batch
+and item totals, generation-call reservations, elapsed/deadline limits, existing
+grant, controls and physical-session occupancy in the same `BEGIN IMMEDIATE`
+transaction. It CAS-increments the batch revision and appends the original
+UNKNOWN attempt atomically with the job's existing expected-revision CAS.
+Invalid model, stale job revision or occupancy failure rolls back both.
+Omitting batch metadata cannot bypass this guard. A raw coordinated apply may
+also provide `expectedBatchRevision` to reject a stale batch decision; exact
+event replay returns `RECONCILE_ONLY` and consumes no extra budget. No reservation
+is refunded after UNKNOWN, failure, cancellation, revocation or expiry.
+
+The pure recommendation still has `reservationsPersisted:false`: deciding alone
+persists nothing. The actual conservative reservation ledger is the immutable
+attempt history written by the original API transaction. The batch revision
+advances only for new attempt reservations, not status observations. A decision
+must also use the current item `jobRevision` when executing an original API
+operation; batch revision alone does not authorize a stale observation/export.
+
+Execution remains explicit through the original image API and adapter. The
+existing scheduler, account pacing/cooldown, session occupancy, operation/outbox
+and user controls remain the path; no second scheduler or waiting UI lease is
+added. Current I/O authorization also enforces the associated batch deadline
+before subsequent byte effects. No generation or consumer delivery is executed
+by a local batch decision.
 
 Post-send replacement attempts remain unsupported until A/B provide explicit
 remote zero-output settlement evidence that the current occupancy gate can
@@ -92,5 +145,6 @@ grant or account alias may bypass that gate. Paid API/fee enforcement, actual
 receiver transport/rights, live host/account/Project/turn correlation, canary,
 installation and deployment require their own evidence.
 
-Run the focused offline check with `node --test tests/image-batch.test.mjs`;
+Run the focused offline checks with
+`node --test tests/image-batch.test.mjs tests/image-batch-persistence.test.mjs`;
 integration must also run the repository-required `npm run check && npm test`.

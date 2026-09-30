@@ -204,6 +204,7 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
 }
 
 export async function imageCli(action,payload={}, {coordinated,executor,liveAction,decode,callerEnv=process.env,stateDir=process.env.CHAT_BRIDGE_STATE_DIR||path.join(homedir(),'.local/state/chat-bridge')}={}) {
+  if (['batch-create','batch-inspect','batch-decision'].includes(action)) return coordinated('image-'+action,payload);
   if (action==='probe') return imageExecutionProbe(payload.route ?? null);
   if (action==='validate') {
     const request=normalizeExecutionRequest(payload.request);
