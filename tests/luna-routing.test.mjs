@@ -62,6 +62,16 @@ test('CLI judgment uses Luna and structured output; unavailable or tool-using tu
     assert.equal(receipt.judge.model,'gpt-6-luna');
     writeFileSync(binary,script([...events,{type:'item.completed',item:{type:'command_execution'}}]),{mode:0o700});
     await assert.rejects(judge(request,{binary}),/TOOL_USE_REJECTED/);
+    writeFileSync(binary,script([...events,{type:'item.started',item:{type:'command_execution'}}]),{mode:0o700});
+    await assert.rejects(judge(request,{binary}),/TOOL_USE_REJECTED/);
+    writeFileSync(binary,script([...events,{type:'item.completed',item:{type:'error',message:'fatal model error'}}]),{mode:0o700});
+    await assert.rejects(judge(request,{binary}),/TOOL_USE_REJECTED/);
+    writeFileSync(binary,script([...events,{type:'turn.failed'}]),{mode:0o700});
+    await assert.rejects(judge(request,{binary}),/TURN_FAILED/);
+    const marker=path.join(dir,'continued');
+    writeFileSync(binary,'#!/usr/bin/env node\nprocess.stdout.write("x".repeat(1024*1024));setTimeout(()=>{require("node:fs").writeFileSync('+JSON.stringify(marker)+',"bad");},400);\n',{mode:0o700});
+    await assert.rejects(judge(request,{binary}),/OUTPUT_TOO_LARGE/);
+    const {existsSync}=await import('node:fs'); assert.equal(existsSync(marker),false);
     writeFileSync(binary,'#!/usr/bin/env node\nprocess.stdin.resume(); setTimeout(()=>{},10000);\n',{mode:0o700});
     await assert.rejects(judge(request,{binary,timeoutMs:40}),/TIMEOUT/);
     await assert.rejects(judge(request,{binary:'/nonexistent/codex'}),/UNAVAILABLE/);
