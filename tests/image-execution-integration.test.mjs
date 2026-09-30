@@ -197,6 +197,37 @@ test('production public DOM observer captures actual IDs/controls but gives prev
   }finally{for(const [key,descriptor] of prior){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key];}}
 });
 
+test('observed rich-unit repeated identical IDs are unambiguous; distinct, missing and duplicate rendered IDs stay incomplete',async()=>{
+  const element=(attrs={},text='',children=[])=>({tagName:'DIV',innerText:text,textContent:text,
+    getAttribute:name=>attrs[name]??null,getClientRects:()=>[{}],closest:()=>null,
+    querySelector:selector=>selector==='[data-chatgpt-selection-message-id]'?children.find(child=>child.getAttribute('data-chatgpt-selection-message-id'))||null:null,
+    querySelectorAll:()=>children});
+  const unit=(key,ids,selected)=>element({'data-chatgpt-search-unit-key':key,'data-chatgpt-search-message-ids':ids},'fixture',
+    selected?[element({'data-chatgpt-selection-message-id':selected})]:[]);
+  let nodes=[];
+  const root={querySelectorAll:selector=>selector.includes('data-chatgpt-search-unit-key')?nodes:[]};
+  const values={document:{querySelector:selector=>selector==='main, [role="main"]'?root:null,querySelectorAll:()=>[]},
+    location:{href:'https://chatgpt.com/c/11111111-1111-1111-1111-111111111111'},navigator:{onLine:true},getComputedStyle:()=>({display:'block',visibility:'visible'})};
+  const prior=new Map(Object.keys(values).map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
+  try {
+    for(const [key,value] of Object.entries(values))Object.defineProperty(globalThis,key,{value,configurable:true});
+    for(const mode of ['repeated-identical','distinct','missing','duplicate-rendered']) {
+      nodes=[unit('fallback-turn-0:0:user','public-user-1'),unit('fallback-turn-0:2:assistant','public-assistant-1 public-assistant-1','public-assistant-1'),
+        unit('fallback-turn-1:0:user','public-user-2'),unit('fallback-turn-1:1:assistant','public-assistant-2 public-assistant-2','public-assistant-2')];
+      if(mode==='distinct')nodes[1]=unit('fallback-turn-0:2:assistant','public-assistant-1 other-distinct-id','public-assistant-1');
+      if(mode==='missing')nodes[1]=unit('fallback-turn-0:2:assistant','');
+      if(mode==='duplicate-rendered')nodes.push(nodes[1]);
+      const result=await inspectEgoImagePage({evaluate:async fn=>fn()});
+      assert.equal(result.messagesComplete,mode==='repeated-identical',mode);
+      if(mode==='repeated-identical')assert.deepEqual(result.messages.map(({id,role})=>({id,role})),[
+        {id:'public-user-1',role:'user'},{id:'public-assistant-1',role:'assistant'},{id:'public-user-2',role:'user'},{id:'public-assistant-2',role:'assistant'}]);
+      for(const message of result.messages.filter(message=>message.role==='assistant')){
+        assert.equal(message.parentUserId,null);assert.equal(message.nativeProvenanceVerified,false);assert.equal(message.settled,null);assert.deepEqual(message.images,[]);
+      }
+    }
+  }finally{for(const [key,descriptor] of prior){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key];}}
+});
+
 test('live image CLI traverses existing account cooldown preflight before any Ego invocation',async()=>{
   const f=await fixture();try {
     const {r,g}=f.setup();await f.cooldown(true);

@@ -17,7 +17,9 @@ export async function inspectEgoImagePage(page) {
       const key=node.getAttribute('data-chatgpt-search-unit-key')||node.getAttribute('data-content-search-unit-key')||'';
       const role=node.getAttribute('data-message-author-role')||/:(user|assistant)$/.exec(key)?.[1];
       if(!['user','assistant'].includes(role)) continue;
-      const ids=(node.getAttribute('data-chatgpt-search-message-ids')||'').trim().split(/\s+/).filter(Boolean);
+      // Current public assistant units can repeat the same message ID token.
+      // Repetition is one identity; distinct IDs and duplicate nodes stay unsafe.
+      const ids=[...new Set((node.getAttribute('data-chatgpt-search-message-ids')||'').trim().split(/\s+/).filter(Boolean))];
       const id=node.getAttribute('data-message-id')|| (ids.length===1?ids[0]:null) ||
         node.querySelector('[data-chatgpt-selection-message-id]')?.getAttribute('data-chatgpt-selection-message-id');
       if(!id || ids.length>1) {ambiguous=true;continue;}
