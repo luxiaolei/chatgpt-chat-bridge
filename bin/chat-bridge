@@ -54,7 +54,15 @@ SUB="${2:-}"
 if [[ "$CMD" == "image" ]]; then
   IMAGE_CLI="${MAIN:h}/capabilities/image/chatgpt-ego.cli.js"
   [[ -f "$IMAGE_CLI" ]] || { echo '{"ok":false,"code":"IMAGE_ADAPTER_NOT_INSTALLED","deliveryStage":"PRE_SEND"}' >&2; exit 2; }
-  exec node "$IMAGE_CLI" "${2:-probe}"
+  if [[ "$SUB" == "start" || "$SUB" == "reconcile" || "$SUB" == "characterize" || "$SUB" == "download-original" || "$SUB" == "assist-observe" ]]; then
+    IMAGE_PREPARED="$(node "$IMAGE_CLI" prepare "$SUB")"
+    IMAGE_PROJECT="$(node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).route.project))' <<<"$IMAGE_PREPARED")"
+    IMAGE_ACCOUNT="$(node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).route.accountAlias))' <<<"$IMAGE_PREPARED")"
+    # Routing is the persisted, authorized job route, never caller/default guesses.
+    set -- image "$SUB" --project "$IMAGE_PROJECT" --account "$IMAGE_ACCOUNT" --background
+  else
+    exec node "$IMAGE_CLI" "${2:-probe}"
+  fi
 fi
 
 if [[ "$CMD" == "ask" ]]; then
@@ -112,6 +120,7 @@ fi
 
 ORIGIN_ROUTED=0
 case "$CMD" in
+  image) ORIGIN_ROUTED=1 ;;
   reattach|send|ask|stream|new|read|evidence|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete|projects|discover|list|event|task|project)
     ORIGIN_ROUTED=1 ;;
   space)
@@ -158,6 +167,7 @@ fi
 TOUCH_UI=0
 HEAVY_UI=0
 case "$CMD" in
+  image) TOUCH_UI=1 ;;
   reattach|projects|sync|discover|read|evidence|status|send|ask|stream|model|effort|stop|retry|recover|resend|new|archive|retire|delete|watch)
     TOUCH_UI=1
     ;;
@@ -332,6 +342,7 @@ STORE_PATH="${MAIN:h}/state-store.py"
 [[ -f "$STORE_PATH" ]] || { echo "chat-bridge: state store missing: $STORE_PATH" >&2; exit 127; }
 STORE_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$STORE_PATH")"
 COORDINATOR_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${MAIN:h}/coordinator.py")"
+IMAGE_MODULE_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${MAIN:h}/capabilities/image/chatgpt-ego.js")"
 
 if [[ "$CMD" == "space" && "$SUB" == "restore" && "$(uname -s)" == "Darwin" ]]; then
   EGO_LITE_APP="${EGO_LITE_APP:-/Applications/ego lite.app}"
@@ -348,6 +359,8 @@ set +e
   printf 'globalThis.__CHAT_BRIDGE_STATE_DIR__ = %s;\n' "$STATE_JSON"
   printf 'globalThis.__CHAT_BRIDGE_STORE_PATH__ = %s;\n' "$STORE_JSON"
   printf 'globalThis.__CHAT_BRIDGE_COORDINATOR_PATH__ = %s;\n' "$COORDINATOR_JSON"
+  printf 'globalThis.__CHAT_BRIDGE_IMAGE_MODULE_PATH__ = %s;\n' "$IMAGE_MODULE_JSON"
+  [[ -n "${IMAGE_PREPARED:-}" ]] && printf 'globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__ = %s;\n' "$IMAGE_PREPARED"
   [[ -n "$SPACE_CATALOG_JSON" ]] && printf 'globalThis.__CHAT_BRIDGE_SPACE_CATALOG__ = await import(%s);\n' "$SPACE_CATALOG_JSON"
   cat "$CONTROL"
   cat "$PAGE_POOL"

@@ -32,8 +32,8 @@ test("Space consolidation is dry-run by default and migrates only after drained 
     {name:"old-b",id:2,ownership:"agent",profileId:"P1"}];
   const taskSpace=async()=>({tabs:async()=>Array.from({length:tabCount},()=>({label:null})),finish:async()=>({})});
   const consolidate=await new AsyncFunction("managedSpacePlan","coordinated","accountManagedTask","saveRegistry",
-    "listTaskSpaces","taskSpace",code+";return consolidateAccountSpace;")(
-      managedSpacePlan,coordinated,accountManagedTask,saveRegistry,listTaskSpaces,taskSpace);
+    "listTaskSpaces","taskSpace","imageSessionOccupancy",code+";return consolidateAccountSpace;")(
+      managedSpacePlan,coordinated,accountManagedTask,saveRegistry,listTaskSpaces,taskSpace,()=>({occupied:false}));
 
   const base=()=>({
     defaultAccount:"a",

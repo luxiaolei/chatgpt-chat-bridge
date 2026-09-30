@@ -317,7 +317,7 @@ export function createRuntime({bin = new URL("../bin/chat-bridge", import.meta.u
   }
 
   async function imageCommand(action, payload = {}) {
-    if (!["probe", "validate", "submit", "inspect", "result", "cancel", "start", "reconcile"].includes(action)) return errorResponse("IMAGE_COMMAND_UNSUPPORTED", "unsupported image action");
+    if (!["probe", "validate", "submit", "inspect", "result", "cancel", "start", "reconcile", "characterize", "import-original", "download-original", "assist-observe"].includes(action)) return errorResponse("IMAGE_COMMAND_UNSUPPORTED", "unsupported image action");
     try {
       const input = JSON.stringify(payload);
       if (Buffer.byteLength(input) > 2_000_000) return errorResponse("IMAGE_PAYLOAD_TOO_LARGE", "image request exceeds local transport limit");
@@ -328,7 +328,7 @@ export function createRuntime({bin = new URL("../bin/chat-bridge", import.meta.u
   return Object.freeze({
     capabilities: Object.freeze({resolveRoute: true, send: true, read: true, status: true, stop: true, ask: true, attach: true, stream: true, imageParts: true, toolResults: false, multimodal: true}),
     probe,
-    image: Object.freeze(Object.fromEntries(["probe", "validate", "submit", "inspect", "result", "cancel", "start", "reconcile"].map(action => [action, payload => imageCommand(action, payload)]))),
+    image: Object.freeze(Object.fromEntries(["probe", "validate", "submit", "inspect", "result", "cancel", "start", "reconcile", "characterize", "import-original", "download-original", "assist-observe"].map(action => [action, payload => imageCommand(action, payload)]))),
     resolveRoute,
     send: (input) => session("send", input),
     read: (input) => session("read", input),

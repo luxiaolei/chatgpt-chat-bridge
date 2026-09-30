@@ -29,6 +29,20 @@ function coordinated(command, payload) {
   if(result.status!==0) throw new Error(`COORDINATOR_${command.toUpperCase()}: ${(result.stderr||result.error?.message||"unknown error").trim()}`);
   return JSON.parse(result.stdout);
 }
+function imageSessionOccupancy(registry, chat, key=null) {
+  const identity=registry.accounts?.[chat?.account]?.identity;
+  if(!identity) return {occupied:false,reservedByJob:false}; // Unverified accounts cannot receive an ImageJob grant.
+  return coordinated("image-session-occupancy",{session:{accountId:accountScope(registry,chat.account),conversationId:chat.conversationId||chat.id},...(key?{key}: {})});
+}
+function assertImageSessionFree(registry,chat) {
+  if(imageSessionOccupancy(registry,chat).occupied) {
+    const error=new Error("IMAGE_SESSION_OCCUPIED_RECONCILE_ONLY");error.code=error.message;throw error;
+  }
+}
+async function assertImagePageFree(page) {
+  const url=await page.url();
+  for(const chat of Object.values(reg.chats||{})) if(sameConversationUrl(url,chat.url)) assertImageSessionFree(reg,chat);
+}
 function taskOwner(reg, taskId, project, sessionRef, callerRef, replyRef) {
   if(callerRef?.startsWith("codex:")) {
     if(replyRef!==callerRef) throw new Error("LOCAL_OWNER_TARGET_MISMATCH");
@@ -450,7 +464,7 @@ function projectBindingForTask(reg, taskRecord) {
   return project.bindings?.[account]||null;
 }
 
-function spaceProtection(reg, runtime, binding, task) {
+function spaceProtection(reg, runtime, binding, task, tabs=[]) {
   const labels=new Set();
   const protectedChatIds=new Set();
   for(const project of Object.values(reg.projects||{})) {
@@ -474,6 +488,13 @@ function spaceProtection(reg, runtime, binding, task) {
       }
     }
   }
+  for(const chat of Object.values(reg.chats||{})) {
+    if(samePhysicalSpace(chat,binding,task) && imageSessionOccupancy(reg,chat).occupied) {
+      if(chat.page) labels.add(chat.page);
+      for(const tab of tabs) if(tab.label && sameConversationUrl(tab.url,chat.url)) labels.add(tab.label);
+      protectedChatIds.add(chat.id);
+    }
+  }
   return {labels,protectedChatIds};
 }
 
@@ -481,7 +502,7 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
   const rt=await loadRuntime();
   const tabs=await task.tabs().catch(()=>[]);
   const activeLabels=tabs.filter(t=>t.active&&t.label).map(t=>t.label);
-  const protection=spaceProtection(reg,rt,binding,task);
+  const protection=spaceProtection(reg,rt,binding,task,tabs);
   for(const label of activeLabels) protection.labels.add(label);
   const chats=Object.values(reg.chats||{}).filter(chat=>samePhysicalSpace(chat,binding,task));
   const candidates=pageDetachCandidates(
@@ -507,6 +528,7 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     const snapshot=await state(page).catch(()=>null);
     if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
     const oldPage=candidate.page;
+    if(imageSessionOccupancy(reg,candidate).occupied) continue;
     try { await page.close(); }
     catch { continue; }
     candidate.page=null;
@@ -548,6 +570,8 @@ async function reclaimOrphanManagedPage(reg, task, binding) {
 
   const pages=await task.pages().catch(()=>[]);
   const tabs=await task.tabs().catch(()=>[]);
+  for(const chat of Object.values(reg.chats||{})) if(samePhysicalSpace(chat,binding,task) && imageSessionOccupancy(reg,chat).occupied)
+    for(const tab of tabs) if(tab.label && sameConversationUrl(tab.url,chat.url)) protectedPages.add(tab.label);
   const candidates=orphanManagedPageCandidates(pages,tabs,{
     hasLiveTasks:false,
     protectedPageLabels:[...protectedPages],
@@ -1137,6 +1161,7 @@ async function triggerSend(page) {
 }
 
 async function sendMessage(page, msg) {
+  await assertImagePageFree(page);
   await detectWebRateLimit(page,"send-before");
   const before=await state(page);
   assertComposerSafe(before);
@@ -1535,7 +1560,8 @@ async function consolidateAccountSpace(reg, account, options={}) {
     }
     oldSpaces.push(record);
   }
-  const safe=migration.safe&&oldSpaces.every(space=>space.missing ||
+  const imageReserved=Object.values(reg.chats||{}).some(chat=>aliases.includes(chat.account) && imageSessionOccupancy(reg,chat).occupied);
+  const safe=!imageReserved&&migration.safe&&oldSpaces.every(space=>space.missing ||
     (space.ownership==="agent"&&space.profileId===plan.profileId&&space.tabs===0));
   const preview={ok:true,dryRun:!options.confirm,account,aliases,profileId:plan.profileId,spaceName:plan.spaceName,
     affected,migration,oldSpaces,safe};
@@ -1543,6 +1569,7 @@ async function consolidateAccountSpace(reg, account, options={}) {
   if(!safe) return {...preview,ok:false,status:"NOT_DRAINED"};
   const {task}=await accountManagedTask(reg,account,plan.profileId);
   if(!coordinated("migration-check",{account}).safe) return {...preview,ok:false,status:"NOT_DRAINED_AFTER_RECHECK"};
+  if(Object.values(reg.chats||{}).some(chat=>aliases.includes(chat.account) && imageSessionOccupancy(reg,chat).occupied)) return {...preview,ok:false,status:"IMAGE_SESSION_OCCUPIED_RECONCILE_ONLY"};
   for(const space of oldSpaces.filter(item=>!item.missing)) {
     if((await (await taskSpace(space.spaceId)).tabs()).length) return {...preview,ok:false,status:"OLD_SPACE_REOPENED"};
   }
@@ -1751,10 +1778,12 @@ async function syncProject(reg, page, projectName, account, binding) {
 }
 
 async function stopGeneration(page) {
+  await assertImagePageFree(page);
   return await state(page,false,"stop");
 }
 
 async function nativeRetry(page) {
+  await assertImagePageFree(page);
   return await state(page,false,"retry");
 }
 
@@ -1918,6 +1947,7 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
 }
 
 async function gradedRecover(reg, chat, page, task, observed, options={}) {
+  if(imageSessionOccupancy(reg,chat).occupied) return {action:"RECONCILE_ONLY",reason:"IMAGE_SESSION_OCCUPIED_RECONCILE_ONLY"};
   const rt=await loadRuntime();
   const live=rt.tasks[task.taskId];
   if(!live || !activeTaskStatus(live.status) || live.watchdogPausedForUserControl ||
@@ -2023,6 +2053,7 @@ async function detachTerminalTaskPages(reg, project=null, account=null) {
     if(!Number.isFinite(updated) || (now-updated)/1000<graceSec) continue;
     const chat=taskRecord.sessionId?reg.chats?.[taskRecord.sessionId]:null;
     if(!chat?.page || chat.status!=="active") continue;
+    if(imageSessionOccupancy(reg,chat).occupied) continue;
     const otherActive=Object.values(rt.tasks||{}).some(other=>other.taskId!==taskRecord.taskId &&
       activeTaskStatus(other.status) && other.sessionId===chat.id);
     if(otherActive) continue;
@@ -2037,6 +2068,7 @@ async function detachTerminalTaskPages(reg, project=null, account=null) {
     const snapshot=await state(page).catch(()=>null);
     if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
     const oldPage=chat.page;
+    if(imageSessionOccupancy(reg,chat).occupied) continue;
     try { await page.close(); } catch { continue; }
     chat.page=null;
     chat.detachedAt=new Date().toISOString();
@@ -2072,7 +2104,7 @@ async function pruneManagedOrphanTabs(reg, project=null, account=null) {
     try { task=await taskSpace(space.id); } catch { continue; }
     const pages=await pagesOf(task), tabs=await task.tabs().catch(()=>[]);
     const binding={spaceName:space.name,spaceId:space.id};
-    const protection=spaceProtection(reg,runtime,binding,task);
+    const protection=spaceProtection(reg,runtime,binding,task,tabs);
     for(const tab of tabs) if(tab.active&&tab.label) protection.labels.add(tab.label);
     for(const chat of Object.values(reg.chats||{})) {
       if(chat.page&&samePhysicalSpace(chat,binding,task)) protection.labels.add(chat.page);
@@ -2120,6 +2152,10 @@ async function watchOnce(reg, project=null, account=null, options={}) {
       if(!task.sessionId) task.sessionId=chat.id;
       const {page}=await ensurePage(reg,chat,{pauseOnUserControl:true});
       const observed=await observeSession(chat,page,task);
+      if(imageSessionOccupancy(reg,chat).occupied) {
+        results.push({taskId:task.taskId,state:observed.sessionState,recovery:{action:"RECONCILE_ONLY",reason:"IMAGE_SESSION_OCCUPIED_RECONCILE_ONLY"}});
+        continue;
+      }
       const current=(await loadRuntime()).tasks[task.taskId];
       if(!current || !activeTaskStatus(current.status) || current.watchdogPausedForUserControl || (current.sessionId && current.sessionId!==chat.id)) {
         results.push({taskId:task.taskId,state:"TASK_CHANGED",status:current?.status||null});
@@ -2326,7 +2362,7 @@ async function pruneProjectSpace(reg, project, account=null) {
     detached.push(item);
   }
   const pages=await pagesOf(task), tabs=await task.tabs().catch(()=>[]);
-  const protection=spaceProtection(reg,rt,binding,task);
+  const protection=spaceProtection(reg,rt,binding,task,tabs);
   for(const tab of tabs) if(tab.active&&tab.label) protection.labels.add(tab.label);
   const closed=[];
   for(const page of pages) {
@@ -2335,6 +2371,7 @@ async function pruneProjectSpace(reg, project, account=null) {
     if(!tab || tab.active || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
     if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
+    if(Object.values(reg.chats||{}).some(chat=>samePhysicalSpace(chat,binding,task) && (chat.page===page.label || sameConversationUrl(tab.url,chat.url)) && imageSessionOccupancy(reg,chat).occupied)) continue;
     try { await page.close(); }
     catch { continue; }
     closed.push(page.label);
@@ -2371,10 +2408,136 @@ async function gcAgentSpaces(reg, confirm=false) {
       continue;
     }
     const task=await taskSpace(fresh.id);
+    if(Object.values(reg.chats||{}).some(chat=>samePhysicalSpace(chat,{spaceName:fresh.name,spaceId:fresh.id},task) && imageSessionOccupancy(reg,chat).occupied)) {
+      skipped.push({id:candidate.id,name:candidate.name,reason:"image_session_occupied"});continue;
+    }
     await task.finish({keep:[]});
     reclaimed.push({id:fresh.id,name:fresh.name});
   }
   return {ok:true,dryRun:false,reclaimed,skipped};
+}
+
+async function runNativeImage(action,payload) {
+  const modulePath=globalThis.__CHAT_BRIDGE_IMAGE_MODULE_PATH__;
+  if(!modulePath) throw new Error("IMAGE_ADAPTER_NOT_INSTALLED");
+  const directory=pathMod.dirname(modulePath);
+  const [execution,uiModule,contract,artifacts]=await Promise.all([
+    import(modulePath),import(pathMod.join(directory,"chatgpt-ego.ui.js")),
+    import(pathMod.join(directory,"contract.js")),import(pathMod.join(directory,"chatgpt-ego.cli.js")),
+  ]);
+  const api=contract.createImageJobAPI({coordinated}),key=payload.key;
+  const job=await api.inspect(key);
+  const route=job.route,chat=resolveChat(reg,route.sessionRef,route.project,route.accountAlias);
+  if((chat.conversationId||chat.id)!==route.conversationId || accountScope(reg,chat.account)!==route.accountId || chat.status!=="active") throw new Error("IMAGE_ROUTE_MISMATCH");
+  const io=await artifacts.createHostImageArtifacts({api,key,stateDir:STATE_DIR,contract,coordinated});
+  const withUi=async(expected,callback)=>{
+    if(contract.canonicalImageJSON(expected)!==contract.canonicalImageJSON(route)) throw new Error("IMAGE_ROUTE_MISMATCH");
+    const {task,page}=await ensurePage(reg,chat,{pauseOnUserControl:true});
+    async function assertOwnedRoute() {
+      await assertWebAvailable(chat.account);
+      const current=(await loadRuntime()).tasks[job.controllerTaskId];
+      if(current?.watchdogPausedForUserControl) throw new Error("IMAGE_USER_CONTROL_PAUSED");
+      if(typeof listTaskSpaces!=="function") throw new Error("IMAGE_OWNERSHIP_UNVERIFIED");
+      const space=(await listTaskSpaces()).find(value=>Number(value.id)===Number(task.spaceId));
+      if(space?.ownership!=="agent") throw new Error("IMAGE_USER_CONTROL_REQUIRED");
+      const url=await page.url();
+      if(!projectKey(route.projectId) || !sameConversationUrl(url,chat.url) || convId(url)!==route.conversationId || projectKey(projectIdFromUrl(url))!==projectKey(route.projectId)) throw new Error("IMAGE_ROUTE_UNVERIFIED");
+      const identity=await page.evaluate(async()=>{
+        const response=await fetch("/api/auth/session",{credentials:"same-origin",signal:AbortSignal.timeout(5000)});
+        return response.ok?(await response.json())?.user?.id||null:null;
+      });
+      if(identity!==reg.accounts?.[chat.account]?.identity) throw new Error("IMAGE_ROUTE_UNVERIFIED");
+    }
+    const ui=uiModule.createEgoImageUi({page,assertOwnedRoute,
+      onSendAttempt:()=>{sendAttempted=true;},
+      inspectNative:async()=>{
+        await detectWebRateLimit(page,"image-observation");
+        return {...await uiModule.inspectEgoImagePage(page),route,identityVerified:true,projectVerified:true,ownership:"agent"};
+      },
+      selectResources:async(_,selection)=>{
+        const applied=await applyDispatchModel(page,chat,selection.model,selection.effort);
+        return {model:applied?.model||null,effort:applied?.effort||null,raw:applied?.observed?.raw||null,
+          verified:!!applied && !applied.uiModelUnverifiable && applied.model===selection.model && applied.effort===selection.effort};
+      },
+      uploadImage:async(_,file,mime)=>{await api.authorizeIO(key);const result=await uploadImage(page,file,mime);await api.authorizeIO(key);return result;},
+    });
+    await assertOwnedRoute();
+    return callback(ui,page);
+  };
+  if(action==="characterize") return withUi(route,async ui=>{
+    const observed=await ui.inspect();
+    const evidence={adapterVersion:execution.IMAGE_ADAPTER_VERSION,route,observedAt:new Date().toISOString(),
+      conversationMode:observed.conversationMode,messagesComplete:observed.messagesComplete,
+      messages:observed.messages.map(({promptHash,...message})=>message),
+      generating:observed.generating,inputReady:observed.inputReady,sendAvailable:observed.sendAvailable,
+      attachmentCount:observed.attachments.length,nativeProvenanceVerified:false};
+    return {ok:true,status:"UNKNOWN",reason:"IMAGE_NATIVE_CHARACTERIZATION_REQUIRED",evidenceRef:await io.saveEvidence(evidence),
+      requiredFacts:["new user and assistant IDs with explicit parent linkage","image tool completion and stable generated asset identity","official Save control bound to that asset","download original decode and matching dimensions"],retryAllowed:false};
+  });
+  if(action==="assist-observe") {
+    await io.assertOperator(payload.operatorRef);
+    const current=await api.inspect(key),attempt=current.attempts.at(-1),proof=payload.officialSave;
+    if(!attempt || attempt.capabilities.features[current.request.operation].mode!=="ASSISTED") throw new Error("IMAGE_ASSISTED_MODE_REQUIRED");
+    if(proof?.confirmed!==true || proof.relationshipConfirmed!==true || proof.requestDigest!==current.requestDigest ||
+        proof.attemptId!==attempt.attemptId || contract.canonicalImageJSON(proof.route)!==contract.canonicalImageJSON(route)) throw new Error("IMAGE_OFFICIAL_SAVE_ATTESTATION_REQUIRED");
+    return withUi(route,async ui=>{
+      const snapshot=await ui.inspect();execution.assertImageSnapshot(current.request,snapshot);
+      if(snapshot.generating) throw new Error("IMAGE_NATIVE_TOOL_NOT_SETTLED");
+      const baseline=new Set(attempt.baselineTurnIds),promptHash=execution.imagePromptHash(execution.imageExecutionPrompt(current.request,attempt.attemptId));
+      const users=snapshot.messages.filter(message=>message.role==="user" && !baseline.has(message.id) && message.promptHash===promptHash);
+      if(users.length!==1 || users[0].id!==proof.userMessageId || proof.parentUserId!==users[0].id || proof.promptHash!==promptHash) throw new Error("IMAGE_USER_TURN_UNVERIFIED");
+      const tail=snapshot.messages.slice(snapshot.messages.indexOf(users[0])+1),assistants=tail.filter(message=>message.role==="assistant" && !baseline.has(message.id));
+      if(tail.some(message=>message.role==="user") || assistants.length!==1 || assistants[0].id!==proof.turnId || attempt.turnId && attempt.turnId!==proof.turnId) throw new Error("IMAGE_ASSISTANT_TURN_AMBIGUOUS");
+      const verified=await io.verifyAssistedOriginal(payload);
+      const outputId="image-"+crypto.createHash("sha256").update(contract.canonicalImageJSON({requestDigest:current.requestDigest,attemptId:attempt.attemptId,turnId:proof.turnId,originalSha256:verified.sha256})).digest("hex");
+      const evidenceRef=await io.saveEvidence({adapterVersion:execution.IMAGE_ADAPTER_VERSION,route,observedAt:new Date().toISOString(),
+        mode:"ASSISTED",proof:"authorized-owner-official-ui-attestation",operatorRef:payload.operatorRef,
+        requestDigest:current.requestDigest,attemptId:attempt.attemptId,promptHash,userMessageId:users[0].id,turnId:proof.turnId,
+        parentUserId:proof.parentUserId,relationshipConfirmed:true,nativeParentProof:false,nativeAssetProof:false,
+        outputId,originalRef:payload.originalRef,sha256:verified.sha256,width:verified.width,height:verified.height,
+        sourceHashes:current.request.inputs.map(input=>input.sha256),sourceTurnId:current.sourceTurnId,
+        parentOutputId:current.request.baseRevision?.outputId||null,baseRevisionId:current.request.baseRevision?.revisionId||null});
+      await api.authorizeIO(key);
+      const latest=await api.inspect(key);
+      const saved=await api.record(key,{eventId:"assisted-"+crypto.createHash("sha256").update(`${evidenceRef}:${latest.revision}`).digest("hex"),expectedRevision:latest.revision,
+        attemptId:attempt.attemptId,route,status:"GENERATED",evidenceRef,userMessageId:users[0].id,turnId:proof.turnId,candidateOutputIds:[outputId],reason:"ASSISTED_OFFICIAL_SAVE_ATTESTED"});
+      return {ok:true,status:saved.status,mode:"ASSISTED",outputId,evidenceRef,retryAllowed:false,nativeReady:false,
+        importPayload:{key,operatorRef:payload.operatorRef,path:payload.path,originalRef:payload.originalRef,sha256:verified.sha256,mimeType:verified.mimeType,outputId,
+          officialSave:{...proof,outputId,originalRef:payload.originalRef}},deliveryStatus:"NOT_RECEIVED",businessApproval:"NOT_EVALUATED"};
+    });
+  }
+  if(action==="download-original") return withUi(route,async(ui,page)=>{
+    const observed=execution.classifyImageObservation({request:job.request,attempt:job.attempts.at(-1),snapshot:await ui.inspect()});
+    if(observed.status!=="GENERATED") return {ok:false,status:"EXPORT_UNAVAILABLE",reason:observed.reason||"IMAGE_NATIVE_CHARACTERIZATION_REQUIRED",mode:"ASSISTED",action:"USE_OFFICIAL_SAVE_THEN_IMPORT_ORIGINAL",retryAllowed:false};
+    const snapshot=await ui.inspect(),attempt=job.attempts.at(-1);
+    const assistant=snapshot.messages.find(message=>message.id===attempt.turnId);
+    const image=assistant?.images?.find(value=>observed.candidates.some(candidate=>candidate.outputId===payload.outputId && candidate.nativeAssetKey===crypto.createHash("sha256").update(value.nativeAssetId).digest("hex")));
+    // Only observer-proved official asset controls can enter the SDK download path.
+    if(!image?.officialSaveSelector || image.officialOriginalVerified!==true) return {ok:false,status:"EXPORT_UNAVAILABLE",reason:"IMAGE_OFFICIAL_ORIGINAL_UNVERIFIED",mode:"ASSISTED",action:"USE_OFFICIAL_SAVE_THEN_IMPORT_ORIGINAL",retryAllowed:false};
+    await api.authorizeIO(key);
+    const temporary=await fs.mkdtemp(pathMod.join(STATE_DIR,"image-download-"));
+    await fs.chmod(temporary,0o700);
+    const file=pathMod.join(temporary,"original.bin");
+    try {
+      const pending=page.waitForEvent("download",{timeout:15000});pending.catch(()=>{});
+      await page.click(image.officialSaveSelector,{timeout:3000,label:"save verified image original"});
+      const download=await pending;
+      await download.saveAs(file);
+      await api.authorizeIO(key);
+      return await io.exportOriginal({outputId:payload.outputId,path:file,mimeType:image.mimeType,kind:"NATIVE_ORIGINAL",originalRef:`urn:chatbridge:native-original:${crypto.createHash("sha256").update(image.nativeAssetId).digest("hex")}`});
+    } finally {await fs.rm(temporary,{recursive:true,force:true});}
+  });
+  const executor=execution.createImageExecutionAdapter({api,withUi,
+    evidenceSink:io.saveEvidence,resolveSource:io.resolveSource,
+    assertSessionAdmission:async({phase})=>{
+      await api.authorizeIO(key);
+      const occupancy=await api.sessionOccupancy({accountId:route.accountId,conversationId:route.conversationId},key);
+      if(occupancy.occupied && !occupancy.reservedByJob || phase!=="before-reservation" && !occupancy.reservedByJob) throw new Error("IMAGE_SESSION_OCCUPIED_RECONCILE_ONLY");
+    },
+  });
+  if(action==="start" && job.capabilities.features[job.request.operation].mode==="ASSISTED") await io.assertOperator(payload.operatorRef);
+  const result=await artifacts.imageCli(action,payload,{coordinated,executor});
+  return result.action==="MANUAL_SEND_REQUIRED"?{...result,...await io.prepareInbox()}:result;
 }
 
 const cmd=args[0] || "help";
@@ -2387,7 +2550,12 @@ const project=opt("project",cmd==="watch"?null:reg.defaultProject);
 const accountArg=opt("account",null);
 try {
 
-if(cmd==="help"){
+if(cmd==="image") {
+  const prepared=globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__;
+  if(!prepared?.payload) throw new Error("IMAGE_PAYLOAD_REQUIRED");
+  print(await runNativeImage(args[1],prepared.payload));
+}
+else if(cmd==="help"){
   print("chat-bridge commands: init [--root-controller ROLE], project ensure, policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, event list, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE --workgroup ID], watch, read, status, send [--task ID --controller ROLE --workgroup ID], ask, model, effort, stop, retry, recover, resend, new [--workgroup ID], control status|pause|drain|resume|workgroup [--project NAME --workgroup ID], queue submit|result|ack, archive, retire, delete, forget; space: show|bind|prune|gc|consolidate|scan|map|restore|label");
 }
 else if(cmd==="topology"){
@@ -2715,6 +2883,7 @@ else if(cmd==="watch"){
 else if(["archive","retire","delete","forget"].includes(cmd)){
   const key=args[1]; if(!key) throw new Error("chat key required");
   const chat=resolveChat(reg,key,project,accountArg,true);
+  assertImageSessionFree(reg,chat);
   if(cmd==="forget"){
     delete reg.chats[chat.id]; await saveRegistry(reg); print({ok:true,forgotten:chat.id,remoteConversationUntouched:true});
   } else {
@@ -2730,6 +2899,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
   const key=args[1]; if(!key) throw new Error("chat key required");
   const chat=resolveChat(reg,key,project,accountArg);
   const background=args.includes("--background")||cmd==="evidence";
+  if(["send","ask","stream","model","effort","stop","retry","recover","resend"].includes(cmd)) assertImageSessionFree(reg,chat);
   if(["send","ask","stream","retry","recover","resend"].includes(cmd) && !background) await clearUserControlPause(chat);
   const {page,binding}=await ensurePage(reg,chat,{pauseOnUserControl:background});
   await touchRuntime(chat.project,{activeAccount:chat.account,spaceName:binding.spaceName,lastCommand:cmd,lastSession:chat.id});

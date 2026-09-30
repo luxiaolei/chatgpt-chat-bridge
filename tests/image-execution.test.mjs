@@ -89,7 +89,8 @@ test('wrong/new duplicate user, intervening user, changed assistant or parent fa
   const duplicate=generated();duplicate.messages.push({...duplicate.messages[2],id:'other-user'});assert.equal(classify(duplicate).reason,'IMAGE_USER_TURN_AMBIGUOUS');
   const intervening=generated();intervening.messages.push({id:'human-user',role:'user',promptHash:'0'.repeat(64)});assert.throws(()=>classify(intervening),/INTERVENING/);
   assert.throws(()=>classify(generated(),request(),{...attempt,turnId:'known-assistant'}),/TURN_CHANGED/);
-  const parent=generated();parent.messages.at(-1).parentUserId=null;assert.throws(()=>classify(parent),/PARENT_USER/);
+  const parent=generated();parent.messages.at(-1).parentUserId=null;assert.equal(classify(parent).reason,'IMAGE_PARENT_USER_UNVERIFIED');
+  parent.messages.at(-1).parentUserId='other-user';assert.throws(()=>classify(parent),/PARENT_USER/);
 });
 test('more than one output and duplicate output evidence are not silently truncated',()=>{
   const s=generated();s.messages.at(-1).images.push(image({nativeAssetId:'other'}));assert.throws(()=>classify(s),/COUNT_MISMATCH/);
@@ -112,12 +113,21 @@ test('cross-job session conflict stops before reservation and is never rerouted'
   const x=scenario();x.ports.assertSessionAdmission=async()=>{throw new Error('IMAGE_SESSION_BUSY');};
   await assert.rejects(x.adapter().start(x.r,x.options),/SESSION_BUSY/);assert.equal(x.job().attempts.length,0);assert.equal(x.state.sends,0);
 });
-test('missing/assisted feature evidence never invokes a UI port',async()=>{
-  for(const mode of ['UNKNOWN','ASSISTED']) {
+test('missing feature evidence never invokes a UI port',async()=>{
+  for(const mode of ['UNKNOWN']) {
     const r=request(),g=grant(r);g.capabilities.features.generate.mode=mode;
     const x=scenario({r,g});const result=await x.adapter().start(x.r,x.options);
     assert.equal(result.ok,false);assert.equal(x.state.lanes,0);assert.equal(x.state.sends,0);
   }
+});
+test('ASSISTED start reserves exact baseline and returns manual prompt without upload/fill/send',async()=>{
+  const r=request(),g=grant(r);g.capabilities.features.generate.mode='ASSISTED';
+  const x=scenario({r,g}),result=await x.adapter().start(r,x.options);
+  assert.equal(result.mode,'ASSISTED');assert.equal(result.action,'MANUAL_SEND_REQUIRED');
+  assert.equal(result.status,'SUBMISSION_UNKNOWN');assert.equal(x.job().attempts.length,1);
+  assert.equal(result.prompt,imageExecutionPrompt(r,result.attemptId));
+  assert.equal(x.state.sends,0);assert.equal(x.state.fills,0);assert.equal(x.state.uploads,0);
+  assert.equal((await x.adapter().start(r,x.options)).action,'RECONCILE_ONLY');
 });
 test('lost begin acknowledgement leaves durable UNKNOWN; reconstruction cannot resend',async()=>{
   const x=scenario(),begin=x.api.beginAttempt;x.api.beginAttempt=(...args)=>{begin(...args);throw new Error('LOST_BEGIN_ACK');};

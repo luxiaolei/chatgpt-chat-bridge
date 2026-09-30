@@ -1,7 +1,7 @@
 /**
  * Single-image execution adapter. Ports are host-owned dependencies, NOT request
  * fields or a second durable schema. No browser, scheduler or store is created.
- * Production UI admission remains closed until the integration ports are proved.
+ * The CLI/main entry supplies the existing route, admission and Ego UI gates.
  */
 import {createHash, randomUUID} from 'node:crypto';
 import {constants} from 'node:fs';
@@ -26,11 +26,11 @@ const blocked = reason => ({ok:false,status:'BLOCKED',reason,retryAllowed:false}
 
 export function imageExecutionProbe(route = null) {
   return {ok:true,adapterVersion:IMAGE_ADAPTER_VERSION,implemented:['generate','edit','refine'],
-    nativeReady:false,mode:'UNAVAILABLE',reason:'IMAGE_EXECUTION_INTEGRATION_REQUIRED',
+    nativeReady:false,mode:'UNKNOWN',reason:'IMAGE_NATIVE_CHARACTERIZATION_REQUIRED',
     capabilities:route ? unknownImageCapabilities(validateImageShape(clone(route),'Route')) : null,
     originalExport:{status:'EXPORT_UNAVAILABLE',mode:'ASSISTED',action:'USE_OFFICIAL_SAVE_AND_VERIFY_ORIGINAL'},
     unsupported:['multiReference','mask','batch','temporaryConversation'],
-    missing:['durable-session-admission','verified-native-image-observer','original-export-integration'],
+    missing:['verified-native-image-provenance','official-original-download-characterization'],
     businessApproval:'NOT_EVALUATED'};
 }
 
@@ -155,6 +155,7 @@ export function classifyImageObservation({request:input,attempt,snapshot}) {
   const assistant = assistants[0];
   const binding = {userMessageId:user.id,turnId:assistant?.id ?? null};
   if (!assistant) return {status:'GENERATING',...binding,reason:'IMAGE_USER_RECEIVED_WAITING_FOR_ASSISTANT'};
+  if (!assistant.parentUserId) return {status:null,reason:'IMAGE_PARENT_USER_UNVERIFIED'};
   if (assistant.parentUserId !== user.id) fail('IMAGE_PARENT_USER_UNVERIFIED');
   if (attempt.turnId && attempt.turnId !== assistant.id) fail('IMAGE_TURN_CHANGED');
   if (snapshot.refusalTurnId === assistant.id) return {status:'FAILED',...binding,reason:'IMAGE_REQUEST_REFUSED'};
@@ -178,7 +179,9 @@ export function classifyImageObservation({request:input,attempt,snapshot}) {
       nativeAssetKey:sha(image.nativeAssetId),originalBytesVerified:false});
   }
   if (unique.size > request.count) fail('IMAGE_OUTPUT_COUNT_MISMATCH');
+  if (unique.size && (assistant.settled !== true || snapshot.generating !== false)) return {status:'GENERATING',...binding,reason:'IMAGE_NATIVE_TOOL_NOT_SETTLED'};
   if (unique.size === request.count) return {status:'GENERATED',...binding,candidateOutputIds:[...unique.keys()],candidates:[...unique.values()],reason:null};
+  if (assistant.nativeProvenanceVerified === false) return {status:null,reason:'IMAGE_NATIVE_PROVENANCE_UNVERIFIED'};
   if (assistant.settled === true && snapshot.generating === false) return {status:'FAILED',...binding,reason:'IMAGE_NO_GENERATED_OUTPUT'};
   return {status:'GENERATING',...binding,reason:'IMAGE_OUTPUT_NOT_YET_OBSERVED'};
 }
@@ -215,7 +218,7 @@ export function createImageExecutionAdapter({api,withUi,assertSessionAdmission,e
   async function recordObservation(key,job,attempt,snapshot,method) {
     const observed = classifyImageObservation({request:job.request,attempt,snapshot});
     if (!observed.status) return {ok:true,status:job.status,observationReason:observed.reason,retryAllowed:false};
-    if (['GENERATED','PARTIAL'].includes(attempt.status) && observed.status === 'GENERATING') return {ok:true,status:job.status,observationReason:'IMAGE_KNOWN_GENERATION_RETAINED',retryAllowed:false};
+    if (attempt.candidateOutputIds?.length && observed.status === 'GENERATING') return {ok:true,status:job.status,observationReason:'IMAGE_KNOWN_GENERATION_RETAINED',retryAllowed:false};
     const evidence = {adapterVersion:IMAGE_ADAPTER_VERSION,requestDigest:job.requestDigest,route:job.route,
       attemptId:attempt.attemptId,observedAt:atISO(now),...observed};
     const evidenceRef = await saveEvidence(evidence);
@@ -238,7 +241,7 @@ export function createImageExecutionAdapter({api,withUi,assertSessionAdmission,e
     }
     const gate = imageCapabilityGate(request,job.capabilities,atISO(now));
     if (!gate.allowed) return blocked(gate.reason);
-    if (gate.mode !== 'NATIVE') return blocked('IMAGE_ASSISTED_ACTION_REQUIRED');
+    const assisted=gate.mode==='ASSISTED';
     ready();requireId(attemptId);requireId(eventId);
     if (request.inputs.length && typeof resolveSource !== 'function') return blocked('IMAGE_SOURCE_RESOLUTION_REQUIRED');
     return withUi(request.route,async ui => {
@@ -249,6 +252,15 @@ export function createImageExecutionAdapter({api,withUi,assertSessionAdmission,e
       const before = await ui.inspect(), baseline = imageAttemptBaseline(request,before,selected);
       const reserved = await api.beginAttempt(key,{eventId,expectedRevision:job.revision,attemptId,...baseline});
       if (reserved.effectAdmission !== 'NEWLY_RESERVED') return {ok:true,status:reserved.status,action:'RECONCILE_ONLY',retryAllowed:false};
+      if(assisted) {
+        // Reservation is UNKNOWN until exact manual delivery/official-original
+        // attestation. This branch never fills, uploads, clicks, retries or stops.
+        const manualInput=request.inputs.length?await resolveSource(request.inputs[0],{key,scope:request.scope}):null;
+        await assertSessionAdmission({key,request,job:reserved,phase:'before-send'});
+        return {ok:true,status:reserved.status,revision:reserved.revision,mode:'ASSISTED',action:'MANUAL_SEND_REQUIRED',
+          attemptId,requestDigest:request.requestDigest,key,route:request.route,modelSelection:baseline.modelSelection,
+          prompt:imageExecutionPrompt(request,attemptId),manualInput,retryAllowed:false,remoteGeneration:'UNKNOWN'};
+      }
       let staged = null,sendAttempted = false;
       try {
         if (request.inputs.length) {

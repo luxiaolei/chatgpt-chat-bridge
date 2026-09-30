@@ -10,8 +10,9 @@ test("shared physical Space protection includes controls and active task pages",
   assert.ok(begin>=0 && end>begin);
   const helper=source.slice(begin,end);
   const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
-  const {spaceProtection}=await new AsyncFunction("activeTaskStatus",helper+";return {spaceProtection};")(
-    status=>!["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"].includes(String(status).toUpperCase())
+  const {spaceProtection}=await new AsyncFunction("activeTaskStatus","imageSessionOccupancy",helper+";return {spaceProtection};")(
+    status=>!["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"].includes(String(status).toUpperCase()),
+    ()=>({occupied:false,reservedByJob:false})
   );
   const reg={
     defaultAccount:"a",

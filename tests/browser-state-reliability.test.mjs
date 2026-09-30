@@ -7,7 +7,7 @@ const end=source.indexOf("\nfunction classifySnapshot",start);
 const state=new Function(source.slice(start,end)+";return state;")();
 const retryStart=source.indexOf("async function nativeRetry(");
 const retryEnd=source.indexOf("\nasync function waitForGenerationStop",retryStart);
-const retry=new Function("state",source.slice(retryStart,retryEnd)+";return nativeRetry;")(state);
+const retry=new Function("state","assertImagePageFree",source.slice(retryStart,retryEnd)+";return nativeRetry;")(state,async()=>{});
 
 function node(text="",attributes={},options={}) {
   const item={innerText:text,textContent:text,disabled:!!options.disabled,
