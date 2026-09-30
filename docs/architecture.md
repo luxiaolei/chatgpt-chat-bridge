@@ -130,6 +130,33 @@ The watchdog never marks a project task COMPLETE from UI state alone. `IDLE_COMP
 
 For continuous local operation, macOS launchd runs a fresh one-shot `chat-bridge watch --quiet` periodically. A fresh process reloads registry/runtime each scan, so newly created sessions and account/Space rebindings are visible without restarting a daemon.
 
+## GitHub Project management binding
+
+The word **Project** has two distinct meanings and they must not share identity:
+
+- a **ChatGPT Project** is a Chat/session location attached to an account/Profile and Ego Space;
+- a **GitHub Project v2** is an optional management/index board for source Issues/PRs.
+
+Each logical Bridge project may store optional `githubProject` metadata in the registry:
+
+```json
+{
+  "owner": "luxiaolei",
+  "number": 8,
+  "id": "PVT_...",
+  "url": "https://github.com/users/luxiaolei/projects/8",
+  "sourceQueries": ["repo:luxiaolei/chatgpt-chat-bridge is:open"],
+  "statusField": "Status",
+  "statusFromLabels": {"status:backlog": "Backlog"}
+}
+```
+
+The board is Project-first only as a **management read surface**. Source Issue/PR properties and evidence remain authoritative for task scope, dependency, review/CI and merge state; Bridge SQLite remains authoritative for dispatch/result/callback/ACK mechanics. A Project column cannot manufacture business/scientific acceptance.
+
+`src/github-project.py` is a host-local `gh` adapter invoked by `chat-bridge github-project ...`. Reads are fully paginated and fail closed on truncation/inaccessibility. Refresh is preview-only by default. Explicit `--apply` can add only source references discovered by configured open/repo-scoped searches, and can mirror only explicitly mapped nonterminal Issue-label statuses. Before each write it re-reads source and board identity/value to detect concurrent changes. It never changes source Issue/PR state or executes/replays a Bridge task.
+
+GitHub-native Auto-add/workflow configuration remains a board-setup responsibility because research, engineering and cross-repo programmes have different inclusion/status semantics. Binding a board does not claim that Auto-add is configured.
+
 ## Project sync
 
 `chat-bridge sync --project NAME` opens the actual ChatGPT Project page and enumerates project-scoped conversation links.

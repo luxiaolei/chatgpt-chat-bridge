@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 node --check "$ROOT/src/main.js"
-python3 -m py_compile "$ROOT/src/coordinator.py" "$ROOT/src/state-store.py" "$ROOT/src/web-preflight.py" "$ROOT/src/capacity-preflight.py" "$ROOT/src/local-query.py" "$ROOT/src/ask-wrapper.py" "$ROOT/src/ego-runner.py"
+python3 -m py_compile "$ROOT/src/coordinator.py" "$ROOT/src/state-store.py" "$ROOT/src/web-preflight.py" "$ROOT/src/capacity-preflight.py" "$ROOT/src/local-query.py" "$ROOT/src/github-project.py" "$ROOT/src/ask-wrapper.py" "$ROOT/src/ego-runner.py"
 zsh -n "$ROOT/bin/chat-bridge"
 zsh -n "$ROOT/scripts/install.sh"
 zsh -n "$ROOT/scripts/uninstall.sh"
@@ -38,6 +38,9 @@ grep -q 'StartInterval' "$ROOT/scripts/install-watchdog.sh"
 grep -q '"version": "0.9.0"' "$ROOT/package.json"
 
 grep -q 'local-query.py' "$ROOT/scripts/install.sh"
+grep -q 'github-project.py' "$ROOT/scripts/install.sh"
+grep -q 'github-project.py' "$ROOT/bin/chat-bridge"
+grep -q 'github-project bind' "$ROOT/src/main.js"
 grep -q 'ego-runner.py' "$ROOT/scripts/install.sh"
 grep -q 'EGO_CLIENT_TIMEOUT' "$ROOT/src/ego-runner.py"
 grep -q 'ask-wrapper.py' "$ROOT/scripts/install.sh"

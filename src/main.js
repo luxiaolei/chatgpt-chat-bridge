@@ -2388,7 +2388,7 @@ const accountArg=opt("account",null);
 try {
 
 if(cmd==="help"){
-  print("chat-bridge commands: init [--root-controller ROLE], project ensure, policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, event list, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE --workgroup ID], watch, read, status, send [--task ID --controller ROLE --workgroup ID], ask, model, effort, stop, retry, recover, resend, new [--workgroup ID], control status|pause|drain|resume|workgroup [--project NAME --workgroup ID], queue submit|result|ack, archive, retire, delete, forget; space: show|bind|prune|gc|consolidate|scan|map|restore|label");
+  print("chat-bridge commands: init [--root-controller ROLE], project ensure, github-project bind|show|inspect|refresh|unbind, policy show|set, bind, account, space, register, list, sync, discover, projects, runtime, event list, task set [--controller ROLE --reply-to ROLE --escalation-to ROLE --workgroup ID], watch, read, status, send [--task ID --controller ROLE --workgroup ID], ask, model, effort, stop, retry, recover, resend, new [--workgroup ID], control status|pause|drain|resume|workgroup [--project NAME --workgroup ID], queue submit|result|ack, archive, retire, delete, forget; space: show|bind|prune|gc|consolidate|scan|map|restore|label");
 }
 else if(cmd==="topology"){
   print(TOPOLOGY.topologyPreview(reg,await loadRuntime()));
