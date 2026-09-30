@@ -202,6 +202,8 @@ because the current ChatGPT UI exposes the highest path through the `Latest` mod
 
 New sessions default to Latest without forcing an effort. 5.5/5.6 Pro retain the requested older radio version. Pro uses the slider's current maximum and checks displayed effort. No unavailable-model or quota fallback is silent. Callers receive `modelSelection` with observed model/effort/raw UI text; configured preferences are not evidence of the live model.
 
+When the current visible effort exactly matches the requested level, effort selection skips reopening the menu; model selection retains its radio confirmation, and different or unknown effort still requires slider and displayed-level verification.
+
 ## Message lifecycle
 
 ### Dispatch

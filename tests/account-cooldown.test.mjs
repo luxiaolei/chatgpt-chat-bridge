@@ -203,11 +203,12 @@ test("runtime stops a cooling identity before browser access and continues anoth
     assert.equal((await api.accountPage(reg,"a")).label,"ready");
     await assert.rejects(api.accountPage(reg,"a","A"),/Open a managed ChatGPT page/);
     // Exercise the actual effort control against sliders with different maxima.
-    let displayed="5.6 Pro";
+    let displayed="5.6 Medium";
     api.modelUI(async()=>{},async()=>({mode:displayed}));
     const oldDocument=globalThis.document,oldGetComputedStyle=globalThis.getComputedStyle;
     try {
       for(const max of [4,5]) {
+        displayed="5.6 Medium";let confirmEffort=true;
         let value=0; const keys=[]; let focused=null;
         const hidden={
           attrs:{"aria-valuemin":"0","aria-valuemax":String(max),"aria-valuenow":"0"},
@@ -224,13 +225,13 @@ test("runtime stops a cooling identity before browser access and continues anoth
           querySelectorAll:selector=>selector==='[role="slider"]'?[hidden,visible]:[hidden,visible].filter(e=>e.getAttribute("data-chat-bridge-effort-slider")==="1"),
           querySelector:selector=>[hidden,visible].find(e=>selector==='[data-chat-bridge-effort-slider="1"]'&&e.getAttribute("data-chat-bridge-effort-slider")==="1")||null
         };
-        const page={evaluate:async fn=>fn(),focus:async selector=>{focused=selector;},keyboard:{press:async key=>{keys.push(key);if(key==="End")value=max;}}};
+        const page={evaluate:async fn=>fn(),focus:async selector=>{focused=selector;},keyboard:{press:async key=>{keys.push(key);if(key==="End"){value=max;if(confirmEffort)displayed="5.6 Pro";}}}};
         await api.setEffort(page,"Pro");
         assert.equal(focused,'[data-chat-bridge-effort-slider="1"]');
         assert.equal(hidden.getAttribute("data-chat-bridge-effort-slider"),null);
         assert.equal(visible.getAttribute("data-chat-bridge-effort-slider"),"1");
         assert.equal(value,max);assert.ok(keys.includes("End"));
-        displayed="5.6 Extra High";
+        displayed="5.6 Extra High";confirmEffort=false;
         await assert.rejects(api.setEffort(page,"Pro"),/not confirmed by the UI/);
         displayed="5.6 Pro";
       }

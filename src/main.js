@@ -1353,6 +1353,8 @@ async function setEffort(page, effort) {
   const levels={"instant":0,"medium":1,"high":2,"extra high":3,"pro":4};
   const key=effort.toLowerCase();
   if(!(key in levels)) throw new Error("Effort must be Instant, Medium, High, Extra High, or Pro");
+  const observed=observedModel((await state(page)).mode);
+  if(observed.effort?.toLowerCase()===key) return true;
   await page.keyboard.press("Escape");
   await openModelMenu(page);
   const bounds=await page.evaluate(()=>{
