@@ -1,11 +1,16 @@
 import {imagePromptHash} from './chatgpt-ego.js';
 
+const composerSelector='div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]';
+// One public semantic control in the composer form. Inspection and click use
+// this exact selector; message widgets cannot provide a Send target.
+const sendSelector='form:has(div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], [role="textbox"][contenteditable="true"], .ProseMirror[contenteditable="true"]) button:is([data-testid="send-button"], [aria-label="Send" i], [aria-label="Send prompt" i], [aria-label="Send message" i]):not([disabled], [aria-disabled="true"]):not([data-message-author-role] button, [data-chatgpt-search-unit-key] button, [data-content-search-unit-key] button)';
+
 /** Public DOM only. This reports visible facts, never turns a preview, alt text,
  * model prose or an uncharacterized tool widget into generated-original proof.
  * Parent/asset lineage remains unknown until a native characterization proves it.
  */
 export async function inspectEgoImagePage(page) {
-  const snapshot=await page.evaluate(()=>{
+  const snapshot=await page.evaluate(({composerSelector,sendSelector})=>{
     const root=document.querySelector('main, [role="main"]') || document.body;
     const visible=node=>!node.closest('[hidden], [aria-hidden="true"], [inert]') &&
       getComputedStyle(node).display!=='none' && getComputedStyle(node).visibility!=='hidden' && node.getClientRects().length>0;
@@ -42,8 +47,11 @@ export async function inspectEgoImagePage(page) {
     const enabled=button=>!button.disabled && button.getAttribute('aria-disabled')!=='true';
     const stop=buttons.some(button=>enabled(button) && !button.closest('[data-message-author-role], [data-chatgpt-search-unit-key], [data-content-search-unit-key]') &&
       (/(?:^|-)stop(?:-|$)/i.test(button.getAttribute('data-testid')||'') || /^(?:Stop(?: generating| generation| streaming)?|停止(?:生成|回答|输出)?)$/i.test(button.getAttribute('aria-label')||'')));
-    const composer=document.querySelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]');
+    const composers=[...document.querySelectorAll(composerSelector)].filter(visible);
+    const composer=composers.length===1?composers[0]:null;
     const form=composer?.closest('form');
+    const sendControls=[...document.querySelectorAll(sendSelector)];
+    const sendAvailable=!!form && sendControls.length===1 && sendControls[0].closest('form')===form && visible(sendControls[0]) && enabled(sendControls[0]);
     const attachments=[...(form?.querySelectorAll('button[aria-label^="Remove "]')||[])].filter(visible).map(button=>({accepted:enabled(button)}));
     const alerts=[...document.querySelectorAll('[role="alert"], [data-testid*="error" i]')].filter(visible).map(node=>(node.innerText||'').trim());
     const loginRequired=!!document.querySelector('a[href*="/auth/login"], button[data-testid="login-button"]');
@@ -52,8 +60,8 @@ export async function inspectEgoImagePage(page) {
       conversationMode:/\/c\/[0-9a-f-]+(?:[/?#]|$)/i.test(location.href)?'normal':'unknown',
       messagesComplete:!ambiguous && fallback.length>0,messages,generating:stop,
       inputReady:!!composer && !stop,composerText:(composer?.innerText||composer?.textContent||'').trim(),
-      sendAvailable:buttons.some(button=>button.getAttribute('data-testid')==='send-button'&&enabled(button)),attachments,alerts};
-  });
+      sendAvailable,attachments,alerts};
+  },{composerSelector,sendSelector});
   snapshot.messages=snapshot.messages.map(message=>{
     if(message.role!=='user') return message;
     const {text,...facts}=message;return {...facts,promptHash:imagePromptHash(text)};
@@ -72,18 +80,17 @@ export function createEgoImageUi({page,inspectNative,assertOwnedRoute,selectReso
   need(typeof assertOwnedRoute === 'function','IMAGE_NATIVE_OWNERSHIP_GATE_REQUIRED');
   need(typeof selectResources === 'function','IMAGE_NATIVE_MODEL_GATE_REQUIRED');
   need(typeof assertSendAdmission === 'function','IMAGE_NATIVE_SEND_GATE_REQUIRED');
-  const composer='div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]';
   async function inspect() { await assertOwnedRoute(); return inspectNative(page); }
   return Object.freeze({
     inspect,
     async selectResources(selection) { await assertOwnedRoute();return selectResources(page,selection); },
-    async fill(text) { await assertOwnedRoute();await page.fill(composer,text,{timeout:3000}); },
+    async fill(text) { await assertOwnedRoute();await page.fill(composerSelector,text,{timeout:3000}); },
     async sendOnce(admission) {
       const observed=await inspect();
       need(observed.sendAvailable === true && observed.generating === false,'IMAGE_SEND_CONTROL_UNAVAILABLE');
       await assertSendAdmission(observed,admission);
       onSendAttempt();
-      await page.click('button[data-testid="send-button"]',{timeout:3000,label:'submit one image request'});
+      await page.click(sendSelector,{timeout:3000,label:'submit one image request'});
     },
     async upload(source,admission) {
       need(typeof uploadImage === 'function','IMAGE_NATIVE_UPLOAD_REQUIRED');

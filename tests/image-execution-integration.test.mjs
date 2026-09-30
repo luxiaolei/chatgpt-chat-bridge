@@ -182,14 +182,15 @@ test('production public DOM observer captures actual IDs/controls but gives prev
   const preview=element({tag:'IMG','alt':'generated original','src':'https://private/thumbnail'}),save=element({tag:'BUTTON','aria-label':'Save image'});
   const user=element({'data-message-author-role':'user','data-message-id':'dom-user'},'Generate one image.');
   const assistant=element({'data-message-author-role':'assistant','data-message-id':'dom-assistant'},'Generated!', [preview,save]);
-  const root={querySelectorAll:()=>[user,assistant]},composer=element({},''),send=element({tag:'BUTTON','data-testid':'send-button'});
+  const root={querySelectorAll:()=>[user,assistant]},form={querySelectorAll:()=>[]},composer=element({},''),send=element({tag:'BUTTON','data-testid':'send-button'});
+  composer.closest=send.closest=selector=>selector==='form'?form:null;
   const values={document:{querySelector:selector=>selector==='main, [role="main"]'?root:selector.includes('prompt-textarea')?composer:null,
-    querySelectorAll:selector=>selector==='button'?[send]:[]},location:{href:'https://chatgpt.com/c/11111111-1111-1111-1111-111111111111'},
+    querySelectorAll:selector=>selector.startsWith('form:has(')||selector==='button'?[send]:selector.includes('prompt-textarea')?[composer]:[]},location:{href:'https://chatgpt.com/c/11111111-1111-1111-1111-111111111111'},
     navigator:{onLine:true},getComputedStyle:()=>({display:'block',visibility:'visible'})};
   const prior=new Map(Object.keys(values).map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
   try {
     for(const [key,value] of Object.entries(values))Object.defineProperty(globalThis,key,{value,configurable:true});
-    const result=await inspectEgoImagePage({evaluate:async fn=>fn()});
+    const result=await inspectEgoImagePage({evaluate:async(fn,arg)=>fn(arg)});
     assert.equal(result.messagesComplete,true);assert.equal(result.messages[0].id,'dom-user');assert.equal(result.sendAvailable,true);
     assert.equal(result.messages[1].parentUserId,null);assert.equal(result.messages[1].nativeProvenanceVerified,false);
     assert.deepEqual(result.messages[1].images,[]);assert.equal(result.messages[1].settled,null);
@@ -217,13 +218,54 @@ test('observed rich-unit repeated identical IDs are unambiguous; distinct, missi
       if(mode==='distinct')nodes[1]=unit('fallback-turn-0:2:assistant','public-assistant-1 other-distinct-id','public-assistant-1');
       if(mode==='missing')nodes[1]=unit('fallback-turn-0:2:assistant','');
       if(mode==='duplicate-rendered')nodes.push(nodes[1]);
-      const result=await inspectEgoImagePage({evaluate:async fn=>fn()});
+      const result=await inspectEgoImagePage({evaluate:async(fn,arg)=>fn(arg)});
       assert.equal(result.messagesComplete,mode==='repeated-identical',mode);
       if(mode==='repeated-identical')assert.deepEqual(result.messages.map(({id,role})=>({id,role})),[
         {id:'public-user-1',role:'user'},{id:'public-assistant-1',role:'assistant'},{id:'public-user-2',role:'user'},{id:'public-assistant-2',role:'assistant'}]);
       for(const message of result.messages.filter(message=>message.role==='assistant')){
         assert.equal(message.parentUserId,null);assert.equal(message.nativeProvenanceVerified,false);assert.equal(message.settled,null);assert.deepEqual(message.images,[]);
       }
+    }
+  }finally{for(const [key,descriptor] of prior){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key];}}
+});
+
+test('actual public composer Send control is unique, visible, enabled and shares the single-click selector',async()=>{
+  let selectors,controls=[],composers=[];
+  const form={querySelectorAll:()=>[]},otherForm={querySelectorAll:()=>[]};
+  const element=(attrs={},owner=form)=>({tagName:'BUTTON',disabled:attrs.disabled||false,
+    getAttribute:name=>attrs[name]??null,getClientRects:()=>attrs.hidden?[]:[{}],innerText:'',textContent:'',
+    closest:selector=>selector==='form'?owner:selector.includes('data-message-author-role')&&attrs.messageWidget?{}:null,
+    querySelector:()=>null,querySelectorAll:()=>[]});
+  const composer=element(),send=()=>element({'aria-label':'Send'});
+  const matches=()=>controls.filter(button=>button.closest('form')!==null && !button.disabled && button.getAttribute('aria-disabled')!=='true' &&
+    !button.closest('[data-message-author-role]') && (button.getAttribute('data-testid')==='send-button'||/^Send(?: prompt| message)?$/i.test(button.getAttribute('aria-label')||'')));
+  const root={querySelectorAll:()=>[]};
+  const values={document:{querySelector:selector=>selector==='main, [role="main"]'?root:null,
+    querySelectorAll:selector=>selector===selectors?.sendSelector?matches():selector===selectors?.composerSelector?composers:selector==='button'?controls:[]},
+    location:{href:'https://chatgpt.com/c/11111111-1111-1111-1111-111111111111'},navigator:{onLine:true},getComputedStyle:()=>({display:'block',visibility:'visible'})};
+  const prior=new Map(Object.keys(values).map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
+  try {
+    for(const [key,value] of Object.entries(values))Object.defineProperty(globalThis,key,{value,configurable:true});
+    for(const mode of ['aria-send','legacy-testid','hidden','disabled','aria-disabled','ambiguous-control','message-widget','other-form','missing-composer','ambiguous-composer','admission-denied']) {
+      controls=[send()];composers=[composer];
+      if(mode==='legacy-testid')controls=[element({'data-testid':'send-button'})];
+      if(['hidden','disabled','message-widget'].includes(mode))controls=[element({'aria-label':'Send',[mode==='message-widget'?'messageWidget':mode]:true})];
+      if(mode==='aria-disabled')controls=[element({'aria-label':'Send','aria-disabled':'true'})];
+      if(mode==='ambiguous-control')controls.push(element({'data-testid':'send-button'}));
+      if(mode==='other-form')controls=[element({'aria-label':'Send'},otherForm)];
+      if(mode==='missing-composer')composers=[];
+      if(mode==='ambiguous-composer')composers.push(element({},otherForm));
+      let clicks=0,attempts=0,gates=0;
+      const page={evaluate:async(fn,arg)=>{selectors=arg;return fn(arg);},fill:async()=>{},press:async()=>assert.fail('no Enter fallback'),click:async selector=>{
+        assert.equal(gates,1);assert.equal(attempts,1);assert.equal(selector,selectors.sendSelector);assert.match(selector,/^form:has\(/);assert.match(selector,/aria-label="Send"/);
+        assert.equal(matches().length,1);assert.equal(matches()[0].closest('form'),form);clicks++;throw new Error('CLICK_TIMEOUT');
+      }};
+      const ui=createEgoImageUi({page,inspectNative:inspectEgoImagePage,assertOwnedRoute:async()=>{},selectResources:async()=>selection,
+        onSendAttempt:()=>{attempts++;},assertSendAdmission:async()=>{gates++;if(mode==='admission-denied')throw new Error('CURRENT_AUTHORITY_DENIED');}});
+      const allowed=['aria-send','legacy-testid','admission-denied'].includes(mode);
+      assert.equal((await ui.inspect()).sendAvailable,allowed,mode);
+      await assert.rejects(ui.sendOnce(),mode==='admission-denied'?/CURRENT_AUTHORITY_DENIED/:allowed?/CLICK_TIMEOUT/:/IMAGE_SEND_CONTROL_UNAVAILABLE/);
+      assert.equal(clicks,allowed&&mode!=='admission-denied'?1:0,mode);assert.equal(attempts,clicks);assert.equal(gates,allowed?1:0);
     }
   }finally{for(const [key,descriptor] of prior){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key];}}
 });
