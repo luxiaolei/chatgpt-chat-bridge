@@ -111,7 +111,7 @@ test('model, route, old image and unverified output counterexamples fail closed'
 }));
 test('same-source refine resolves an exact verified parent rather than last image or external namespace',withFixture(f=>{
  let {key,job}=f.setup();job=f.begin(key,job);job=f.generated(key,job);job=f.exported(key,job);const out=job.outputs[0];
- const base={artifactRef:out.artifactRef,sha256:out.sha256,revisionId:'asset-r1',outputId:out.outputId,jobId:job.jobId};
+ const base={artifactRef:out.artifactRef,sha256:out.sha256,revisionId:f.api.result(key).outputRevisions[0].revisionId,outputId:out.outputId,jobId:job.jobId};
  const r=f.request({jobId:'refine-1',operation:'refine',conversationPolicy:'same-source',baseRevision:base,inputs:[{...base,role:'source'}]});
  const refined=f.setup(r,f.grant(r,'grant-refine'));assert.equal(refined.job.status,'SUBMITTED');
  const bad=f.request({jobId:'refine-bad',operation:'refine',conversationPolicy:'same-source',baseRevision:{...base,sha256:'b'.repeat(64)},inputs:[{...base,sha256:'b'.repeat(64),role:'source'}]});
@@ -147,7 +147,7 @@ test('late observation after terminal failure cannot promote or adopt an output'
 
 test('export-only request binds the persisted original turn and never asks for a fabricated new user turn',withFixture(f=>{
  let {key,job}=f.setup();job=f.begin(key,job);job=f.generated(key,job);job=f.exported(key,job);const original=job.outputs[0];
- const base={artifactRef:original.artifactRef,sha256:original.sha256,revisionId:'original-r1',outputId:original.outputId,jobId:job.jobId};
+ const base={artifactRef:original.artifactRef,sha256:original.sha256,revisionId:f.api.result(key).outputRevisions[0].revisionId,outputId:original.outputId,jobId:job.jobId};
  const r=f.request({jobId:'export-only',operation:'export',inputs:[{...base,role:'source'}],baseRevision:base});
  ({key,job}=f.setup(r,f.grant(r,'grant-export')));assert.equal(job.sourceTurnId,original.turnId);
  job=f.begin(key,job);assert.equal(job.effectAdmission,'READ_ONLY_EXPORT');

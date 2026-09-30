@@ -27,7 +27,9 @@ remains `UNKNOWN`; it is not `FAILED`, resend permission or generated success.
 Native start uses exactly one documented Send click after the persisted baseline
 and reservation. It does not use the ordinary text sender's Enter/retrigger
 fallback. Inputs use the existing #58 upload helper after current source rights,
-immutable bytes/hash/revision checks and private staging. Edit/refine require the
+immutable bytes/hash/revision checks and private staging. Revision IDs come from
+the parent's `image result` `outputRevisions`, verified by current coordinator
+source authority and the original record. Edit/refine require the
 exact authorized source; refine also requires its saved same-conversation parent.
 After the final awaited DOM inspection, Send rechecks its exact attempt,
 unchanged baseline IDs, actual URL, expected prompt and accepted input count,
@@ -180,7 +182,7 @@ opaque artifact refs are portable locators, not public paths or credentials.
 
 For the bounded edit, issue a new grant/job on T after generation settled. Bind
 its source/base exactly to the verified exported output's artifactRef/hash,
-owner-assigned immutable revision, parent job/output, and original source turn.
+canonical technical revision from `outputRevisions`, parent job/output, and original source turn.
 Repeat the same reservation/manual Send/official Save/ASSISTED observation/import
 sequence. Do not reuse readiness O as a terminal result before both required jobs
 and consumer evidence have been reviewed.

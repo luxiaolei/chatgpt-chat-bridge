@@ -129,9 +129,12 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
     return {allowed:true,bindingDigest:hash(manifest.canonicalArtifactJSON(binding)),expiresAt:authority.expiresAt};
   }
   async function resolveSource(source) {
-    await api.authorizeIO(key);
+    const authority=await api.authorizeIO(key);
     const current=await api.inspect(key);
     need(current.request.inputs.some(input=>canonicalImageJSON(input)===canonicalImageJSON(source)),'IMAGE_SOURCE_NOT_GRANTED');
+    const authenticated=authority.sources?.find(item=>canonicalImageJSON(item.source)===canonicalImageJSON(source));
+    need(authenticated?.revision?.revisionId===source.revisionId,'IMAGE_SOURCE_REVISION_MISMATCH');
+    const revision=authenticated.revision,output=revision.output;
     const locator=/^artifact:cbimg:([a-f0-9]{64}):([a-f0-9]{64})$/.exec(source.artifactRef);
     need(locator,'IMAGE_SOURCE_RESOLUTION_UNAVAILABLE');
     const sourceRoot=path.join(base,locator[1]);
@@ -140,12 +143,22 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
     const recordBytes=await sourceStore.read(`record-${locator[2]}.json`);
     need(recordBytes,'IMAGE_SOURCE_RESOLUTION_UNAVAILABLE');
     const record=JSON.parse(recordBytes.toString('utf8'));
-    need(record.artifactRef===source.artifactRef && record.binding.jobId===source.jobId && record.binding.outputId===source.outputId && record.verified.sha256===source.sha256,'IMAGE_SOURCE_BINDING_MISMATCH');
+    need(record?.schemaVersion==='chatbridge.image.original-record.v1' && record.binding && record.verified && record.artifactRef===output.artifactRef &&
+      record.binding.requestDigest===revision.requestDigest &&
+      ['jobId','outputId','attemptId','turnId'].every(field=>record.binding[field]===output[field]) &&
+      locator[2]===hash(canonicalImageJSON({requestDigest:revision.requestDigest,outputId:output.outputId})) &&
+      ['sha256','mimeType','width','height','byteLength'].every(field=>record.verified[field]===output[field]) &&
+      (record.binding.expectedSha256===null || record.binding.expectedSha256===output.sha256) &&
+      (record.binding.expectedWidth===null || record.binding.expectedWidth===output.width) &&
+      (record.binding.expectedHeight===null || record.binding.expectedHeight===output.height),'IMAGE_SOURCE_BINDING_MISMATCH');
+    manifest.assertOpaqueRef(record.binding.originalRef);
     const bytes=await sourceStore.read(`original-${locator[2]}.bin`);
     need(bytes,'IMAGE_SOURCE_RESOLUTION_UNAVAILABLE');
-    const verified=await verifier.verifyImageBytes(bytes,{mimeType:record.verified.mimeType,expectedSha256:source.sha256,
-      expectedWidth:record.verified.width,expectedHeight:record.verified.height,decode:decoder()});
-    await api.authorizeIO(key);
+    const verified=await verifier.verifyImageBytes(bytes,{mimeType:output.mimeType,expectedSha256:output.sha256,
+      expectedWidth:output.width,expectedHeight:output.height,decode:decoder()});
+    need(verified.byteLength===output.byteLength && verified.pixelSha256===record.verified.pixelSha256,'IMAGE_SOURCE_BINDING_MISMATCH');
+    const fresh=await api.authorizeIO(key);
+    need(fresh.sources?.some(item=>canonicalImageJSON(item)===canonicalImageJSON(authenticated)),'IMAGE_SOURCE_REVISION_MISMATCH');
     return {...source,path:path.join(sourceRoot,`original-${locator[2]}.bin`),mimeType:verified.mimeType,
       turnId:record.binding.turnId,route:current.route};
   }
@@ -171,7 +184,8 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
     if(!result.manifestPersisted || !result.manifest.outputs.length) return {ok:false,status:result.status,manifest:result.publicManifest,retryAllowed:false};
     const latest=await api.inspect(key);
     const saved=await api.export(key,manifest.imageExportEvent(result,{eventId:'export-'+hash(`${result.manifestRef}:${latest.revision}`),expectedRevision:latest.revision,route:current.route}));
-    return {ok:true,status:saved.status,manifest:result.publicManifest,manifestRef:result.manifestRef,deliveryStatus:'NOT_RECEIVED',businessApproval:'NOT_EVALUATED'};
+    return {ok:true,status:saved.status,manifest:result.publicManifest,manifestRef:result.manifestRef,
+      outputRevisions:(await api.result(key)).outputRevisions,deliveryStatus:'NOT_RECEIVED',businessApproval:'NOT_EVALUATED'};
   }
   async function importOfficialOriginal(input) {
     await assertOperator(input.operatorRef);

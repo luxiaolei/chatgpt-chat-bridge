@@ -41,6 +41,42 @@ revisions, mask, budget, output destination and requested model/effort. A suppli
 wrong digest fails. Same caller/job with the same request replays; another
 approved request with that identity conflicts. Cross-scope access is denied.
 
+## Technical output revisions (#80 offline increment)
+
+`imageOutputRevision(request, output)` derives a separate
+`chatbridge.image.revision.v1` descriptor from a VERIFIED immutable output and
+its saved v1 request. Its `cbimg-r1:<sha256>` ID hashes canonical JSON containing
+the request digest, operation, complete ordered inputs and their roles/revisions,
+parent source, v1 mask metadata, and every immutable output field. Mutable
+validation metadata is excluded. No request, output, original record, public
+manifest, stored digest or event history is rewritten; the existing SQLite
+request/output pair is the durable revision record. `result().outputRevisions`
+and exporter results expose the descriptors separately for authorized consumers.
+Older contracts without this helper return an empty exporter revision list.
+
+New submission, attempt admission and current I/O authority require every
+Bridge source's revision ID to equal the descriptor derived from its saved
+parent request/output. Current I/O authority returns the authenticated ordered
+`sources: [{source, revision}]`. Unsupported external/imported source revision
+authority fails with `IMAGE_EXTERNAL_SOURCE_REVISION_UNSUPPORTED`; a grant or
+caller label cannot authenticate an external revision. The host resolver also
+binds the immutable original record's request/job/output/attempt/turn and byte
+metadata, fully decodes the actual bytes, and refreshes source authority before
+returning them for staging.
+
+Existing v1 jobs with arbitrary revision labels remain readable and replayable
+for audit. New effects/I/O fail with `IMAGE_SOURCE_REVISION_MISMATCH`; reissue an
+explicitly authorized request using the canonical parent revision. A derived
+descriptor does not retroactively authenticate historical ancestors' declared
+labels. Two jobs on one base derive independent branches and never write an
+adoption pointer. Mask metadata in this descriptor is only request binding,
+not mask decode, coordinate verification or unchanged-pixel protection.
+
+The offline tests cover forged labels, immutable history, original-record
+metadata mismatch, revocation during decoding, branches and a two-round source
+chain. Multi-input upload, native regions, deterministic composition, real edit
+effects and their full #80 acceptance remain NOT_RUN.
+
 ## Authorization: separate host-owner grant, never a caller-supplied flag
 
 There is no `authorized: true`, namespace shortcut or bearer token in a request.

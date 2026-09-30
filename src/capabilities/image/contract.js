@@ -132,6 +132,25 @@ export function validateImageOutput(output) {
   if (output.validation.status === 'VERIFIED' && Object.values(output.validation.checks).some(v=>v !== true)) fail('IMAGE_VERIFICATION_INCOMPLETE');
   return output;
 }
+function validateOutputLineage(request, output) {
+  if (output.jobId !== request.jobId || !same(output.sourceHashes,request.inputs.map(i=>i.sha256))
+    || output.parentOutputId !== (request.baseRevision?.outputId ?? null)
+    || output.baseRevisionId !== (request.baseRevision?.revisionId ?? null)) fail('IMAGE_OUTPUT_LINEAGE_MISMATCH');
+  if (request.operation === 'export' && output.sha256 !== request.baseRevision.sha256) fail('IMAGE_EXPORT_SOURCE_MISMATCH');
+}
+/** Reproducible from immutable v1 request/output records; never rewrites either.
+ * Historical input labels are request-bound declarations, not proof of their ancestry.
+ */
+export function imageOutputRevision(input, output) {
+  const request=normalizeImageRequest(input);
+  validateImageOutput(output);
+  if (output.validation.status !== 'VERIFIED') fail('IMAGE_SOURCE_NOT_VERIFIED');
+  validateOutputLineage(request,output);
+  const binding={schemaVersion:'chatbridge.image.revision.v1',requestDigest:request.requestDigest,
+    operation:request.operation,parent:copy(request.baseRevision),inputs:copy(request.inputs),mask:copy(request.mask),
+    output:copy(outputWithoutValidation(output))};
+  return validateImageShape({...binding,revisionId:'cbimg-r1:'+createHash('sha256').update(canonicalImageJSON(binding)).digest('hex')},'OutputRevision');
+}
 export const validateImageReceipt = receipt => validateImageShape(receipt,'Receipt');
 
 /** The adapter supplies the existing coordinated(command,payload) transport.
@@ -253,10 +272,8 @@ export function applyImageEvent(record, event, grant, {at = new Date().toISOStri
         validateImageOutput(output);
         if (output.jobId !== job.jobId || output.attemptId !== attempt.attemptId || output.turnId !== attempt.turnId
           || !attempt.candidateOutputIds.includes(output.outputId)) fail('IMAGE_OUTPUT_BINDING_MISMATCH');
-        if (!same(output.sourceHashes,request.inputs.map(i=>i.sha256)) || output.parentOutputId !== (request.baseRevision?.outputId ?? null)
-          || output.baseRevisionId !== (request.baseRevision?.revisionId ?? null)) fail('IMAGE_OUTPUT_LINEAGE_MISMATCH');
+        validateOutputLineage(request,output);
         if (output.capabilityVersion !== attempt.capabilities.version || output.capabilityObservedAt !== attempt.capabilities.observedAt) fail('IMAGE_OUTPUT_CAPABILITY_MISMATCH');
-        if (request.operation === 'export' && output.sha256 !== request.baseRevision.sha256) fail('IMAGE_EXPORT_SOURCE_MISMATCH');
         mergeOutput(late?job.lateOutputs:job.outputs,output);
       }
       if (job.outputs.length > request.count || job.lateOutputs.length > request.count * request.budget.maxAttempts) fail('IMAGE_OUTPUT_COUNT');
@@ -313,6 +330,7 @@ export function imageJobResult(job) {
   return {schemaVersion:IMAGE_SCHEMA_VERSION,jobId:job.jobId,requestDigest:job.requestDigest,
     controllerTaskId:job.controllerTaskId,controllerOperationId:job.controllerOperationId,caller:copy(job.caller),scope:copy(job.scope),route:copy(job.route),
     status:job.status,revision:job.revision,reason:job.reason,outputs:copy(job.outputs),lateOutputs:copy(job.lateOutputs),
+    outputRevisions:job.outputs.filter(o=>o.validation.status === 'VERIFIED').map(o=>imageOutputRevision(job.request,o)),
     missingCount:Math.max(0,job.request.count-job.outputs.length),warnings:copy(job.warnings),capabilities:copy(job.capabilities),
     requestedModel:job.request.requestedModel,requestedEffort:job.request.requestedEffort,
     modelSelection:copy(job.attempts.at(-1)?.modelSelection ?? {model:null,effort:null,raw:null,verified:false}),
@@ -331,6 +349,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       action === 'initial'?initialImageJob(value.grant,value.at):
       action === 'apply'?applyImageEvent(value.record,value.event,value.grant,{at:value.at,grantActive:value.grantActive}):
       action === 'result'?imageJobResult(value.record):
+      action === 'output-revision'?imageOutputRevision(value.request,value.output):
       action === 'gate'?imageCapabilityGate(value.request,value.capabilities,value.at):
       action === 'key'?validateImageShape(value,'Key'):
       action === 'occupancy-query'?validateImageShape(value,'SessionOccupancyQuery'):fail('IMAGE_CONTRACT_ACTION');
