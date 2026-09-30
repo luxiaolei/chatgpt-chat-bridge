@@ -54,6 +54,9 @@ SUB="${2:-}"
 if [[ "$CMD" == "image" ]]; then
   IMAGE_CLI="${MAIN:h}/capabilities/image/chatgpt-ego.cli.js"
   [[ -f "$IMAGE_CLI" ]] || { echo '{"ok":false,"code":"IMAGE_ADAPTER_NOT_INSTALLED","deliveryStage":"PRE_SEND"}' >&2; exit 2; }
+  if [[ "$SUB" == "batch" ]]; then
+    exec node "$IMAGE_CLI" "batch-${3:-inspect}"
+  fi
   if [[ "$SUB" == "start" || "$SUB" == "reconcile" || "$SUB" == "characterize" || "$SUB" == "download-original" || "$SUB" == "assist-observe" ]]; then
     IMAGE_PREPARED="$(node "$IMAGE_CLI" prepare "$SUB")"
     IMAGE_PROJECT="$(node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).route.project))' <<<"$IMAGE_PREPARED")"
