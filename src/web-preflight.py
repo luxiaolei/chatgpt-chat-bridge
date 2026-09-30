@@ -118,6 +118,8 @@ def reconcile_pending_scopes(reg, runtime, project, now=None):
                       not (str(t.get("role") or "").strip() == root and str(t.get("controller") or root).strip() == root)]
             durable = [t for t in scoped if str(t.get("status") or "").upper() == "COMPLETE"
                        and t.get("github") and t.get("updatedAt")]
+            durable.extend(t for t in scoped if str(t.get("status") or "").upper() == "RESULT_RECORDED"
+                           and t.get("resultVersion") and (t.get("resultRecordedAt") or t.get("updatedAt")))
         if active or not durable:
             continue
         latest = max(durable, key=lambda t: str(t.get("resultRecordedAt") or t.get("updatedAt")))

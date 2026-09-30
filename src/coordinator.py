@@ -160,6 +160,7 @@ def connection(config, state, initialize=True):
         ("rotation_id", "TEXT"),
         ("control_scope", "TEXT"),
         ("control_epoch", "INTEGER"),
+        ("pre_send_failures", "INTEGER NOT NULL DEFAULT 0"),
     ):
         ensure_column(db, "operations", name, declaration)
     db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS operations_active_placement
@@ -854,6 +855,78 @@ def materialize_pending_callbacks(db):
         raise
 
 
+def refresh_waiting_routes(db):
+    """Move notifications whose retired owner now has a committed successor."""
+    begin_immediate(db)
+    try:
+        reg = registry(db)
+        rows = db.execute("""SELECT * FROM operations
+                           WHERE kind IN ('callback','management') AND status='WAITING_ROUTE'
+                           ORDER BY created_at,id""").fetchall()
+        for row in rows:
+            owner_ref = row["session_ref"] or row["caller_ref"]
+            target_ref = resolve_successor(db, owner_ref) if owner_ref else None
+            target = (reg.get("chats") or {}).get(target_ref) if target_ref else None
+            if not target or target.get("status", "active") != "active" or target.get("project") != row["project"]:
+                continue
+            alias = target.get("account")
+            identity = ((reg.get("accounts") or {}).get(alias) or {}).get("identity")
+            if not identity:
+                continue
+            if row["kind"] == "management" and row["event_id"]:
+                old_delivery = db.execute("""SELECT 1 FROM management_deliveries
+                                             WHERE event_id=? AND target_ref=?""",
+                                          (row["event_id"], row["session_ref"])).fetchone()
+                if old_delivery:
+                    db.execute("""UPDATE management_deliveries SET target_ref=?,status='QUEUED',updated_at=?
+                                  WHERE event_id=? AND target_ref=?""",
+                               (target_ref, stamp(), row["event_id"], row["session_ref"]))
+            db.execute("""UPDATE operations SET status='QUEUED',account_alias=?,account_id=?,caller_ref=?,session_ref=?,
+                          role=?,not_before=?,reason=NULL,updated_at=? WHERE id=? AND status='WAITING_ROUTE'""",
+                       (alias, account_id(identity), target_ref, target_ref, target.get("role") or target_ref,
+                        time.time(), stamp(), row["id"]))
+            if row["kind"] == "callback" and row["event_id"]:
+                db.execute("UPDATE task_results SET callback_status='QUEUED' WHERE callback_operation_id=?",
+                           (row["id"],))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
+def retarget_notification(db, row):
+    """Require an active exact owner; follow only a committed successor."""
+    if row["kind"] not in {"callback", "management"} or not row["session_ref"]:
+        return row
+    reg = registry(db)
+    target = (reg.get("chats") or {}).get(row["session_ref"])
+    if target and target.get("status", "active") == "active":
+        return row
+    successor_ref = resolve_successor(db, row["session_ref"])
+    successor = (reg.get("chats") or {}).get(successor_ref) if successor_ref else None
+    if not successor or successor.get("status", "active") != "active" or successor.get("project") != row["project"]:
+        return None
+    alias = successor.get("account")
+    identity = ((reg.get("accounts") or {}).get(alias) or {}).get("identity")
+    if not identity:
+        return None
+    begin_immediate(db)
+    try:
+        if row["kind"] == "management" and row["event_id"]:
+            db.execute("""UPDATE management_deliveries SET target_ref=?,status='QUEUED',updated_at=?
+                          WHERE event_id=? AND target_ref=?""",
+                       (successor_ref, stamp(), row["event_id"], row["session_ref"]))
+        db.execute("""UPDATE operations SET account_alias=?,account_id=?,caller_ref=?,session_ref=?,role=?,reason=NULL,updated_at=?
+                      WHERE id=? AND status='DISPATCHING'""",
+                   (alias, account_id(identity), successor_ref, successor_ref, successor.get("role") or successor_ref,
+                    stamp(), row["id"]))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return db.execute("SELECT * FROM operations WHERE id=?", (row["id"],)).fetchone()
+
+
 def result(db, payload):
     task_id = str(payload.get("taskId") or payload.get("task") or "").strip()
     status = str(payload.get("status") or "COMPLETE").strip().upper()
@@ -1312,6 +1385,68 @@ def current_controller_ref(db, reg, project, role, workgroup=None):
     return None
 
 
+def execution_summary(rt, tasks, control_mode, pending_business, pending_callbacks, pending_management,
+                      pre_send_retrying, failed_pre_send, unknown_ops, awaiting_ack, capacity_waiting,
+                      blocked, failed):
+    """Expose one honest run state while keeping historical counters separate."""
+    now = datetime.now(timezone.utc)
+    generating = 0
+    stale_running = 0
+    for task in tasks:
+        status = str(task.get("status") or "").upper()
+        if status in TERMINAL:
+            continue
+        snapshot = (rt.get("sessions") or {}).get(task.get("sessionId")) or {}
+        observed = snapshot.get("observedAt") or task.get("stateUpdatedAt")
+        age = None
+        if observed:
+            try:
+                timestamp = datetime.fromisoformat(str(observed).replace("Z", "+00:00"))
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                age = max(0, (now - timestamp).total_seconds())
+            except (TypeError, ValueError):
+                pass
+        fresh = age is not None and age <= 180
+        if fresh and snapshot.get("generating") and not task.get("watchdogPausedForUserControl"):
+            generating += 1
+        elif status in {"RUNNING", "DISPATCHED", "RECOVERING", "AWAITING_DURABLE_UPDATE"}:
+            stale_running += 1
+    if control_mode in {"PAUSED", "DRAINING"}:
+        state, label, color = ("PAUSED", "已暂停" if control_mode == "PAUSED" else "排空中", "amber")
+    elif pre_send_retrying or failed_pre_send:
+        state, label, color = "PRE_SEND_REVIEW", "发送前故障待处理", "red"
+    elif unknown_ops:
+        state, label, color = "DELIVERY_UNKNOWN", "投递结果待核对", "red"
+    elif generating:
+        state, label, color = "GENERATING", "最近观察到生成", "green"
+    elif pending_business or pending_callbacks or pending_management:
+        state, label, color = "QUEUED", "队列中等待执行", "blue"
+    elif capacity_waiting:
+        state, label, color = "WAITING_CAPACITY", "等待容量", "amber"
+    elif awaiting_ack:
+        state, label, color = "AWAITING_ACK", "等待总控确认", "blue"
+    elif stale_running:
+        state, label, color = "RUNNING_STALE", "运行记录待刷新", "amber"
+    elif blocked or failed:
+        state, label, color = "NEEDS_REVIEW", "有任务需要复核", "red"
+    else:
+        state, label, color = "IDLE", "当前无可执行任务", "gray"
+    return {
+        "state": state, "label": label, "color": color,
+        "recentlyObservedGenerating": generating,
+        "runningAwaitingObservation": stale_running,
+        "queued": pending_business + pending_callbacks + pending_management,
+        "preSendRetrying": pre_send_retrying,
+        "failedPreSend": failed_pre_send,
+        "deliveryUnknown": unknown_ops,
+        "awaitingControllerAck": awaiting_ack,
+        "capacityWaiting": capacity_waiting,
+        "source": "local-authoritative-state-with-cached-browser-observations",
+        "observationFreshnessSec": 180,
+    }
+
+
 def control_status(db, project=None, workgroup=None):
     reg, rt = registry(db), runtime(db)
     projects = []
@@ -1432,6 +1567,9 @@ def control_status(db, project=None, workgroup=None):
 
         root_role = cfg.get("rootController") or "conductor"
         controller = current_controller_ref(db, reg, name, root_role)
+        execution = execution_summary(rt, tasks, control["mode"], pending_business_ops, pending_callback_ops,
+                                      pending_management, pre_send_retrying, failed_pre_send, unknown_ops,
+                                      results["awaitingControllerAck"], capacity_waiting, blocked, failed)
         projects.append({
             "project": name,
             "businessState": cfg.get("businessState") or ("ARCHIVED" if cfg.get("archived") else "UNSPECIFIED"),
@@ -1466,6 +1604,7 @@ def control_status(db, project=None, workgroup=None):
                                   **({"failedPreSend": failed_pre_send} if failed_pre_send else {}),
                                   **({"reconciledSuperseded": reconciled_superseded_ops}
                                      if reconciled_superseded_ops else {})},
+            "execution": execution,
             "management": {
                 "acknowledged": int((mgmt["acknowledged"] if mgmt and mgmt["acknowledged"] is not None else 0) or 0),
                 "pending": pending_management,
@@ -1812,12 +1951,13 @@ def claim(db):
         raise
 
 
-def finish(db, row, status, reason=None, retry_after=0, result=None, session_ref=None):
+def finish(db, row, status, reason=None, retry_after=0, result=None, session_ref=None, pre_send_failure=False):
     begin_immediate(db)
     try:
-        db.execute("""UPDATE operations SET status=?,reason=?,not_before=?,updated_at=?,result=?,session_ref=coalesce(?,session_ref),claimed_at=NULL
+        db.execute("""UPDATE operations SET status=?,reason=?,not_before=?,updated_at=?,result=?,session_ref=coalesce(?,session_ref),claimed_at=NULL,
+                      pre_send_failures=pre_send_failures+?
                       WHERE id=? AND status='DISPATCHING'""",
-                   (status, reason, time.time() + retry_after, stamp(), json.dumps(result) if result is not None else None, session_ref, row["id"]))
+                   (status, reason, time.time() + retry_after, stamp(), json.dumps(result) if result is not None else None, session_ref, int(pre_send_failure), row["id"]))
         updated = db.execute("SELECT * FROM operations WHERE id=?", (row["id"],)).fetchone()
         if row["kind"] == "management" and row["event_id"]:
             delivery_status = "DELIVERED" if status == "SENT" else status
@@ -1862,7 +2002,7 @@ def pre_send_retry_after(row, receipt):
     """Retry only UI readiness failures proven to precede the send control."""
     if not receipt or receipt.get("deliveryStage") != "PRE_SEND":
         return None
-    attempt = int(row["attempts"] or 0)
+    attempt = int(row["pre_send_failures"] or 0) + 1
     if attempt >= PRE_SEND_RETRY_LIMIT:
         return None
     code = str(receipt.get("code") or "").strip().upper()
@@ -2013,9 +2153,15 @@ def reconcile_delivery(db, operation_id):
 
 def work_one(db):
     materialize_pending_callbacks(db)
+    refresh_waiting_routes(db)
     row = claim(db)
     if row is None:
         return {"status": "IDLE"}
+    if row["kind"] in {"callback", "management"} and row["session_ref"]:
+        routed = retarget_notification(db, row)
+        if routed is None:
+            return finish(db, row, "WAITING_ROUTE", "CONTROLLER_SUCCESSOR_NOT_COMMITTED")
+        row = routed
     if row["kind"] in {"dispatch", "rotation"}:
         mode = management_mode(db, row["project"], row["workgroup_id"])
         if mode["mode"] in {"PAUSED", "DRAINING"}:
@@ -2077,8 +2223,8 @@ def work_one(db):
             retry_after = pre_send_retry_after(row, receipt)
             if retry_after is not None:
                 code = str(receipt.get("code") or "ERROR")[:200]
-                return finish(db, row, "QUEUED", f"PRE_SEND_RETRY_{row['attempts']}_{code}", retry_after)
-            return finish(db, row, "FAILED_PRE_SEND", "PRE_SEND_" + str(receipt.get("code") or "ERROR")[:200])
+                return finish(db, row, "QUEUED", f"PRE_SEND_RETRY_{row['pre_send_failures'] + 1}_{code}", retry_after, pre_send_failure=True)
+            return finish(db, row, "FAILED_PRE_SEND", "PRE_SEND_" + str(receipt.get("code") or "ERROR")[:200], pre_send_failure=True)
         if receipt and receipt.get("deliveryStage") == "SEND_ATTEMPTED":
             return finish(db, row, "DELIVERY_UNKNOWN", "SEND_ATTEMPTED_" + str(receipt.get("code") or "ERROR")[:200])
         return finish(db, row, "DELIVERY_UNKNOWN", "WORKER_EXIT_" + str(completed.returncode))
@@ -2410,7 +2556,7 @@ def main():
             if len(args)!=2 or args[0]!="--operation":
                 raise ValueError("retry requires --operation ID")
             prior = db.execute("SELECT kind FROM operations WHERE id=? AND status='FAILED_PRE_SEND'", (args[1],)).fetchone()
-            changed = db.execute("UPDATE operations SET status='QUEUED',not_before=?,updated_at=? WHERE id=? AND status='FAILED_PRE_SEND'",
+            changed = db.execute("UPDATE operations SET status='QUEUED',pre_send_failures=0,not_before=?,updated_at=? WHERE id=? AND status='FAILED_PRE_SEND'",
                                  (time.time(),stamp(),args[1]))
             if changed.rowcount != 1:
                 raise ValueError("RETRY_REQUIRES_PROVEN_PRE_SEND_FAILURE")

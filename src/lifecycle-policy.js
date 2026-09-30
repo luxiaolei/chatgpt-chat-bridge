@@ -49,13 +49,13 @@
     const groupScoped = !!workgroupId;
     const projectTasks = (tasks || []).filter(t => t && t.project === projectName &&
       (groupScoped ? taskWorkgroupId(t) === workgroupId : (legacyOnly ? !taskWorkgroupId(t) : true)));
-    // RESULT_RECORDED has released the worker slot for group-scoped progression;
-    // its callback/ACK remains durable state and is still reported separately.
-    const settled = task => isTerminal(task) || (groupScoped && String(task.status || "").toUpperCase() === "RESULT_RECORDED");
+    // RESULT_RECORDED releases the worker slot; its callback/ACK remains durable
+    // state and is reported separately while the controller schedules review.
+    const settled = task => isTerminal(task) || String(task.status || "").toUpperCase() === "RESULT_RECORDED";
     const activeDomain = projectTasks.filter(t => !settled(t) &&
       (groupScoped ? true : !isRootTask(t, policy.reconcileRole)));
     if (activeDomain.length) return null;
-    const durable = projectTasks.filter(groupScoped ? groupProgressTask : durableProgressTask)
+    const durable = projectTasks.filter(groupProgressTask)
       .sort((a, b) => String(b.resultRecordedAt || b.updatedAt).localeCompare(String(a.resultRecordedAt || a.updatedAt)))[0];
     if (!durable) return null;
     const progressAt = String(durable.resultRecordedAt || durable.updatedAt);
@@ -77,10 +77,10 @@
       latestTaskId: durable.taskId || null,
       latestGithub: durable.github || null,
       progressAt,
-      ...(groupScoped && eventVersion ? {resultVersion: eventVersion} : {}),
+      ...(eventVersion ? {resultVersion: eventVersion} : {}),
       eventKey: groupScoped
         ? [projectName, workgroupId, durable.taskId || "", eventVersion || progressAt].join(":")
-        : [projectName, durable.taskId || "", progressAt].join(":"),
+        : [projectName, durable.taskId || "", eventVersion || progressAt].join(":"),
       ready: waitSec <= 0,
       waitSec,
       instruction: policy.instruction,

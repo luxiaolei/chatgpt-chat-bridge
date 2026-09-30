@@ -5,20 +5,26 @@ import path from "node:path";
 
 const root=path.resolve(import.meta.dirname,"..");
 
-async function runtimeApi(mode="Extra High", selectorAvailable=false){
+async function runtimeApi(mode="Extra High", selectorAvailable=false, generating=false){
   for(const file of ["control-routing","page-pool","liveness-policy","task-policy","web-policy","model-policy","session-policy"]) {
     await import("../src/"+file+".js");
   }
   const source=(await readFile(path.join(root,"src/main.js"),"utf8")).split('const cmd=args[0] || "help";')[0];
   const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
-  return await new AsyncFunction("setTimeout","taskSpace","testMode","selectorVisible",source+
+  return await new AsyncFunction("setTimeout","taskSpace","testMode","selectorVisible","generating",source+
     '\nlet reapplyCalls=0;'+
-    '\nstate=async()=>({mode:testMode});'+
+    '\nstate=async()=>({mode:testMode,inputReady:true,generating});'+
     '\napplyModelSpec=async(_page,model,effort)=>{ reapplyCalls+=1; return {model,effort,observed:{model,effort,raw:model+" "+effort}}; };'+
     '\nconst reg={};saveRegistry=async()=>{};'+
     '\nreturn {applyConfiguredSessionModel,applyDispatchModel,modelSelectorAvailable,calls:()=>reapplyCalls,page:{evaluate:async()=>selectorVisible}};'
-  )(callback=>callback(),async()=>({}),mode,selectorAvailable);
+  )(callback=>callback(),async()=>({}),mode,selectorAvailable,generating);
 }
+
+test("busy conversation defers before changing model or Thinking",async()=>{
+  const api=await runtimeApi("High",true,true);
+  await assert.rejects(api.applyDispatchModel(api.page,{model:"Latest",effort:"Extra High"}),/CHAT_BUSY/);
+  assert.equal(api.calls(),0);
+});
 
 test("hidden model selector with matching effort skips forced model reapply",async()=>{
   const api=await runtimeApi("Extra High",false);

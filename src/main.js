@@ -1391,6 +1391,7 @@ async function applyConfiguredSessionModel(page, chat) {
 }
 
 async function applyDispatchModel(page, chat, requestedModel=null, requestedEffort=null) {
+  assertComposerSafe(await state(page));
   const model=requestedModel || chat.model || null;
   const effort=requestedEffort || chat.effort || null;
   let selection=null;

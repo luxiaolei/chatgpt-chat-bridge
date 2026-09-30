@@ -87,6 +87,16 @@ test("group result recorded wakes its owner without requiring ACK", () => {
   assert.equal(a?.latestTaskId, "A-1");
 });
 
+test("ungrouped result recorded wakes its controller for review only once", () => {
+  const project={lifecycle:{autoReconcile:true,minGapSec:0}};
+  const task={taskId:"T",project:"P",role:"worker",status:"RESULT_RECORDED",resultVersion:"1",resultRecordedAt:"2026-09-30T00:00:00Z"};
+  const candidate=reconcileCandidate("P",project,[task],{});
+  assert.equal(candidate?.latestTaskId,"T");
+  assert.equal(candidate?.resultVersion,"1");
+  assert.equal(reconcileCandidate("P",project,[task],{lastReconcileProgressAt:task.resultRecordedAt,lastReconcileResultVersion:"1"}),null);
+  assert.equal(task.status,"RESULT_RECORDED");
+});
+
 test("legacy reconcile remains independent from grouped work", () => {
   const project = { rootController: "00-g", lifecycle: { autoReconcile: true, minGapSec: 0 },
     workgroups: { A: { controllerSessionRef: "owner-a" } } };
