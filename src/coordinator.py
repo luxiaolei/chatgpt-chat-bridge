@@ -1500,7 +1500,7 @@ def control_status(db, project=None, workgroup=None):
         failed_pre_send = db.execute("""SELECT count(*) FROM operations o
             WHERE o.project=? AND o.status='FAILED_PRE_SEND'
               AND NOT EXISTS (SELECT 1 FROM task_results tr
-                  WHERE tr.callback_operation_id=o.id AND tr.acceptance_status IS NOT NULL)
+                  WHERE tr.task_id=o.task_id AND tr.acceptance_status IS NOT NULL)
               AND NOT EXISTS (SELECT 1 FROM management_deliveries d
                   WHERE d.operation_id=o.id AND d.status='ACKNOWLEDGED')""", (name,)).fetchone()[0]
         pre_send_retrying = db.execute(
