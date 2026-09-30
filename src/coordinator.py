@@ -168,6 +168,8 @@ def connection(config, state, initialize=True):
         ("control_epoch", "INTEGER"),
         ("pre_send_failures", "INTEGER NOT NULL DEFAULT 0"),
         ("local_owner", "TEXT"),
+        ("native_target", "TEXT"),
+        ("routing_advice", "TEXT"),
     ):
         ensure_column(db, "operations", name, declaration)
     db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS operations_active_placement
@@ -364,6 +366,15 @@ def response(row):
             result[target] = result.pop(source)
     if "local_owner" in row.keys() and row["local_owner"]:
         result["localOwner"] = json.loads(row["local_owner"])
+    if "native_target" in row.keys() and row["native_target"]:
+        result["runtime"] = "codex"
+        result["nativeTarget"] = json.loads(row["native_target"])
+        receipt = json.loads(row["result"]) if row["result"] else {}
+        for key in ("turnId", "clientUserMessageId", "modelSelection"):
+            if key in receipt:
+                result[key] = receipt[key]
+    if "routing_advice" in row.keys() and row["routing_advice"]:
+        result["routingAdvice"] = json.loads(row["routing_advice"])
     return result
 
 
@@ -434,19 +445,134 @@ def control_footer(task_id, caller_ref, role, model, effort, policy_version, wor
     return "\n".join(lines)
 
 
+def native_target(payload, creating=False):
+    target = payload.get("nativeTarget") or {
+        "host": payload.get("nativeHost"), "threadId": payload.get("nativeThread"),
+        "cwd": payload.get("nativeCwd"), "socket": payload.get("nativeSocket"),
+    }
+    if not isinstance(target, dict) or target.get("host") != os.uname().nodename:
+        raise ValueError("NATIVE_HOST_MISMATCH")
+    if not creating and not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", str(target.get("threadId") or "")):
+        raise ValueError("NATIVE_THREAD_REQUIRED")
+    if not all(isinstance(target.get(key), str) and pathlib.Path(target[key]).is_absolute() for key in ("cwd", "socket")):
+        raise ValueError("NATIVE_ABSOLUTE_PATH_REQUIRED")
+    return {key: target.get(key) for key in ("host", "threadId", "cwd", "socket")}
+
+
+def native_call(payload):
+    command = [os.environ.get("CHAT_BRIDGE_NODE_BIN") or "node", str(pathlib.Path(__file__).with_name("native-codex.mjs")), json.dumps(payload)]
+    try:
+        completed = run_bridge(command)
+        receipt = parse_worker_receipt(completed)
+        return receipt or {"ok": False, "code": "NATIVE_RECEIPT_UNREADABLE", "deliveryStage": "SEND_ATTEMPTED"}
+    except OSError:
+        return {"ok": False, "code": "NATIVE_ADAPTER_UNAVAILABLE", "deliveryStage": "PRE_SEND"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "code": "NATIVE_ADAPTER_TIMEOUT", "deliveryStage": "SEND_ATTEMPTED"}
+
+
+def native_operation_payload(row, action="send"):
+    prior = json.loads(row["result"]) if row["result"] else {}
+    return {"action": action, "nativeTarget": json.loads(row["native_target"]), "operationId": row["id"],
+            "turnId": prior.get("turnId"), "message": row["message"], "model": row["requested_model"], "effort": row["requested_effort"]}
+
+
+def native_tasks(db):
+    """Derive native business status without putting native workers in Web pools."""
+    tasks = {}
+    for row in db.execute("SELECT * FROM operations WHERE native_target IS NOT NULL AND kind='dispatch'"):
+        reported = db.execute("SELECT * FROM task_results WHERE task_id=? ORDER BY recorded_at DESC,event_id DESC LIMIT 1", (row["task_id"],)).fetchone()
+        status = {"SENT": "DISPATCHED", "FAILED_PRE_SEND": "FAILED"}.get(row["status"], row["status"])
+        if reported:
+            status = {"ACCEPTED": "COMPLETE", "REJECTED": "BLOCKED", "BLOCKED": "BLOCKED"}.get(reported["acceptance_status"], "RESULT_RECORDED")
+        tasks[row["task_id"]] = {"taskId": row["task_id"], "runtime": "codex", "project": row["project"],
+                                 "workgroupId": row["workgroup_id"], "sessionId": row["session_ref"], "status": status}
+    return tasks
+
+
+def work_native(db, row):
+    payload = native_operation_payload(row)
+    payload["admission"] = {"state": str(state_dir_for(db)), "operationId": row["id"]}
+    receipt = native_call(payload)
+    if receipt.get("ok") and receipt.get("delivered") and receipt.get("turnId"):
+        return finish(db, row, "SENT", result=receipt)
+    if receipt.get("deliveryStage") == "PRE_SEND":
+        if receipt.get("code") in {"NATIVE_TARGET_BUSY", "NATIVE_ADMISSION_BLOCKED"}:
+            return finish(db, row, "QUEUED", receipt["code"], 30, result=receipt)
+        return finish(db, row, "FAILED_PRE_SEND", receipt.get("code"), result=receipt, pre_send_failure=True)
+    return finish(db, row, "DELIVERY_UNKNOWN", receipt.get("code"), result=receipt)
+
+
+def reconcile_native(db, row):
+    receipt = native_call(native_operation_payload(row, "read"))
+    proven = receipt.get("ok") and receipt.get("delivered") and receipt.get("turnId")
+    now = stamp()
+    begin_immediate(db)
+    try:
+        current = db.execute("SELECT status FROM operations WHERE id=?", (row["id"],)).fetchone()
+        if current["status"] != "DELIVERY_UNKNOWN":
+            raise ValueError("OPERATION_CHANGED_DURING_RECONCILIATION")
+        outcome = "RECONCILED_DELIVERED" if proven else "STILL_UNKNOWN"
+        db.execute("INSERT INTO reconciliation_attempts VALUES (?,?,?,?,?,?)",
+                   (str(uuid.uuid4()), row["id"], outcome, "NATIVE_TURN_EVIDENCE" if proven else receipt.get("code"), json.dumps(receipt), now))
+        if proven:
+            db.execute("UPDATE operations SET status='SENT',reason='RECONCILED_FROM_NATIVE_EVIDENCE',result=?,updated_at=? WHERE id=?",
+                       (json.dumps(receipt), now, row["id"]))
+        db.commit()
+        return {"operationId": row["id"], "outcome": outcome, "evidence": receipt}
+    except Exception:
+        db.rollback()
+        raise
+
+
 def submit(db, payload):
+    if payload.get("routingAdvicePath"):
+        advice_bytes = pathlib.Path(payload["routingAdvicePath"]).read_bytes()
+        if len(advice_bytes) > 32000:
+            raise ValueError("INVALID_ROUTING_ADVICE")
+        payload["routingAdvice"] = {"advice": json.loads(advice_bytes), "receiptSha256": hashlib.sha256(advice_bytes).hexdigest()}
+    advice = payload.get("routingAdvice")
+    if advice is not None and (not isinstance(advice, dict) or len(json.dumps(advice)) > 33000):
+        raise ValueError("INVALID_ROUTING_ADVICE")
+    if advice is not None:
+        receipt = advice.get("advice") if payload.get("routingAdvicePath") else advice
+        allowed = {"version", "messageSha256", "selectedChoice", "choiceId", "reason", "requestSha256", "inputSha256", "judge", "choices", "generatedAt"}
+        if (not isinstance(receipt, dict) or set(receipt) - allowed
+                or not isinstance(receipt.get("selectedChoice"), dict)
+                or not isinstance(receipt.get("choices"), list)
+                or receipt["selectedChoice"] not in receipt["choices"]
+                or not isinstance(receipt.get("reason"), str)
+                or any(key in receipt and not re.fullmatch(r"[a-f0-9]{64}", str(receipt[key])) for key in ("messageSha256", "requestSha256", "inputSha256"))):
+            raise ValueError("INVALID_ROUTING_ADVICE")
+        choice_fields = {"id", "description", "runtime", "model", "effort", "sessionRef", "nativeHost", "nativeThread", "nativeCwd", "nativeSocket"}
+        if (not 1 <= len(receipt["choices"]) <= 32
+                or any(not isinstance(item, dict) or set(item) - choice_fields
+                       or item.get("runtime") not in {"web", "codex"}
+                       or any(not isinstance(item.get(key), str) or not 0 < len(item[key]) <= 128 for key in ("id", "model", "effort"))
+                       for item in receipt["choices"])
+                or ("judge" in receipt and receipt["judge"] != {"model": "gpt-6-luna", "effort": "low"})):
+            raise ValueError("INVALID_ROUTING_ADVICE")
+        choice = receipt.get("selectedChoice") or {}
+        if (receipt.get("version") != 1 or receipt.get("choiceId") != choice.get("id")
+                or not choice.get("id") or receipt.get("messageSha256") != hashlib.sha256(str(payload.get("message") or "").encode()).hexdigest()
+                or choice.get("runtime") != (payload.get("runtime") or "web")
+                or any(choice.get(key) != payload.get(key) for key in ("model", "effort", "sessionRef", "nativeHost", "nativeThread", "nativeCwd", "nativeSocket"))):
+            raise ValueError("ROUTING_ADVICE_MISMATCH")
     caller = str(payload.get("callerRef") or "").strip()
     request_id = str(payload.get("requestId") or "").strip()
     original_message = str(payload.get("message") or "")
     if not caller or not request_id or not original_message or len(request_id) > 128 or len(original_message) > 100000:
         raise ValueError("callerRef, requestId and nonempty message are required")
+    native = payload.get("runtime") == "codex"
+    if payload.get("runtime") not in {None, "web", "codex"}:
+        raise ValueError("UNSUPPORTED_RUNTIME")
     local_owner = local_caller(caller) if caller.startswith("codex:") else None
-    if local_owner and (not payload.get("project") or not payload.get("sessionRef")):
+    if local_owner and (not payload.get("project") or (not payload.get("sessionRef") and not native)):
         raise ValueError("LOCAL_CALLER_REQUIRES_PROJECT_AND_SESSION")
     requested_model = str(payload.get("model") or "").strip() or None
     if requested_model and len(requested_model) > 80:
         raise ValueError("INVALID_MODEL")
-    requested_effort = normalize_effort(payload.get("effort"))
+    requested_effort = (str(payload.get("effort") or "xhigh").strip() if native else normalize_effort(payload.get("effort")))
     policy_version = str(payload.get("resourcePolicyVersion") or "v1").strip() or "v1"
     workgroup = str(payload.get("workgroup") or "").strip() or None
     affinity = str(payload.get("affinityKey") or "").strip() or None
@@ -493,6 +619,36 @@ def submit(db, payload):
             if prior_task["status"] in {"DELIVERY_UNKNOWN", "SUPERSEDED"}:
                 raise ValueError("TASK_DELIVERY_UNKNOWN_RECONCILE_REQUIRED:" + prior_task["id"])
             raise ValueError("TASK_ID_ALREADY_DISPATCHED:" + prior_task["id"])
+
+        if native:
+            target = native_target(payload)
+            session_ref = "codex:" + target["threadId"]
+            if payload.get("sessionRef") and payload["sessionRef"] != session_ref:
+                raise ValueError("NATIVE_SESSION_MISMATCH")
+            if workgroup and workgroup not in (project_record.get("workgroups") or {}):
+                raise ValueError("WORKGROUP_NOT_REGISTERED")
+            busy = db.execute("""SELECT id FROM operations o WHERE native_target IS NOT NULL AND session_ref=?
+                AND status NOT IN ('CANCELLED','FAILED_PRE_SEND')
+                AND NOT EXISTS (SELECT 1 FROM task_results r WHERE r.task_id=o.task_id) LIMIT 1""", (session_ref,)).fetchone()
+            if busy:
+                raise ValueError("TARGET_SESSION_BUSY:" + busy["id"])
+            model = requested_model or "gpt-6-astra"
+            role = str(payload.get("role") or "native-worker")
+            message = original_message + control_footer(task_id, caller, role, model, requested_effort, policy_version, workgroup)
+            now = stamp()
+            advice = payload.get("routingAdvice")
+            db.execute("""INSERT INTO operations(
+                id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,
+                role,message,task_id,created_at,updated_at,not_before,requested_model,requested_effort,
+                resource_policy_version,workgroup_id,original_message,control_scope,control_epoch,local_owner,native_target,routing_advice)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (operation_id,key,digest,"QUEUED",project,"native:"+target["host"],"codex:"+target["host"],caller,session_ref,
+                 role,message,task_id,now,now,time.time(),model,requested_effort,policy_version,workgroup,original_message,
+                 mode.get("scope"),mode.get("epoch"),json.dumps(local_owner) if local_owner else None,json.dumps(target),
+                 json.dumps(advice) if advice is not None else None))
+            row = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+            db.commit()
+            return response(row)
 
         target = str(payload.get("sessionRef") or "").strip() or None
         role = str(payload.get("role") or "").strip()
@@ -601,6 +757,8 @@ def submit(db, payload):
             (operation_id,key,digest,"QUEUED",project,alias,stable,caller,target,role,message,task_id,now,now,time.time(),
              requested_model,requested_effort,policy_version,workgroup,affinity,placement_key,original_message,
              mode.get("scope"),mode.get("epoch"),json.dumps(local_owner) if local_owner else None))
+        if advice is not None:
+            db.execute("UPDATE operations SET routing_advice=? WHERE id=?", (json.dumps(advice), operation_id))
         row = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
         db.commit()
         return response(row)
@@ -617,10 +775,10 @@ def submit(db, payload):
 def task_contract(db, task_id):
     rt = runtime(db)
     task = (rt.get("tasks") or {}).get(task_id)
-    row = db.execute("""SELECT project,account_alias,caller_ref,session_ref,role,workgroup_id,local_owner
+    row = db.execute("""SELECT project,account_alias,caller_ref,session_ref,role,workgroup_id,local_owner,native_target
                         FROM operations WHERE kind='dispatch' AND task_id=?
                         ORDER BY created_at DESC LIMIT 1""", (task_id,)).fetchone()
-    if task and (not row or not row["local_owner"]):
+    if task and (not row or (not row["local_owner"] and not row["native_target"])):
         return task
     if not row:
         return None
@@ -635,6 +793,7 @@ def task_contract(db, task_id):
         "role": row["role"],
         "workgroupId": row["workgroup_id"],
         **({"localOwner": json.loads(row["local_owner"])} if row["local_owner"] else {}),
+        **({"nativeTarget": json.loads(row["native_target"]), "runtime": "codex"} if row["native_target"] else {}),
     }
 
 
@@ -984,6 +1143,10 @@ def result(db, payload):
     task = task_contract(db, task_id)
     if not task:
         raise ValueError("RESULT_TASK_NOT_REGISTERED")
+    if task.get("nativeTarget"):
+        target = task["nativeTarget"]
+        if os.environ.get("CODEX_THREAD_ID") != target["threadId"] or os.uname().nodename != target["host"] or os.environ.get("CHAT_BRIDGE_FROM_SPACE") or os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID"):
+            raise ValueError("NATIVE_RESULT_WORKER_MISMATCH")
     origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
     if origin:
         reg = registry(db)
@@ -1537,13 +1700,14 @@ def execution_summary(rt, tasks, control_mode, pending_business, pending_callbac
 
 def control_status(db, project=None, workgroup=None):
     reg, rt = registry(db), runtime(db)
+    task_view = {**(rt.get("tasks") or {}), **native_tasks(db)}
     projects = []
     for name, cfg in (reg.get("projects") or {}).items():
         if project and name != project:
             continue
         if workgroup and workgroup not in (cfg.get("workgroups") or {}):
             continue
-        tasks = [task for task in (rt.get("tasks") or {}).values() if task.get("project") == name]
+        tasks = [task for task in task_view.values() if task.get("project") == name]
         task_counts = {}
         for task in tasks:
             key = str(task.get("status") or "UNKNOWN").upper()
@@ -2302,6 +2466,8 @@ def reconcile_delivery(db, operation_id):
         raise ValueError("UNKNOWN_OPERATION")
     if row["status"] != "DELIVERY_UNKNOWN" or row["kind"] not in {"dispatch", "callback", "management"}:
         raise ValueError("RECONCILE_REQUIRES_UNKNOWN_DELIVERY")
+    if row["native_target"]:
+        return reconcile_native(db, row)
     superseded = retired_management_successor(db, row)
     if superseded:
         now = stamp()
@@ -2416,6 +2582,8 @@ def work_one(db):
                        (mode.get("scope"), mode.get("epoch"), stamp(), row["id"]))
             db.commit()
             row = db.execute("SELECT * FROM operations WHERE id=?", (row["id"],)).fetchone()
+    if row["native_target"]:
+        return work_native(db, row)
     bridge = os.environ.get("CHAT_BRIDGE_BIN") or str(pathlib.Path.home() / ".local/bin/chat-bridge")
     args = [bridge]
     if row["kind"] in {"callback", "management"}:
@@ -2598,21 +2766,67 @@ def reattach_commit(db, payload):
 def main():
     command, config_name, state_name, *args = sys.argv[1:]
     config, state = pathlib.Path(config_name), pathlib.Path(state_name)
-    db = connection(config, state)
+    db = connection(config, state, initialize=command != "native-admission")
     try:
-        if command == "submit":
+        if command == "native-admission":
+            row = db.execute("SELECT * FROM operations WHERE id=?", (args[0],)).fetchone()
+            if not row or not row["native_target"] or row["status"] != "DISPATCHING":
+                raise ValueError("NATIVE_OPERATION_NOT_CLAIMED")
+            mode = management_mode(db, row["project"], row["workgroup_id"])
+            if mode["mode"] != "RUNNING":
+                raise ValueError("ADMISSION_" + mode["mode"])
+            value = {"ok": True}
+        elif command == "submit":
             if args:
                 names = {"--request-id": "requestId", "--caller-ref": "callerRef", "--project": "project",
                          "--role": "role", "--session-ref": "sessionRef", "--message": "message", "--account": "account",
                          "--task": "taskId", "--model": "model", "--effort": "effort",
                          "--resource-policy-version": "resourcePolicyVersion", "--workgroup": "workgroup",
-                         "--affinity-key": "affinityKey"}
+                         "--affinity-key": "affinityKey", "--runtime": "runtime",
+                         "--native-host": "nativeHost", "--native-thread": "nativeThread",
+                         "--native-cwd": "nativeCwd", "--native-socket": "nativeSocket",
+                         "--routing-advice": "routingAdvicePath"}
                 if len(args) % 2 or any(args[i] not in names for i in range(0, len(args), 2)):
                     raise ValueError("submit options must be name/value pairs")
                 payload = {names[args[i]]: args[i + 1] for i in range(0, len(args), 2)}
             else:
                 payload = json.load(sys.stdin)
             value = submit(db, payload)
+        elif command == "native-create":
+            if os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID") or os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+                raise ValueError("NATIVE_CREATE_HOST_LOCAL_REQUIRED")
+            names = {"--native-host": "nativeHost", "--native-cwd": "nativeCwd", "--native-socket": "nativeSocket", "--model": "model", "--effort": "effort"}
+            if "--confirm" not in args:
+                raise ValueError("native-create requires --confirm")
+            args = [item for item in args if item != "--confirm"]
+            if len(args) % 2 or any(args[i] not in names for i in range(0, len(args), 2)):
+                raise ValueError("native-create options must be name/value pairs")
+            payload = {names[args[i]]: args[i+1] for i in range(0, len(args), 2)}
+            value = native_call({"action": "create", "nativeTarget": native_target(payload, creating=True),
+                                 "model": payload.get("model") or "gpt-6-astra", "effort": payload.get("effort") or "xhigh"})
+        elif command in {"native-read", "native-cancel"}:
+            if os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID") or os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+                raise ValueError("NATIVE_OPERATION_HOST_LOCAL_REQUIRED")
+            row = db.execute("SELECT * FROM operations WHERE id=?", (args[0],)).fetchone()
+            if not row or not row["native_target"]:
+                raise ValueError("NATIVE_OPERATION_REQUIRED")
+            if command == "native-cancel":
+                if "--confirm" not in args:
+                    raise ValueError("native-cancel requires --confirm")
+                authorize_control(db, project=row["project"])
+                if row["local_owner"]:
+                    local_caller(row["caller_ref"], json.loads(row["local_owner"]))
+            value = native_call(native_operation_payload(row, "cancel" if command == "native-cancel" else "read"))
+            if command == "native-cancel":
+                if value.get("ok") and not value.get("cancelled"):
+                    observed = native_call(native_operation_payload(row, "read"))
+                    value["cancelled"] = bool(observed.get("ok") and observed.get("turnStatus") == "interrupted" and observed.get("turnId") == value.get("turnId"))
+                prior = json.loads(row["result"]) if row["result"] else {}
+                prior["cancelReceipt"] = value
+                db.execute("UPDATE operations SET result=?,updated_at=? WHERE id=?", (json.dumps(prior), stamp(), row["id"]))
+                if value.get("cancelled"):
+                    db.execute("UPDATE operations SET status='CANCELLED',reason='NATIVE_TURN_INTERRUPTED' WHERE id=?", (row["id"],))
+                db.commit()
         elif command == "checkpoint":
             if args:
                 names={"--task":"taskId","--project":"project","--role":"role","--workgroup":"workgroupId","--session-ref":"sessionRef",
@@ -2811,7 +3025,7 @@ def main():
             else:
                 raise ValueError("UNKNOWN_CONTROL_COMMAND")
         elif command == "status":
-            value = observed_response(db.execute("SELECT * FROM operations WHERE id=?", (args[0],)).fetchone(), runtime(db).get("tasks") or {})
+            value = observed_response(db.execute("SELECT * FROM operations WHERE id=?", (args[0],)).fetchone(), {**(runtime(db).get("tasks") or {}), **native_tasks(db)})
         elif command == "reconcile":
             if len(args)!=2 or args[0]!="--operation":
                 raise ValueError("reconcile requires --operation ID")
@@ -2851,7 +3065,7 @@ def main():
             db.commit()
             value = {"recoveredUnknown": db.total_changes}
         elif command == "list":
-            tasks = runtime(db).get("tasks") or {}
+            tasks = {**(runtime(db).get("tasks") or {}), **native_tasks(db)}
             value = {"operations": [observed_response(row, tasks) for row in db.execute("SELECT * FROM operations ORDER BY created_at DESC LIMIT 100")]}
         elif command == "serve":
             db.close()
@@ -2860,6 +3074,8 @@ def main():
         else:
             raise ValueError("UNKNOWN_COORDINATOR_COMMAND")
         print(json.dumps(value, ensure_ascii=False))
+        if command in {"native-create", "native-read", "native-cancel"} and value.get("ok") is False:
+            raise SystemExit(2)
     finally:
         db.close()
 
