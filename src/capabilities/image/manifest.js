@@ -111,7 +111,7 @@ export function createImageConsumerReceiver({contract, store, authorize, resolve
       artifactRef:output.artifactRef, sha256:output.sha256, destinationRef:store.targetRef};
     await authorizeArtifactBinding(authorize, binding, clock, authorizationContext);
     // Exclude hash/ref from this key: a changed same-output delivery conflicts instead of re-importing.
-    const key = sha256(canonicalArtifactJSON({jobId,requestDigest,outputId:output.outputId,consumerRef}));
+    const key = imageReceiptStorageKey({jobId,requestDigest,outputId:output.outputId,consumerRef});
     const receiptName = `receipt-${key}.json`, bytesName = `received-${key}.bin`;
     const previous = await store.read(receiptName);
     let receipt;
@@ -136,11 +136,13 @@ export function createImageConsumerReceiver({contract, store, authorize, resolve
     // Recheck both before durable byte effects and after that awaited I/O before a receipt.
     await authorizeArtifactBinding(authorize, binding, clock, authorizationContext);
     await store.putImmutable(bytesName,bytes);
-    await authorizeArtifactBinding(authorize, binding, clock, authorizationContext);
+    const finalProof = await authorizeArtifactBinding(authorize, binding, clock, authorizationContext);
     if (receipt) return {receipt, reused:true};
+    const receivedAt=clock();
+    assertArtifact(Date.parse(receivedAt)<Date.parse(finalProof.expiresAt),'AUTHORIZATION_EXPIRED');
     receipt = contract.validateImageReceipt({schemaVersion:'chatbridge.image.receipt.v1', receiptId:`receipt-${key}`,
       consumerRef, jobId, requestDigest, outputId:output.outputId, artifactRef:output.artifactRef,
-      sha256:output.sha256, receivedAt:clock(), status:'RECEIVED', reason:null});
+      sha256:output.sha256, receivedAt, status:'RECEIVED', reason:null});
     try { await store.putImmutable(receiptName,Buffer.from(canonicalArtifactJSON(receipt))); }
     catch (error) {
       if (error.code !== 'STORE_CONFLICT') throw error;
@@ -151,6 +153,31 @@ export function createImageConsumerReceiver({contract, store, authorize, resolve
     }
     return {receipt, reused:false};
   }});
+}
+
+export const imageReceiptStorageKey = binding => sha256(canonicalArtifactJSON({
+  jobId:binding.jobId,requestDigest:binding.requestDigest,outputId:binding.outputId,consumerRef:binding.consumerRef,
+}));
+
+/** Historical observation only. The coordinator owns authentication and destination binding.
+ * Never fetch, repair a missing copy, manufacture a receipt, or infer receipt from bytes.
+ */
+export async function readImageConsumerReceipt({contract,store,jobId,requestDigest,output,consumerRef,windows,at}) {
+  const key=imageReceiptStorageKey({jobId,requestDigest,outputId:output.outputId,consumerRef});
+  const raw=await store.read(`receipt-${key}.json`);
+  if (!raw) return {receipt:null,copyHealth:'UNKNOWN',reason:'RECEIPT_NOT_FOUND'};
+  let receipt;
+  try { receipt=contract.validateImageReceipt(JSON.parse(raw.toString('utf8'))); }
+  catch { throw artifactError('STORE_CORRUPT'); }
+  const received=Date.parse(receipt.receivedAt);
+  assertArtifact(receipt.receiptId===`receipt-${key}` && receipt.jobId===jobId && receipt.requestDigest===requestDigest &&
+    receipt.outputId===output.outputId && receipt.consumerRef===consumerRef && receipt.artifactRef===output.artifactRef &&
+    receipt.sha256===output.sha256 && receipt.status==='RECEIVED' && receipt.reason===null && received<=Date.parse(at) &&
+    windows.some(window=>received>=Date.parse(window.from) && received<Date.parse(window.to)), 'RECEIPT_BINDING');
+  const bytes=await store.read(`received-${key}.bin`);
+  if (!bytes) return {receipt,copyHealth:'MISSING',reason:'RECEIVER_COPY_MISSING'};
+  const valid=bytes.length===output.byteLength && sha256(bytes)===output.sha256;
+  return {receipt,copyHealth:valid?'VERIFIED':'CORRUPT',reason:valid?null:'RECEIVER_COPY_CORRUPT'};
 }
 
 /** Build A's export event from a persisted snapshot. It performs no coordinator call. */

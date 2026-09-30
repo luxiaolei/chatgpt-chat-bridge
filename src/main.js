@@ -2440,6 +2440,10 @@ async function runNativeImage(action,payload) {
   if(callerContext && (callerContext.requestDigest!==job.requestDigest || contract.canonicalImageJSON(callerContext.route)!==contract.canonicalImageJSON(job.route)))throw new Error("IMAGE_CALLER_SCOPE_MISMATCH");
   const route=job.route,chat=resolveChat(reg,route.sessionRef,route.project,route.accountAlias);
   if((chat.conversationId||chat.id)!==route.conversationId || accountScope(reg,chat.account)!==route.accountId || chat.status!=="active") throw new Error("IMAGE_ROUTE_MISMATCH");
+  if(action==="start" && job.request.inputs.length===2) {
+    const gate=execution.imageExecutionGate(job.request,job.capabilities);
+    if(!gate.allowed)return {ok:false,status:"BLOCKED",reason:gate.reason,retryAllowed:false};
+  }
   const io=await artifacts.createHostImageArtifacts({api,key,recovery,stateDir:STATE_DIR,contract,coordinated,callerContext,
     decoderExecutable:globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__?.runtimeConfig?.decoderExecutable});
   const withUi=async(expected,callback)=>{
@@ -2509,7 +2513,11 @@ async function runNativeImage(action,payload) {
   if(action==="assist-observe") {
     await io.assertOperator(payload.operatorRef);
     const current=await api.inspect(key),attempt=current.attempts.at(-1),proof=payload.officialSave;
-    if(!attempt || attempt.capabilities.features[current.request.operation].mode!=="ASSISTED") throw new Error("IMAGE_ASSISTED_MODE_REQUIRED");
+    if(!attempt) throw new Error("IMAGE_ASSISTED_MODE_REQUIRED");
+    if(current.request.inputs.length===2) {
+      const gate=execution.imageExecutionGate(current.request,attempt.capabilities);
+      if(!gate.allowed || gate.mode!=="ASSISTED") throw new Error("IMAGE_ASSISTED_MODE_REQUIRED");
+    } else if(attempt.capabilities.features[current.request.operation].mode!=="ASSISTED") throw new Error("IMAGE_ASSISTED_MODE_REQUIRED");
     if(proof?.confirmed!==true || proof.relationshipConfirmed!==true || proof.requestDigest!==current.requestDigest ||
         proof.attemptId!==attempt.attemptId || contract.canonicalImageJSON(proof.route)!==contract.canonicalImageJSON(route)) throw new Error("IMAGE_OFFICIAL_SAVE_ATTESTATION_REQUIRED");
     if(recovery && (proof.userMessageId!==recovery.userMessageId || proof.turnId!==recovery.turnId))throw new Error("IMAGE_RECOVERY_TURN_BINDING");
@@ -2521,8 +2529,16 @@ async function runNativeImage(action,payload) {
       if(users.length!==1 || users[0].id!==proof.userMessageId || proof.parentUserId!==users[0].id || proof.promptHash!==promptHash) throw new Error("IMAGE_USER_TURN_UNVERIFIED");
       const tail=snapshot.messages.slice(snapshot.messages.indexOf(users[0])+1),assistants=tail.filter(message=>message.role==="assistant" && !baseline.has(message.id));
       if(tail.some(message=>message.role==="user") || assistants.length!==1 || assistants[0].id!==proof.turnId || attempt.turnId && attempt.turnId!==proof.turnId) throw new Error("IMAGE_ASSISTANT_TURN_AMBIGUOUS");
-      let sourceBinding=null;
-      if(current.request.inputs.length) {
+      let sourceBinding=null,sourceBindings=null;
+      if(current.request.inputs.length===2) {
+        const resolved=await execution.resolveAssistedImageInputs(current.request,{api,key,resolveSource:io.resolveSource});
+        if(!Array.isArray(proof.inputs) || proof.inputs.length!==current.request.inputs.length) throw new Error("IMAGE_ASSISTED_INPUT_ATTESTATION_REQUIRED");
+        sourceBindings=current.request.inputs.map((source,index)=>{
+          const item=proof.inputs[index];
+          if(item?.confirmed!==true || contract.canonicalImageJSON(item.source)!==contract.canonicalImageJSON(source) || item.sourceTurnId!==resolved[index].turnId) throw new Error("IMAGE_ASSISTED_INPUT_ATTESTATION_REQUIRED");
+          return {source,sourceTurnId:resolved[index].turnId,inputConfirmed:true,proof:"authorized-owner-upload-attestation"};
+        });
+      } else if(current.request.inputs.length) {
         const source=current.request.inputs[0],resolved=await io.resolveSource(source);
         if(proof.input?.confirmed!==true || contract.canonicalImageJSON(proof.input.source)!==contract.canonicalImageJSON(source) || proof.input.sourceTurnId!==resolved.turnId) throw new Error("IMAGE_ASSISTED_INPUT_ATTESTATION_REQUIRED");
         sourceBinding={source,sourceTurnId:resolved.turnId,inputConfirmed:true,proof:"authorized-owner-upload-attestation"};
@@ -2535,7 +2551,7 @@ async function runNativeImage(action,payload) {
         requestDigest:current.requestDigest,attemptId:attempt.attemptId,promptHash,userMessageId:users[0].id,turnId:proof.turnId,
         parentUserId:proof.parentUserId,relationshipConfirmed:true,nativeParentProof:false,nativeAssetProof:false,
         outputId,originalRef:payload.originalRef,sha256:verified.sha256,width:verified.width,height:verified.height,
-        sourceBinding,
+        ...(sourceBindings?{sourceBindings}:{sourceBinding}),
         sourceHashes:current.request.inputs.map(input=>input.sha256),sourceTurnId:current.sourceTurnId,
         parentOutputId:current.request.baseRevision?.outputId||null,baseRevisionId:current.request.baseRevision?.revisionId||null});
       await io.admit('observe');
@@ -2576,7 +2592,7 @@ async function runNativeImage(action,payload) {
       if(occupancy.occupied && !occupancy.reservedByJob || phase!=="before-reservation" && !occupancy.reservedByJob) throw new Error("IMAGE_SESSION_OCCUPIED_RECONCILE_ONLY");
     },
   });
-  if(action==="start" && job.capabilities.features[job.request.operation].mode==="ASSISTED") await io.assertOperator(payload.operatorRef);
+  if(action==="start" && (job.request.inputs.length===2?execution.imageExecutionGate(job.request,job.capabilities).mode:job.capabilities.features[job.request.operation].mode)==="ASSISTED") await io.assertOperator(payload.operatorRef);
   const result=await artifacts.imageCli(action,payload,{coordinated,executor});
   return result.action==="MANUAL_SEND_REQUIRED"?{...result,...await io.prepareInbox()}:result;
 }

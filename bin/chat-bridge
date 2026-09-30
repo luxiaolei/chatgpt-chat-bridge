@@ -57,11 +57,21 @@ if [[ "$CMD" == "image" ]]; then
   if [[ "$SUB" == "batch" ]]; then
     exec node "$IMAGE_CLI" "batch-${3:-inspect}"
   fi
+  if [[ "$SUB" == "delivery" ]]; then
+    exec node "$IMAGE_CLI" "delivery-${3:-receipt}"
+  fi
   if [[ "$SUB" == "recovery" ]]; then
     exec node "$IMAGE_CLI" "recovery-${3:-admission}"
   fi
   if [[ "$SUB" == "start" || "$SUB" == "reconcile" || "$SUB" == "characterize" || "$SUB" == "download-original" || "$SUB" == "assist-observe" ]]; then
-    IMAGE_PREPARED="$(node "$IMAGE_CLI" prepare "$SUB")"
+    IMAGE_PREPARE_STATUS=0
+    IMAGE_PREPARED="$(node "$IMAGE_CLI" prepare "$SUB")" || IMAGE_PREPARE_STATUS=$?
+    [[ "$IMAGE_PREPARE_STATUS" == "0" || -n "$IMAGE_PREPARED" ]] || exit "$IMAGE_PREPARE_STATUS"
+    if [[ "$(node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).status||""))' <<<"$IMAGE_PREPARED")" == "BLOCKED" ]]; then
+      print -r -- "$IMAGE_PREPARED"
+      exit "$IMAGE_PREPARE_STATUS"
+    fi
+    [[ "$IMAGE_PREPARE_STATUS" == "0" ]] || exit "$IMAGE_PREPARE_STATUS"
     IMAGE_PROJECT="$(node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).route.project))' <<<"$IMAGE_PREPARED")"
     IMAGE_ACCOUNT="$(node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).route.accountAlias))' <<<"$IMAGE_PREPARED")"
     # Routing is the persisted, authorized job route, never caller/default guesses.

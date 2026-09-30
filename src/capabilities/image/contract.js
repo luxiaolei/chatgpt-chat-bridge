@@ -166,6 +166,8 @@ export function createImageJobAPI({coordinated}) {
     inspect:key=>read('image-inspect',key),
     result:key=>read('image-result',key),
     authorizeIO:key=>read('image-io-admission',key),
+    authorizeDelivery:(key,deliveryGrantId)=>coordinated('image-delivery-io-admission',validateImageShape(copy({...key,deliveryGrantId}),'OutputDeliveryQuery')),
+    deliveryReceipt:(key,deliveryGrantId)=>coordinated('image-delivery-receipt',validateImageShape(copy({...key,deliveryGrantId}),'OutputDeliveryQuery')),
     authorizeRecovery:(key,recovery,action,binding={})=>coordinated('image-output-io-admission',validateImageShape(copy({...key,...recovery,action,...binding}),'OutputRecoveryQuery')),
     sessionOccupancy:(session,key)=>coordinated('image-session-occupancy',validateImageShape(copy({session:{accountId:session.accountId,conversationId:session.conversationId},...(key === undefined ? {} : {key})}),'SessionOccupancyQuery')),
     beginAttempt:(key,event)=>apply('beginAttempt',key,event),
@@ -176,8 +178,13 @@ export function createImageJobAPI({coordinated}) {
   });
 }
 
+function requireOrdinaryGrant(grant) {
+  if (grant.kind === 'OUTPUT_RECOVERY') fail('IMAGE_RECOVERY_EFFECT_FORBIDDEN');
+  if (grant.kind === 'OUTPUT_DELIVERY') fail('IMAGE_DELIVERY_EFFECT_FORBIDDEN');
+}
+
 export function normalizeImageGrant(input, at = new Date().toISOString()) {
-  if (input.kind === 'OUTPUT_RECOVERY') fail('IMAGE_RECOVERY_EFFECT_FORBIDDEN');
+  requireOrdinaryGrant(input);
   const request = normalizeImageRequest(input.request);
   const grant = copy({...input,request,capabilities:input.capabilities ?? unknownImageCapabilities(request.route)});
   validateImageShape(grant,'Grant');
@@ -197,8 +204,18 @@ export function normalizeOutputRecoveryGrant(input, at = new Date().toISOString(
   return grant;
 }
 
+/** Receive-only authority; the coordinator validates the actual saved output and retention ceiling. */
+export function normalizeOutputDeliveryGrant(input, at = new Date().toISOString()) {
+  const grant=validateImageShape(copy(input),'OutputDeliveryGrant');
+  const lifetime=Date.parse(grant.expiresAt)-Date.parse(at);
+  if (!(lifetime > 0 && lifetime <= 3600000)) fail('IMAGE_DELIVERY_EXPIRY');
+  if (grant.grantId === grant.key.grantId || grant.output.jobId !== grant.key.jobId) fail('IMAGE_DELIVERY_BINDING');
+  if (!/^(artifact|store|urn):[A-Za-z0-9][A-Za-z0-9._:-]{0,490}$/.test(grant.destinationRef)) fail('IMAGE_DELIVERY_DESTINATION');
+  return grant;
+}
+
 export function initialImageJob(grant, at = new Date().toISOString()) {
-  if (grant.kind === 'OUTPUT_RECOVERY') fail('IMAGE_RECOVERY_EFFECT_FORBIDDEN');
+  requireOrdinaryGrant(grant);
   const request = normalizeImageRequest(grant.request), gate = imageCapabilityGate(request,grant.capabilities,at);
   return {schemaVersion:IMAGE_SCHEMA_VERSION,jobId:request.jobId,requestDigest:request.requestDigest,
     controllerTaskId:grant.controllerTaskId,controllerOperationId:grant.controllerOperationId,grantId:grant.grantId,
@@ -237,7 +254,7 @@ function addWarning(job,warning) {if (!job.warnings.includes(warning)) job.warni
  * No UI call is made here. beginAttempt writes UNKNOWN before the adapter may send.
  */
 export function applyImageEvent(record, event, grant, {at = new Date().toISOString(),grantActive = true} = {}) {
-  if (grant.kind === 'OUTPUT_RECOVERY') fail('IMAGE_RECOVERY_EFFECT_FORBIDDEN');
+  requireOrdinaryGrant(grant);
   validateEvent(event);
   if (event.expectedRevision !== record.revision) fail('IMAGE_REVISION_CONFLICT');
   const job=copy(record), request=job.request;
@@ -360,6 +377,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const value=JSON.parse(raw), action=process.argv[2];
     const result=action === 'normalize'?normalizeImageRequest(value.request):
       action === 'grant'?normalizeImageGrant(value.grant,value.at):
+      action === 'delivery-grant'?normalizeOutputDeliveryGrant(value.grant,value.at):
+      action === 'delivery-query'?validateImageShape(value,'OutputDeliveryQuery'):
       action === 'recovery-grant'?normalizeOutputRecoveryGrant(value.grant,value.at):
       action === 'recovery-query'?validateImageShape(value,'OutputRecoveryQuery'):
       action === 'initial'?initialImageJob(value.grant,value.at):

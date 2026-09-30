@@ -1,4 +1,4 @@
-# ChatGPT / Ego single-image adapter
+# ChatGPT / Ego image adapter
 
 ## Current source behavior
 
@@ -37,8 +37,15 @@ then sole reservation/current authority before the click. Upload performs its
 corresponding current admission after the awaited file-control lookup and before
 `setInputFiles`. Changed human draft/route/input/baseline or revoked authority
 never reaches those effects; an already reserved ambiguous attempt stays UNKNOWN.
-Only one image and one source are supported. Masks, multiple references, batch
-outputs and temporary/unknown conversations remain explicitly unsupported.
+Native execution supports one output and one source. Exactly two inputs are
+supported for ASSISTED edit only: ordered `source`, then `reference`, count 1,
+mask null. Both existing Bridge originals require current ordinary source
+authority, exact technical revisions and complete byte/record verification.
+The `multiReference` feature needs model/route-bound ASSISTED evidence; a NATIVE
+multi-reference claim is explicitly BLOCKED before Ego bootstrap, reservation
+or effects. Masks, regions, third inputs, multi-reference refine, batch outputs
+and temporary/unknown conversations remain explicitly unsupported. This
+implemented manual path is not native upload or regional-edit evidence.
 
 The C exporter performs complete decode, MIME/magic/hash/dimension/count checks,
 immutable storage and portable manifest creation. B then calls A's export
@@ -112,6 +119,14 @@ upload, Send, Retry or Stop. Its result contains:
 - `originalPath` and `originalRef` for the private attempt-bound official Save inbox.
 - For edit/refine, `manualInput` resolved from the currently authorized verified
   Bridge artifact, including its real byte hash, revision, source turn and MIME.
+- For two-input edit, complete ordered `manualInputs` contains both independently
+  resolved originals. `manualInput` remains the first-source alias; it cannot
+  attest the second input. Per-file and combined ceilings are **10 MiB
+  (10,485,760 bytes)**. The combined limit shares the existing single-input byte
+  envelope rather than multiplying it. Sizes come from fresh ordinary authority's
+  verified output records, never caller metadata; the normal host resolver
+  independently verifies those exact original bytes. Both are checked before
+  reservation and freshly resolved again before returning the manual handoff.
 
 The exact host/controller owner reviews that result, uses the dedicated T, and
 performs the one manual prompt/input submission. A lost/ambiguous Send stays
@@ -171,6 +186,20 @@ comes from the returned `manualInput`. The authorized owner thereby declares
 which original was actually uploaded; the adapter independently re-resolves and
 fully verifies its current bytes and binding. This remains ASSISTED input
 evidence, not native upload provenance.
+
+For two-input edit, `officialSave.inputs` must be an array of exactly two
+`{confirmed:true,source,sourceTurnId}` entries in the request order. Each `source`
+is the complete corresponding granted object, including its role and immutable
+revision; each turn comes from the corresponding `manualInputs` entry. A single
+`officialSave.input`, missing item, changed role/source/turn or reordered array
+is rejected. The original owner and actual user/assistant/prompt/original checks
+remain mandatory. `assist-observe` freshly resolves both originals, checks the
+same verified size budget, and stores both ordered owner attestations. Exported
+`sourceHashes` and technical revision inputs retain the full sequence; the first
+source remains the base parent. This declares the owner's actual manual upload
+order and role assignment; it does not prove native attachment identity, model
+consumption of those roles or regional/unchanged-pixel guarantees. Those still
+need separately authorized real UI and official-original acceptance evidence.
 
 `import-original` accepts only that private attempt-bound inbox/ref and the
 current original owner. It rechecks exact candidate/attempt/turn/hash/MIME and

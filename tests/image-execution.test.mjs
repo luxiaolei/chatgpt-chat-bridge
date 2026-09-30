@@ -13,12 +13,12 @@ test('generation remains UNKNOWN until feature-specific native observation is in
   const p=imageExecutionProbe(request().route);assert.equal(p.nativeReady,false);assert.equal(p.capabilities.features.generate.mode,'UNKNOWN');
   assert.equal(p.originalExport.status,'EXPORT_UNAVAILABLE');assert.equal(p.businessApproval,'NOT_EVALUATED');
 });
-test('single-image boundary refuses multi-output, multiple refs, masks and reference generation',()=>{
+test('execution boundary refuses multi-output, duplicate refs, masks and reference generation',()=>{
   const source={artifactRef:'artifact:fixture:source',sha256:'2'.repeat(64),revisionId:'r1',jobId:null,outputId:null};
   const edit={operation:'edit',inputs:[{...source,role:'source'}],baseRevision:source};
   assert.equal(normalizeExecutionRequest(request(edit)).operation,'edit');
   assert.throws(()=>normalizeExecutionRequest(request({count:2})),/COUNT_UNSUPPORTED/);
-  assert.throws(()=>normalizeExecutionRequest(request({...edit,inputs:[...edit.inputs,{...source,artifactRef:'artifact:other',role:'reference'}]})),/MULTI_REFERENCE/);
+  assert.throws(()=>normalizeExecutionRequest(request({...edit,inputs:[...edit.inputs,{...source,artifactRef:'artifact:other',role:'reference'}]})),/DUPLICATE_INPUT/);
   assert.throws(()=>normalizeExecutionRequest(request({inputs:[{...source,role:'reference'}]})),/REFERENCE_GENERATION/);
   const mask={artifactRef:'artifact:mask',sha256:'3'.repeat(64),sourceSha256:source.sha256,sourceRevisionId:'r1',width:16,height:16,coordinateSpace:'source-pixels',mode:'native-region'};
   assert.throws(()=>normalizeExecutionRequest(request({...edit,mask})),/MASK_UNSUPPORTED/);
