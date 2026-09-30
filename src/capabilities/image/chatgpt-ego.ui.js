@@ -23,10 +23,11 @@ export async function inspectEgoImagePage(page) {
     const messages=[],seen=new Map(),owners=new Map();let messagesIncompleteReason=null;
     const incomplete=reason=>{messagesIncompleteReason ||= reason;};
     for(const node of nodes) {
+      if(node.closest('form')) continue;
       let role=roleOf(node);
       if(!role) {
         const galleries=[...node.querySelectorAll(gallerySelector)].filter(gallery=>gallery.closest('[data-chatgpt-search-message-ids]')===node);
-        if(!galleries.length || node.closest('form')) continue;
+        if(!galleries.length) continue;
         role=roleOf(node.closest(roleSelector));
         if(role==='user') continue; // Input thumbnails do not add assistant turns.
         if(!galleries.some(visible)) {if(!role)incomplete('IMAGE_DOM_IMAGE_NOT_VISIBLE');continue;}
@@ -34,6 +35,7 @@ export async function inspectEgoImagePage(page) {
           // Image-only replies expose an ID wrapper and an explicit role heading
           // in the same public turn, without a role-bearing message unit.
           const turn=node.closest('[data-content-search-turn-key]');
+          if(!turn) {incomplete('IMAGE_DOM_IMAGE_ROLE_UNVERIFIED');continue;}
           let region=node.parentElement;
           while(region && region!==turn && ![...region.children].some(child=>child.getAttribute('data-conversation-role'))) region=region.parentElement;
           const markers=[...(region && region!==turn?region.querySelectorAll(roleSelector+', [data-conversation-role]'):[])].filter(marker=>

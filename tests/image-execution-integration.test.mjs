@@ -256,10 +256,10 @@ test('public image-only wrappers join mixed message layouts in DOM order and kee
     location:{href:'https://chatgpt.com/c/11111111-1111-1111-1111-111111111111'},navigator:{onLine:true},getComputedStyle:()=>({display:'block',visibility:'visible'})};
   const prior=new Map(Object.keys(values).map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
   const imageId='73f067bf-47c0-47fa-a2ef-20ac32a6ed82',r=request(),attempt={attemptId:'attempt-fixture',baselineTurnIds:['old-user','old-assistant']};
-  const good=['image-only','repeated-identical','nested-identical','nested-role-alias','input-thumbnail','composer-thumbnail','multiple-galleries'];
+  const good=['image-only','repeated-identical','nested-identical','nested-role-alias','input-thumbnail','composer-thumbnail','composer-role-thumbnail','composer-search-thumbnail','multiple-galleries'];
   try {
     for(const [key,value] of Object.entries(values))Object.defineProperty(globalThis,key,{value,configurable:true});
-    for(const mode of [...good,'distinct-ids','duplicate-wrapper','nested-distinct','missing-id','missing-role','heading-after','unrelated-heading','intervening-user','conflicting-role','preview-only','hidden-gallery','selection-conflict','identity-conflict']) {
+    for(const mode of [...good,'distinct-ids','duplicate-wrapper','nested-distinct','missing-id','missing-role','missing-turn','heading-after','unrelated-heading','intervening-user','conflicting-role','preview-only','hidden-gallery','selection-conflict','identity-conflict']) {
       const preview=()=>element({tag:'BUTTON','data-testid':'generated-image-preview','aria-label':'Generated image 1'},'',[
         element({tag:'IMG',alt:'generated original',src:'https://private/preview'})]);
       const gallery=()=>element({'data-testid':'generated-image-gallery',...(mode==='hidden-gallery'?{hidden:''}:{})},'',[preview()]);
@@ -285,8 +285,12 @@ test('public image-only wrappers join mixed message layouts in DOM order and kee
         element({'data-message-author-role':'user','data-message-id':'old-user'},'Old prompt'),
         element({'data-chatgpt-search-unit-key':'fallback-turn-1:1:assistant','data-chatgpt-search-message-ids':'old-assistant old-assistant'},'',[
           element({'data-content-search-unit-key':'fallback-turn-1:1:assistant','data-chatgpt-selection-message-id':mode==='selection-conflict'?'other-id':'old-assistant'})]),
-        element({'data-content-search-turn-key':'fallback-turn-2'},'',[user,element({},'',region)]),
-        ...(mode==='composer-thumbnail'?[element({tag:'FORM'},'',[element({'data-chatgpt-search-message-ids':'composer-input-id'},'',[gallery()])])]:[]),
+        element(mode==='missing-turn'?{}:{'data-content-search-turn-key':'fallback-turn-2'},'',[user,element({},'',region)]),
+        ...(mode.startsWith('composer-')?[element({tag:'FORM'},'',[element({
+          'data-chatgpt-search-message-ids':'composer-input-id',
+          ...(mode==='composer-role-thumbnail'?{'data-message-author-role':'assistant'}:{}),
+          ...(mode==='composer-search-thumbnail'?{'data-chatgpt-search-unit-key':'input-preview:assistant'}:{}),
+        },'',[gallery()])])]:[]),
       ]);
       const result=await inspectEgoImagePage({evaluate:async(fn,arg)=>fn(arg)}),complete=good.includes(mode);
       assert.equal(result.messagesComplete,complete,mode);
@@ -299,7 +303,7 @@ test('public image-only wrappers join mixed message layouts in DOM order and kee
         assert.equal(classifyImageObservation({request:r,attempt,snapshot:observed}).reason,'IMAGE_PARENT_USER_UNVERIFIED');
       } else {
         assert.match(result.messagesIncompleteReason,/^IMAGE_DOM_/i,mode);
-        if(mode==='hidden-gallery')assert.equal(result.messages.some(message=>message.id===imageId),false);
+        if(mode==='hidden-gallery'||mode==='missing-turn')assert.equal(result.messages.some(message=>message.id===imageId),false);
         assert.throws(()=>assertImageSnapshot(r,{...snapshot(r),...result}),/IMAGE_TURN_EVIDENCE_INCOMPLETE/,mode);
       }
       assert.doesNotMatch(JSON.stringify(result),/private\/preview|generated original|Localized role heading/);
