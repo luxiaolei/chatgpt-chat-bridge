@@ -223,6 +223,32 @@ test('proven pre-send failure releases only its reservation and legacy conflicti
  const other=f.request({jobId:'image-2'}),pending=f.setup(other,f.grant(other,'grant-2'));assert.equal(f.begin(pending.key,pending.job).effectAdmission,'NEWLY_RESERVED');
 }));
 
+test('positive completion stays settled after export failure while a merely generating turn stays occupied',withFixture(f=>{
+ let {r,key,job}=f.setup();job=f.begin(key,job);
+ job=f.api.record(key,{eventId:'in-progress',expectedRevision:job.revision,attemptId:'attempt-1',route:r.route,
+  status:'GENERATING',userMessageId:'new-user',turnId:'new-assistant',evidenceRef:'artifact:fixture:in-progress'});
+ assert.equal(f.api.sessionOccupancy(r.route).occupied,true);
+ job=f.generated(key,job);assert.equal(f.api.sessionOccupancy(r.route).occupied,false);
+ for(const status of ['EXPORT_UNAVAILABLE','FAILED']) {
+  job=f.api.record(key,{eventId:'after-completion-'+status,expectedRevision:job.revision,attemptId:'attempt-1',route:r.route,
+   status,evidenceRef:'artifact:fixture:export-failure'});
+  assert.deepEqual(job.attempts[0].candidateOutputIds,['output-1']);
+  assert.deepEqual(f.api.sessionOccupancy(r.route,key),{occupied:false,reservedByJob:false});
+  assert.throws(()=>f.api.record(key,{eventId:'regress-'+status,expectedRevision:job.revision,attemptId:'attempt-1',route:r.route,
+   status:'GENERATING',userMessageId:'new-user',turnId:'new-assistant',evidenceRef:'artifact:fixture:stale-progress'}),/IMAGE_GENERATION_ALREADY_OBSERVED/);
+ }
+ const other=f.request({jobId:'image-2'}),pending=f.setup(other,f.grant(other,'grant-2'));
+ assert.equal(f.begin(pending.key,pending.job).effectAdmission,'NEWLY_RESERVED');
+}));
+
+test('known completed originals can recover export after a transient export failure',withFixture(f=>{
+ let {r,key,job}=f.setup();job=f.generated(key,f.begin(key,job));
+ job=f.api.record(key,{eventId:'export-unavailable',expectedRevision:job.revision,attemptId:'attempt-1',route:r.route,
+  status:'EXPORT_UNAVAILABLE',evidenceRef:'artifact:fixture:expired-link'});
+ job=f.exported(key,job);assert.equal(job.status,'TECHNICALLY_VALIDATED');assert.equal(job.outputs.length,1);
+ assert.equal(f.api.sessionOccupancy(r.route).occupied,false);
+}));
+
 test('occupancy reads enforce origin/key scope and never initialize image tables, stores or projections',withFixture(async f=>{
  const r=f.request(),session={accountId:r.route.accountId,conversationId:r.route.conversationId},query={session};
  const before=f.sql('select name from sqlite_master order by name'),projection=await readFile(path.join(f.config,'registry.json'),'utf8');
