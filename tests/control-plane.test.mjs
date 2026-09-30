@@ -171,6 +171,9 @@ test("transient pre-send retry stops at the limit and becomes visible for review
   try{
     const parse=r=>{ assert.equal(r.status,0,r.stderr); return JSON.parse(r.stdout); };
     const first=parse(f.call("submit",[],{requestId:"pre-limit",callerRef:"controller",role:"worker",taskId:"PRE-LIMIT",message:"one"}));
+    // Pacing/capacity claims are not failed send attempts.
+    const waits=spawnSync("python3",["-c","import sqlite3,sys;db=sqlite3.connect(sys.argv[1]);db.execute('update operations set attempts=20');db.commit()",path.join(f.state,"bridge.sqlite3")],{encoding:"utf8"});
+    assert.equal(waits.status,0,waits.stderr);
     const fail=()=>f.call("work-one",[],null,{CHAT_BRIDGE_TEST_FAIL_STAGE:"PRE_SEND",CHAT_BRIDGE_TEST_FAIL_CODE:"MODEL_MENU_NOT_READY"});
     assert.equal(parse(fail()).status,"QUEUED");
     for(let attempt=0;attempt<1;attempt++){
@@ -184,6 +187,8 @@ test("transient pre-send retry stops at the limit and becomes visible for review
     const status=parse(f.call("control",["status","--project","P"])).projects[0];
     assert.equal(status.operationSummary.failedPreSend,1);
     assert.equal(status.completion.state,"NO_KNOWN_WORK");
+    assert.equal(parse(f.call("retry",["--operation",first.operationId])).status,"QUEUED");
+    assert.equal(parse(fail()).status,"QUEUED");
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
@@ -226,6 +231,34 @@ test("unknown dispatch, callback and management require exact bound Chat evidenc
     assert.equal(audit.status,0,audit.stderr);
     assert.equal(audit.stdout.trim(),"4\nDELIVERED\nDELIVERED");
   } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test("queued notifications wait for a committed successor and then follow it", async()=>{
+  for(const kind of ["management","callback"]) {
+    const f=await fixture();
+    try {
+      const parse=r=>{assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);};
+      let op;
+      if(kind==="management") op=parse(f.call("control",["broadcast","--project","P","--message","continue","--event","rotation-wake","--confirm"])).deliveries[0];
+      else {
+        const task=parse(f.call("submit",[],{requestId:"rotation-task",callerRef:"controller",role:"worker",message:"work"}));
+        parse(f.call("cancel",[task.operationId]));
+        op=parse(f.call("result",["--task",task.taskId,"--summary","done","--status","COMPLETE"])).callback;
+      }
+      const sql=script=>{
+        const r=spawnSync("python3",["-c","import sqlite3,json,sys;db=sqlite3.connect(sys.argv[1]);"+script+";db.commit()",path.join(f.state,"bridge.sqlite3")],{encoding:"utf8"});
+        assert.equal(r.status,0,r.stderr);
+      };
+      sql("reg=json.loads(db.execute(\"select payload from documents where kind='registry'\").fetchone()[0]);reg['chats']['controller']['status']='retired';reg['chats']['successor']={**reg['chats']['controller'],'id':'successor','status':'active'};db.execute(\"update documents set payload=? where kind='registry'\",(json.dumps(reg),))");
+      assert.equal(parse(f.call("work-one")).status,"WAITING_ROUTE");
+      assert.equal(parse(f.call("status",[op.operationId])).status,"WAITING_ROUTE");
+      sql("db.execute(\"insert into session_successors values(?,?,?,?,?)\",('controller','project:P:role:conductor','successor',2,'2026-09-30T00:00:00Z'))");
+      const sent=parse(f.call("work-one"));
+      assert.equal(sent.status,"SENT");assert.equal(sent.sessionRef,"successor");
+      assert.match(await readFile(f.log,"utf8"),/^send successor /m);
+      if(kind==="management") assert.equal(parse(f.call("control",["ack","--event","rotation-wake","--caller-ref","successor","--status","ACKNOWLEDGED","--message","received"])).status,"ACKNOWLEDGED");
+    } finally {await rm(f.root,{recursive:true,force:true});}
+  }
 });
 
 test("retired management target is superseded only after a committed controller successor", async()=>{
@@ -680,6 +713,7 @@ test("control status distinguishes no work, in progress, awaiting ACK and comple
     assert.deepEqual(initialStatus.admission,{mode:"RUNNING",acceptingNewWork:true,reason:null});
     assert.deepEqual(initialStatus.attention,{blockedTasks:0,failedTasks:0,unknownOperations:0,pendingBusiness:0,
       pendingCallbacks:0,pendingManagement:0,awaitingControllerAck:0,awaitingDurable:0});
+    assert.equal(initialStatus.execution.state,"IDLE");
 
     let get=spawnSync("python3",[path.resolve("src/state-store.py"),"get",f.config,f.state,"runtime"],{encoding:"utf8"});
     let base=JSON.parse(get.stdout), next=structuredClone(base);
@@ -689,12 +723,16 @@ test("control status distinguishes no work, in progress, awaiting ACK and comple
       input:JSON.stringify({base,next}),encoding:"utf8"});
     assert.equal(put.status,0,put.stderr);
     r=f.call("control",["status","--project","P"]);
-    assert.equal(JSON.parse(r.stdout).projects[0].completion.state,"IN_PROGRESS");
+    const running=JSON.parse(r.stdout).projects[0];
+    assert.equal(running.completion.state,"IN_PROGRESS");
+    assert.equal(running.execution.state,"RUNNING_STALE");
 
     r=f.call("result",["--task","ts","--status","COMPLETE","--summary","done","--result-version","1"]);
     assert.equal(r.status,0,r.stderr);
     r=f.call("control",["status","--project","P"]);
-    assert.equal(JSON.parse(r.stdout).projects[0].completion.state,"AWAITING_ACK");
+    const awaiting=JSON.parse(r.stdout).projects[0];
+    assert.equal(awaiting.completion.state,"AWAITING_ACK");
+    assert.equal(awaiting.execution.state,"QUEUED");
 
     r=f.call("work-one"); assert.equal(r.status,0,r.stderr);
     r=f.call("ack",["--task","ts","--result-version","1","--caller-ref","controller","--status","ACCEPTED","--message","ok"]);
@@ -703,6 +741,7 @@ test("control status distinguishes no work, in progress, awaiting ACK and comple
     const final=JSON.parse(r.stdout).projects[0];
     assert.equal(final.completion.state,"COMPLETE");
     assert.equal(final.completion.knownComplete,true);
+    assert.equal(final.execution.state,"IDLE");
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
