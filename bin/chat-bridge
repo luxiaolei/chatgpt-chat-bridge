@@ -343,6 +343,9 @@ STORE_PATH="${MAIN:h}/state-store.py"
 STORE_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$STORE_PATH")"
 COORDINATOR_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${MAIN:h}/coordinator.py")"
 IMAGE_MODULE_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${MAIN:h}/capabilities/image/chatgpt-ego.js")"
+NODE_EXECUTABLE="$(command -v node || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" command -v node || true)"
+[[ "$NODE_EXECUTABLE" == /* && -x "$NODE_EXECUTABLE" ]] || { echo '{"ok":false,"code":"NODE_RUNTIME_MISSING","deliveryStage":"PRE_SEND"}' >&2; exit 127; }
+NODE_EXECUTABLE_JSON="$("$NODE_EXECUTABLE" -p 'JSON.stringify(process.execPath)')"
 
 if [[ "$CMD" == "space" && "$SUB" == "restore" && "$(uname -s)" == "Darwin" ]]; then
   EGO_LITE_APP="${EGO_LITE_APP:-/Applications/ego lite.app}"
@@ -359,6 +362,7 @@ set +e
   printf 'globalThis.__CHAT_BRIDGE_STATE_DIR__ = %s;\n' "$STATE_JSON"
   printf 'globalThis.__CHAT_BRIDGE_STORE_PATH__ = %s;\n' "$STORE_JSON"
   printf 'globalThis.__CHAT_BRIDGE_COORDINATOR_PATH__ = %s;\n' "$COORDINATOR_JSON"
+  printf 'globalThis.__CHAT_BRIDGE_NODE_EXECUTABLE__ = %s;\n' "$NODE_EXECUTABLE_JSON"
   printf 'globalThis.__CHAT_BRIDGE_IMAGE_MODULE_PATH__ = %s;\n' "$IMAGE_MODULE_JSON"
   [[ -n "${IMAGE_PREPARED:-}" ]] && printf 'globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__ = %s;\n' "$IMAGE_PREPARED"
   [[ -n "$SPACE_CATALOG_JSON" ]] && printf 'globalThis.__CHAT_BRIDGE_SPACE_CATALOG__ = await import(%s);\n' "$SPACE_CATALOG_JSON"
