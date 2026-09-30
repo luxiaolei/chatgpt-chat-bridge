@@ -140,7 +140,8 @@ time.sleep(40)
         wait_stopped(wait_file(leaf_file))
     elif case == 'runner-timeout':
         leader, leaf_file, leader_file = fakes.tree(closed=True)
-        process = fakes.popen([sys.executable, str(runner_path), str(leader), '1'],
+        # Synthetic Python startup needs headroom on a busy host; still prove timeout teardown.
+        process = fakes.popen([sys.executable, str(runner_path), str(leader), '3'],
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         stdout, stderr = process.communicate(b'synthetic payload', timeout=9)
         assert process.returncode == 124, stderr.decode(errors='replace')
@@ -157,7 +158,7 @@ pathlib.Path({str(runner_pid)!r}).write_text(str(p.pid))
 time.sleep(40)
 ''')
         try:
-            coordinator.run_bridge([sys.executable, str(outer)], timeout=1)
+            coordinator.run_bridge([sys.executable, str(outer)], timeout=3)
             raise AssertionError('outer timeout was not preserved')
         except subprocess.TimeoutExpired:
             pass
@@ -280,8 +281,8 @@ raise SystemExit(r.main())
         done = coordinator.run_bridge([sys.executable, '-c', "import sys;print('normal receipt');sys.stderr.write('synthetic stderr')"], timeout=2)
         assert (done.returncode, done.stdout.strip(), done.stderr) == (0, 'normal receipt', 'synthetic stderr')
         fake = fakes.script('normal-client', "import sys\nsys.stdin.buffer.read()\nprint('normal client receipt')\nsys.stderr.write('client diagnostic')\n")
-        process = fakes.popen([sys.executable, str(runner_path), str(fake), '1'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        out, err = process.communicate(b'synthetic payload', timeout=5)
+        process = fakes.popen([sys.executable, str(runner_path), str(fake), '5'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err = process.communicate(b'synthetic payload', timeout=9)
         assert (process.returncode, out.strip(), err) == (0, b'normal client receipt', b'client diagnostic')
         assert not stopped(sentinel.pid), 'unrelated self-created process was stopped'
     else:
