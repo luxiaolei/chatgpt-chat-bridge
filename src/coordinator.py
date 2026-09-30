@@ -2180,6 +2180,11 @@ def claim(db):
             db.execute("UPDATE operations SET status='DISPATCHING',attempts=attempts+1,claimed_at=?,updated_at=?,reason=NULL WHERE id=?",
                        (time.time(), stamp(), row["id"]))
             row = db.execute("SELECT * FROM operations WHERE id=?", (row["id"],)).fetchone()
+        # Cancellation may arrive while BEGIN waits for another SQLite writer.
+        # Nothing was spawned yet: leave this uncommitted claim queued, not UNKNOWN.
+        if _bridge_interrupted is not None:
+            db.rollback()
+            return None
         db.commit()
         return row
     except Exception:
