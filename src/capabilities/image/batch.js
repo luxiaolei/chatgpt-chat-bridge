@@ -99,11 +99,12 @@ function checkJob(job,link,at) {
  * Admission entries wrap authorizeIO's proof with its exact lookup key + digest;
  * they are inputs, not bearer grants. This function never authenticates or sends.
  */
-export function imageBatchDecision(input,{jobs,receipts,admissions,at} = {}) {
+export function imageBatchDecision(input,{jobs,receipts,admissions,lateReceipts=[],deliveryAdmissions=[],at} = {}) {
   const batch = normalizeImageBatch(input), now = time(at);
   requireValue(now >= time(batch.createdAt), 'TIME');
   requireValue(Array.isArray(jobs) && Array.isArray(receipts) && Array.isArray(admissions), 'AUTHORITATIVE_INPUTS_REQUIRED');
-  const byId = new Map(), proofById = new Map(), receiptById = new Map();
+  const byId = new Map(), proofById = new Map(), receiptById = new Map(), lateReceiptById = new Map(), deliveryById = new Map();
+  requireValue(Array.isArray(lateReceipts) && Array.isArray(deliveryAdmissions), 'AUTHORITATIVE_INPUTS_REQUIRED');
   for (const job of jobs) {
     const link = batch.items.find(i=>i.jobId === job.jobId);
     requireValue(link && !byId.has(job.jobId), 'JOB_LINK');
@@ -121,16 +122,31 @@ export function imageBatchDecision(input,{jobs,receipts,admissions,at} = {}) {
     requireValue(!proof.allowed || proof.expiresAt !== null, 'ADMISSION_EXPIRY');
     proofById.set(job.jobId,proof);
   }
-  for (const receipt of receipts) {
+  function loadReceipts(values,late) {for (const receipt of values) {
     validateImageReceipt(receipt);
     const job = byId.get(receipt.jobId), link = batch.items.find(i=>i.jobId === receipt.jobId);
-    const output = job?.outputs.find(o=>o.outputId === receipt.outputId);
+    const output = (late?job?.lateOutputs:job?.outputs)?.find(o=>o.outputId === receipt.outputId);
     requireValue(output?.validation.status === 'VERIFIED' && receipt.requestDigest === job.requestDigest &&
       receipt.consumerRef === link.consumerRef && receipt.artifactRef === output.artifactRef &&
       receipt.sha256 === output.sha256 && time(receipt.receivedAt) <= now, 'RECEIPT_BINDING');
-    const previous = receiptById.get(receipt.receiptId);
+    const target=late?lateReceiptById:receiptById;
+    const previous = target.get(receipt.receiptId);
     requireValue(!previous || same(previous,receipt), 'RECEIPT_CONFLICT');
-    receiptById.set(receipt.receiptId,receipt);
+    target.set(receipt.receiptId,receipt);
+  }}
+  loadReceipts(receipts,false);loadReceipts(lateReceipts,true);
+  for (const proof of deliveryAdmissions) {
+    fields(proof,['key','requestDigest','outputId','consumerRef','destinationRef','allowed','expiresAt','reason']);
+    validateImageShape(proof.key,'Key');
+    const job=byId.get(proof.key.jobId),link=batch.items.find(i=>i.jobId===job?.jobId);
+    requireValue(job && !deliveryById.has(job.jobId) && same(proof.key,imageJobKey(job.request,job.grantId)) &&
+      proof.requestDigest===job.requestDigest && job.outputs.some(o=>o.outputId===proof.outputId && o.validation.status==='VERIFIED') &&
+      proof.consumerRef===link.consumerRef && typeof proof.allowed==='boolean' &&
+      /^(artifact|store|urn):[A-Za-z0-9][A-Za-z0-9._:-]{0,490}$/.test(proof.destinationRef), 'DELIVERY_BINDING');
+    requireValue(proof.allowed?proof.reason===null:typeof proof.reason==='string' && proof.reason.length>0, 'ADMISSION_REASON');
+    if (proof.expiresAt!==null)time(proof.expiresAt);
+    requireValue(!proof.allowed || proof.expiresAt!==null, 'ADMISSION_EXPIRY');
+    deliveryById.set(job.jobId,proof);
   }
   const attempts = jobs.reduce((n,j)=>n+j.attempts.length,0);
   // UNKNOWN and even proven pre-send failures keep their conservative call reservation.
@@ -141,12 +157,15 @@ export function imageBatchDecision(input,{jobs,receipts,admissions,at} = {}) {
     const job = byId.get(link.jobId), proof = proofById.get(link.jobId), a = job?.attempts.at(-1);
     const item = {...link,jobRevision:job?.revision ?? null,attemptId:a?.attemptId ?? null,turnId:a?.turnId ?? null,
       action:'WAIT',reason:null,reasonCategory:null,outputIds:job?.outputs.map(o=>o.outputId) ?? [],
-      missingOutputIds:a?.candidateOutputIds.filter(id=>!job.outputs.some(o=>o.outputId === id)) ?? [],
-      lateOutputIds:job?.lateOutputs.map(o=>o.outputId) ?? [],receiptIds:[],quotaRemaining:proof?.quotaRemaining ?? null};
+      missingOutputIds:a?.candidateOutputIds.filter(id=>![...job.outputs,...job.lateOutputs].some(o=>o.outputId === id)) ?? [],
+      lateOutputIds:job?.lateOutputs.map(o=>o.outputId) ?? [],receiptIds:[],lateReceiptIds:[],lateDeliveryStatus:'NOT_RECEIVED',quotaRemaining:proof?.quotaRemaining ?? null};
     if (!job) {item.reason='JOB_SNAPSHOT_MISSING';item.reasonCategory='UNKNOWN';return item;}
     const output = job.outputs.find(o=>o.validation.status === 'VERIFIED');
     const matches = [...receiptById.values()].filter(r=>r.jobId === job.jobId);
     item.receiptIds = matches.map(r=>r.receiptId);
+    const lateMatches=[...lateReceiptById.values()].filter(r=>r.jobId===job.jobId);
+    item.lateReceiptIds=lateMatches.map(r=>r.receiptId);
+    if(lateMatches.some(r=>r.status==='RECEIVED'))item.lateDeliveryStatus='RECEIVED';
     if (output) {
       if (verified.has(output.sha256)) duplicateItemIds.push(link.itemId);
       else verified.set(output.sha256,link.itemId);
@@ -154,6 +173,7 @@ export function imageBatchDecision(input,{jobs,receipts,admissions,at} = {}) {
     if (matches.some(r=>r.status === 'RECEIVED')) item.action='AWAIT_CONTROLLER_ACK';
     else if (matches.length) {item.action='BLOCKED';item.reason='RECEIPT_REJECTED';}
     else if (output) item.action='RECEIVE_EXISTING';
+    else if (job.lateOutputs.some(o=>o.validation.status==='VERIFIED')) item.action='REVIEW_LATE_OUTPUT';
     else if (a?.status === 'SUBMISSION_UNKNOWN') item.action='RECONCILE_EXISTING';
     else if (a?.turnId && a.candidateOutputIds.length) item.action=item.missingOutputIds.length ? 'EXPORT_EXISTING' : 'VALIDATE_EXISTING';
     else if (a?.status === 'GENERATING') item.action='OBSERVE_EXISTING';
@@ -162,6 +182,12 @@ export function imageBatchDecision(input,{jobs,receipts,admissions,at} = {}) {
     else item.reason='REMOTE_SETTLEMENT_UNPROVEN';
     // Receipt evidence remains recorded; only the controller can accept it.
     if (['AWAIT_CONTROLLER_ACK','BLOCKED'].includes(item.action)) return item;
+    const delivery=deliveryById.get(job.jobId);
+    if (item.action==='RECEIVE_EXISTING' && delivery && !job.cancelRequestedAt) {
+      if (!delivery.allowed)hold(item,delivery.reason);
+      else if(time(delivery.expiresAt)<=now)hold(item,'IMAGE_DELIVERY_EXPIRED_OR_REVOKED');
+      return item; // Purpose-bound local receive authority never admits a generation.
+    }
     if (job.cancelRequestedAt || ['CANCELLED','CANCEL_REQUESTED'].includes(job.status)) hold(item,'IMAGE_CANCEL_REQUESTED');
     else if (!proof) hold(item,'CURRENT_ADMISSION_REQUIRED');
     else if (!proof.allowed) hold(item,proof.reason);
@@ -188,7 +214,9 @@ export function imageBatchDecision(input,{jobs,receipts,admissions,at} = {}) {
   return immutableArtifactValue({batchId:batch.batchId,batchDigest:batch.batchDigest,recommendationsOnly:true,reservationsPersisted:false,
     status:verified.size === batch.items.length ? 'TECHNICALLY_VALIDATED' : validatedCount ? 'PARTIAL' : 'PENDING',
     expectedCount:batch.items.length,validatedCount,uniqueCount:verified.size,missingCount:batch.items.length-validatedCount,
-    receivedCount:items.filter(i=>i.action === 'AWAIT_CONTROLLER_ACK').length,duplicateItemIds,
+    receivedCount:items.filter(i=>i.action === 'AWAIT_CONTROLLER_ACK').length,
+    lateReceivedCount:items.filter(i=>i.lateDeliveryStatus === 'RECEIVED').length,
+    lateValidatedCount:jobs.filter(j=>j.lateOutputs.some(o=>o.validation.status === 'VERIFIED')).length,duplicateItemIds,
     businessApproval:'NOT_EVALUATED',budgetUsage:{attempts,generationCallReservations:calls},items});
 }
 

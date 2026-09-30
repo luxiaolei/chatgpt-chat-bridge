@@ -57,6 +57,9 @@ if [[ "$CMD" == "image" ]]; then
   if [[ "$SUB" == "batch" ]]; then
     exec node "$IMAGE_CLI" "batch-${3:-inspect}"
   fi
+  if [[ "$SUB" == "delivery" ]]; then
+    exec node "$IMAGE_CLI" "delivery-${3:-receipt}"
+  fi
   if [[ "$SUB" == "recovery" ]]; then
     exec node "$IMAGE_CLI" "recovery-${3:-admission}"
   fi

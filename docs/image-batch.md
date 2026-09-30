@@ -30,13 +30,16 @@ Expired/revoked rights remain holds while historical job/late evidence stays
 visible to its authenticated owner. `revision` is the persisted batch budget
 revision, and `budgetUsage` comes from persisted ImageJob attempts.
 
-The current host has no configured authenticated receiver ledger/read
-integration. The loader explicitly reports
-`receiverEvidence:RECEIVER_EVIDENCE_UNAVAILABLE`, passes an empty receipt array,
-and preserves `RECEIVE_EXISTING`. It rejects caller-provided receipts,
-admissions and job snapshots. Producer manifests and caller JSON cannot create
-`RECEIVED`. The pure function below remains the future integration point for an
-independently authorized receiver loader; that receiver is still unimplemented.
+The loader reads actual controlled local receiver evidence through saved
+OUTPUT_DELIVERY or existing OUTPUT_RECOVERY consumer/destination bindings.
+Without a matching authority it reports RECEIVER_EVIDENCE_UNAVAILABLE; multiple
+destinations report RECEIVER_DESTINATION_AMBIGUOUS. Ordinary receipts count as
+AWAIT_CONTROLLER_ACK. Late receipts/counts remain separate and never promote
+the original job or business status. `deliveries` exposes historical receipts
+and current copy health without fetching or repairing bytes. It rejects
+caller-provided receipts, admissions and jobs. See
+[existing original delivery](image-output-delivery.md) for current receive rights,
+the conservative original retention ceiling and local-only limits.
 
 ```js
 const batch = normalizeImageBatch({
@@ -134,15 +137,16 @@ operation; batch revision alone does not authorize a stale observation/export.
 Execution remains explicit through the original image API and adapter. The
 existing scheduler, account pacing/cooldown, session occupancy, operation/outbox
 and user controls remain the path; no second scheduler or waiting UI lease is
-added. Current I/O authorization also enforces the associated batch deadline
-before subsequent byte effects. No generation or consumer delivery is executed
+added. Ordinary generation/export I/O authorization also enforces the associated batch
+deadline. Fresh output-only delivery is bounded separately by its grant and the
+original retention ceiling; it never extends generation/export rights. No generation or consumer delivery is executed
 by a local batch decision.
 
 Post-send replacement attempts remain unsupported until A/B provide explicit
 remote zero-output settlement evidence that the current occupancy gate can
 consume. FAILED, idle, cancellation and expiry are insufficient. No new job,
 grant or account alias may bypass that gate. Paid API/fee enforcement, actual
-receiver transport/rights, live host/account/Project/turn correlation, canary,
+remote receiver transport/rights, live host/account/Project/turn correlation, canary,
 installation and deployment require their own evidence.
 
 Run the focused offline checks with

@@ -227,45 +227,69 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
     need(!current.request.inputs.some(source=>source.sha256===verified.sha256),'IMAGE_SOURCE_IMAGE_REUSED');
     return verified;
   }
-  async function receiveExisting(binding) {
-    need(recovery,'IMAGE_RECOVERY_REQUIRED');
-    const authority=await admit('receive',binding),output=authority.output;
-    need(output.byteLength<=authority.maxByteLength,'IMAGE_RECOVERY_BYTE_BUDGET');
+  async function receiveAuthorized(loadAuthority) {
+    const authority=await loadAuthority(),output=authority.output;
+    const binding={consumerRef:authority.consumerRef,destinationRef:authority.destinationRef};
+    need(output.byteLength<=authority.maxByteLength,'IMAGE_RECEIVER_BYTE_BUDGET');
     const destination=path.join(stateDir,'image-received',hash(binding.destinationRef));
     await fs.mkdir(path.dirname(destination),{recursive:true,mode:0o700});
     const receiverStore=await exporter.createControlledImageStore({root:destination,targetRef:binding.destinationRef});
     const authorizeReceive=async bound=>{
       need(bound.action==='receive' && bound.jobId===job.jobId && bound.requestDigest===job.requestDigest &&
         bound.outputId===output.outputId && bound.artifactRef===output.artifactRef && bound.sha256===output.sha256 &&
-        bound.consumerRef===binding.consumerRef && bound.destinationRef===binding.destinationRef,'IMAGE_RECOVERY_RECEIVER_BINDING');
-      const fresh=await admit('receive',binding);
+        bound.consumerRef===binding.consumerRef && bound.destinationRef===binding.destinationRef,'IMAGE_RECEIVER_BINDING');
+      const fresh=await loadAuthority();
+      need(canonicalImageJSON(fresh.output)===canonicalImageJSON(output) && fresh.consumerRef===binding.consumerRef && fresh.destinationRef===binding.destinationRef,'IMAGE_RECEIVER_BINDING');
       return {allowed:true,bindingDigest:hash(manifest.canonicalArtifactJSON(bound)),expiresAt:fresh.expiresAt};
     };
     const resolveArtifact=async()=>{
-      await admit('receive',binding);
+      await loadAuthority();
       const locator=/^artifact:cbimg:([a-f0-9]{64}):([a-f0-9]{64})$/.exec(output.artifactRef);
       need(locator && locator[1]===hash(targetRef),'IMAGE_SOURCE_BINDING_MISMATCH');
-      const producerStore=await store(),recordBytes=await producerStore.read(`record-${locator[2]}.json`);
+      const producerStore=await exporter.createControlledImageStore({root,targetRef,readOnly:true}),recordBytes=await producerStore.read(`record-${locator[2]}.json`);
       need(recordBytes,'IMAGE_SOURCE_RESOLUTION_UNAVAILABLE');
       const record=JSON.parse(recordBytes.toString('utf8'));
       need(record.schemaVersion==='chatbridge.image.original-record.v1' && record.artifactRef===output.artifactRef &&
         record.binding.requestDigest===job.requestDigest && locator[2]===hash(canonicalImageJSON({requestDigest:job.requestDigest,outputId:output.outputId})) &&
         ['jobId','attemptId','turnId','outputId'].every(field=>record.binding[field]===output[field]) &&
-        ['sha256','mimeType','width','height','byteLength'].every(field=>record.verified[field]===output[field]),'IMAGE_SOURCE_BINDING_MISMATCH');
+        ['sha256','mimeType','width','height','byteLength'].every(field=>record.verified[field]===output[field]) &&
+        record.verified.validation.checkedAt===output.validation.checkedAt,'IMAGE_SOURCE_BINDING_MISMATCH');
       const bytes=await producerStore.read(`original-${locator[2]}.bin`);
       need(bytes,'IMAGE_SOURCE_RESOLUTION_UNAVAILABLE');
-      await admit('receive',binding);
+      await loadAuthority();
       return {bytes,mimeType:output.mimeType};
     };
     const result=await manifest.createImageConsumerReceiver({contract,store:receiverStore,authorize:authorizeReceive,resolveArtifact,decode:decoder()})
       .receive({jobId:job.jobId,requestDigest:job.requestDigest,output,consumerRef:binding.consumerRef});
-    return {...result,deliveryStatus:'RECEIVED',businessApproval:'NOT_EVALUATED'};
+    return {...result,deliveryStatus:'RECEIVED',businessApproval:'NOT_EVALUATED',
+      ...(authority.retentionOrigin?{retentionOrigin:authority.retentionOrigin,retentionHours:authority.retentionHours,retentionDeadline:authority.retentionDeadline}:{})};
   }
-  return Object.freeze({admit,saveEvidence,resolveSource,assertOperator,prepareInbox,verifyAssistedOriginal,exportOriginal,importOfficialOriginal,receiveExisting});
+  async function receiveExisting(binding) {
+    need(recovery,'IMAGE_RECOVERY_REQUIRED');
+    return receiveAuthorized(async()=>({...await admit('receive',binding),consumerRef:binding.consumerRef,destinationRef:binding.destinationRef}));
+  }
+  async function receiveOutput(deliveryGrantId) {
+    need(!recovery,'IMAGE_DELIVERY_BINDING');
+    return receiveAuthorized(()=>api.authorizeDelivery(key,deliveryGrantId));
+  }
+  return Object.freeze({admit,saveEvidence,resolveSource,assertOperator,prepareInbox,verifyAssistedOriginal,exportOriginal,importOfficialOriginal,receiveExisting,receiveOutput});
 }
 
 export async function imageCli(action,payload={}, {coordinated,executor,liveAction,decode,callerEnv=process.env,stateDir=process.env.CHAT_BRIDGE_STATE_DIR||path.join(homedir(),'.local/state/chat-bridge')}={}) {
   if (['batch-create','batch-inspect','batch-decision'].includes(action)) return coordinated('image-'+action,payload);
+  if(action==='delivery-authorize') {
+    need(payload.grant?.kind==='OUTPUT_DELIVERY','IMAGE_DELIVERY_REQUIRED');
+    return coordinated('image-authorize',payload);
+  }
+  if(['delivery-admission','delivery-receive','delivery-receipt'].includes(action)) {
+    need(Object.keys(payload).sort().join(',')==='deliveryGrantId,key','IMAGE_DELIVERY_PAYLOAD');
+    const api=createImageJobAPI({coordinated});
+    if(action==='delivery-admission')return api.authorizeDelivery(payload.key,payload.deliveryGrantId);
+    if(action==='delivery-receipt')return api.deliveryReceipt(payload.key,payload.deliveryGrantId);
+    const io=await createHostImageArtifacts({api,key:payload.key,stateDir,decode,coordinated});
+    return io.receiveOutput(payload.deliveryGrantId);
+  }
+  need(!payload.deliveryGrantId,'IMAGE_DELIVERY_EFFECT_FORBIDDEN');
   if(action==='recovery-authorize') {
     need(payload.grant?.kind==='OUTPUT_RECOVERY','IMAGE_RECOVERY_REQUIRED');
     return coordinated('image-authorize',payload);

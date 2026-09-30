@@ -13,7 +13,7 @@ import {canonicalArtifactJSON, immutableArtifactValue, assertOpaqueRef, assertIm
  * hard-link publication; rename-overwrite is never used. Same-OS-user hostile directory
  * replacement is outside Node's path-based API guarantee (no openat/dirfd traversal).
  */
-export async function createControlledImageStore({root, targetRef, io = fs, maxFileBytes = 100_000_000} = {}) {
+export async function createControlledImageStore({root, targetRef, io = fs, maxFileBytes = 100_000_000, readOnly = false} = {}) {
   assertOpaqueRef(targetRef);
   assertArtifact(typeof root === 'string' && isAbsolute(root) && resolve(root) === root &&
     !root.includes('\0') && root !== parse(root).root, 'STORE_UNSAFE');
@@ -31,7 +31,9 @@ export async function createControlledImageStore({root, targetRef, io = fs, maxF
     }
   }
   await checkAncestors(resolve(root,'..'));
-  try { await io.mkdir(root,{mode:0o700}); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  if (!readOnly) {
+    try { await io.mkdir(root,{mode:0o700}); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  }
   await checkAncestors(root);
   const pinned = await io.lstat(root);
   function privateRoot(s) {
@@ -93,6 +95,7 @@ export async function createControlledImageStore({root, targetRef, io = fs, maxF
     } finally { await handle.close(); }
   }
   async function putImmutable(name, bytes) {
+    assertArtifact(!readOnly, 'STORE_READ_ONLY');
     const finalPath = filePath(name);
     assertArtifact(Buffer.isBuffer(bytes) && bytes.length <= maxFileBytes, 'ENCODED_SIZE_LIMIT');
     bytes = Buffer.from(bytes);

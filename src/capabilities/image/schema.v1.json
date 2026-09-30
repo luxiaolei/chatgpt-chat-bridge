@@ -1684,6 +1684,105 @@
         "turnId",
         "action"
       ]
+    },
+    "OutputDeliveryGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "OUTPUT_DELIVERY"
+        },
+        "grantId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "controllerOperationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "controllerTaskId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "key": {
+          "$ref": "#/$defs/Key"
+        },
+        "requestDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "route": {
+          "$ref": "#/$defs/Route"
+        },
+        "consumerRef": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "destinationRef": {
+          "type": "string",
+          "pattern": "^(artifact|store|urn):[^\\s]+$",
+          "minLength": 3,
+          "maxLength": 512
+        },
+        "maxByteLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 33554432
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "output": {
+          "$ref": "#/$defs/BaseRevision"
+        }
+      },
+      "required": [
+        "kind",
+        "grantId",
+        "controllerOperationId",
+        "controllerTaskId",
+        "key",
+        "requestDigest",
+        "route",
+        "consumerRef",
+        "destinationRef",
+        "maxByteLength",
+        "expiresAt",
+        "output"
+      ]
+    },
+    "OutputDeliveryQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "grantId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "callerRef": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "jobId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "deliveryGrantId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      },
+      "required": [
+        "grantId",
+        "callerRef",
+        "jobId",
+        "scope",
+        "deliveryGrantId"
+      ]
     }
   }
 }
