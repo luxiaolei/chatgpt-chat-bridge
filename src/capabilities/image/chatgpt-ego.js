@@ -266,7 +266,7 @@ export function createImageExecutionAdapter({api,withUi,assertSessionAdmission,e
         if (request.inputs.length) {
           await assertSessionAdmission({key,request,job:reserved,phase:'before-upload'});
           staged = await stageImageSource(request,await resolveSource(request.inputs[0],{key,scope:request.scope}),{sourceTurnId:reserved.sourceTurnId});
-          const upload = await ui.upload(staged);
+          const upload = await ui.upload(staged,{attemptId});
           if (upload?.accepted !== true) fail('IMAGE_ATTACHMENT_NOT_ACCEPTED');
         }
         const prompt = imageExecutionPrompt(request,attemptId);
@@ -286,7 +286,7 @@ export function createImageExecutionAdapter({api,withUi,assertSessionAdmission,e
         if (current.revision !== reserved.revision || current.status !== 'SUBMISSION_UNKNOWN' || current.cancelRequestedAt) fail('IMAGE_RESERVATION_CHANGED');
         if (now() >= Date.parse(request.budget.deadlineAt) || now()-Date.parse(reserved.attempts.at(-1).startedAt) > request.budget.maxDurationMs) fail('IMAGE_ATTEMPT_DEADLINE');
         sendAttempted = true; // Even an action timeout can have late effects.
-        await ui.sendOnce();  // Exactly ONE native action. No click/Enter fallback.
+        await ui.sendOnce({attemptId});  // Exactly ONE native action. No click/Enter fallback.
         return await recordObservation(key,reserved,reserved.attempts.at(-1),await ui.inspect(),'record');
       } catch (error) {
         if (sendAttempted) return {ok:false,status:'SUBMISSION_UNKNOWN',reason:safeError(error),retryAllowed:false,remoteGeneration:'UNKNOWN'};

@@ -12,6 +12,7 @@ const REG_PATH = pathMod.join(CONFIG_DIR, "registry.json");
 const RUNTIME_PATH = pathMod.join(STATE_DIR, "runtime.json");
 const STORE_PATH = globalThis.__CHAT_BRIDGE_STORE_PATH__;
 const COORDINATOR_PATH = globalThis.__CHAT_BRIDGE_COORDINATOR_PATH__;
+const imageTransport=globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__?await import(pathMod.join(pathMod.dirname(globalThis.__CHAT_BRIDGE_IMAGE_MODULE_PATH__),"chatgpt-ego.cli.js")):null;
 const stateBaselines = new WeakMap();
 function stored(command, kind, payload=null) {
   if(!STORE_PATH) throw new Error("state-store.py is required; reinstall ChatBridge");
@@ -24,7 +25,8 @@ function stored(command, kind, payload=null) {
 function coordinated(command, payload) {
   if(!COORDINATOR_PATH) throw new Error("coordinator.py is required; reinstall ChatBridge");
   const result=childProcess.spawnSync("python3",[COORDINATOR_PATH,command,CONFIG_DIR,STATE_DIR],{
-    encoding:"utf8",input:JSON.stringify(payload),maxBuffer:4*1024*1024
+    encoding:"utf8",input:JSON.stringify(payload),maxBuffer:4*1024*1024,
+    env:imageTransport?.imageCallerEnvironment(globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__,command,payload)
   });
   if(result.status!==0) throw new Error(`COORDINATOR_${command.toUpperCase()}: ${(result.stderr||result.error?.message||"unknown error").trim()}`);
   return JSON.parse(result.stdout);
@@ -1190,7 +1192,7 @@ async function sendMessage(page, msg) {
   return {delivered:true,attempts,lastUserId:after.lastUserId||null,messageCount:after.messageCount};
 }
 
-async function uploadImage(page, file, mimeType=null) {
+async function uploadImage(page, file, mimeType=null, {beforeUpload=null}={}) {
   if(!file || !pathMod.isAbsolute(file)) { const error=new Error("image path must be an absolute local path"); error.code="IMAGE_LOCAL_PATH_REQUIRED"; throw error; }
   let info;
   try { info=await fs.lstat(file); } catch(error) {
@@ -1216,6 +1218,8 @@ async function uploadImage(page, file, mimeType=null) {
     return {count:1};
   });
   if(marked.count!==1){ const e=new Error("image upload control is unavailable or ambiguous"); e.code="IMAGE_UPLOAD_CONTROL_UNAVAILABLE"; throw e; }
+  if(beforeUpload) await beforeUpload();
+  else await assertImagePageFree(page);
   await page.setInputFiles('input[type=file][data-chat-bridge-upload-target="1"]',[file]);
   const name=pathMod.basename(file);
   await page.waitForFunction((name)=>[...document.querySelectorAll("button")].some(button=>button.getAttribute("aria-label")===`Remove ${name}`),name,{timeout:10000});
@@ -2426,10 +2430,13 @@ async function runNativeImage(action,payload) {
     import(pathMod.join(directory,"contract.js")),import(pathMod.join(directory,"chatgpt-ego.cli.js")),
   ]);
   const api=contract.createImageJobAPI({coordinated}),key=payload.key;
+  const callerContext=globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__?.callerContext;
+  if(callerContext && callerContext.action!==action)throw new Error("IMAGE_CALLER_SCOPE_MISMATCH");
   const job=await api.inspect(key);
+  if(callerContext && (callerContext.requestDigest!==job.requestDigest || contract.canonicalImageJSON(callerContext.route)!==contract.canonicalImageJSON(job.route)))throw new Error("IMAGE_CALLER_SCOPE_MISMATCH");
   const route=job.route,chat=resolveChat(reg,route.sessionRef,route.project,route.accountAlias);
   if((chat.conversationId||chat.id)!==route.conversationId || accountScope(reg,chat.account)!==route.accountId || chat.status!=="active") throw new Error("IMAGE_ROUTE_MISMATCH");
-  const io=await artifacts.createHostImageArtifacts({api,key,stateDir:STATE_DIR,contract,coordinated});
+  const io=await artifacts.createHostImageArtifacts({api,key,stateDir:STATE_DIR,contract,coordinated,callerContext});
   const withUi=async(expected,callback)=>{
     if(contract.canonicalImageJSON(expected)!==contract.canonicalImageJSON(route)) throw new Error("IMAGE_ROUTE_MISMATCH");
     const {task,page}=await ensurePage(reg,chat,{pauseOnUserControl:true});
@@ -2448,7 +2455,23 @@ async function runNativeImage(action,payload) {
       });
       if(identity!==reg.accounts?.[chat.account]?.identity) throw new Error("IMAGE_ROUTE_UNVERIFIED");
     }
+    async function assertEffectAdmission(snapshot,admission,sending) {
+      const current=await api.inspect(key),attempt=current.attempts.at(-1);
+      if(!attempt || attempt.attemptId!==admission?.attemptId || current.status!=="SUBMISSION_UNKNOWN" || attempt.status!=="SUBMISSION_UNKNOWN") throw new Error("IMAGE_RESERVATION_CHANGED");
+      execution.assertImageSnapshot(current.request,snapshot);
+      if(!sameConversationUrl(snapshot.url,chat.url) || convId(snapshot.url)!==route.conversationId || projectKey(projectIdFromUrl(snapshot.url))!==projectKey(route.projectId)) throw new Error("IMAGE_ROUTE_UNVERIFIED");
+      if(contract.canonicalImageJSON(snapshot.messages.map(message=>message.id))!==contract.canonicalImageJSON(attempt.baselineTurnIds)) throw new Error("IMAGE_BASELINE_CHANGED");
+      if(snapshot.generating || snapshot.inputReady!==true || sending && snapshot.sendAvailable!==true) throw new Error("CHAT_BUSY");
+      const expectedPrompt=sending?execution.imageExecutionPrompt(current.request,attempt.attemptId):"";
+      if(execution.imagePromptHash(snapshot.composerText||"")!==execution.imagePromptHash(expectedPrompt)) throw new Error("IMAGE_COMPOSER_CHANGED");
+      const expectedInputs=sending?current.request.inputs.length:0;
+      if(!Array.isArray(snapshot.attachments) || snapshot.attachments.length!==expectedInputs || snapshot.attachments.some(input=>input.accepted!==true)) throw new Error("IMAGE_ATTACHMENT_CHANGED");
+      const occupancy=await api.sessionOccupancy({accountId:route.accountId,conversationId:route.conversationId},key);
+      if(!occupancy.reservedByJob) throw new Error("IMAGE_SESSION_OCCUPIED_RECONCILE_ONLY");
+      await api.authorizeIO(key);
+    }
     const ui=uiModule.createEgoImageUi({page,assertOwnedRoute,
+      assertSendAdmission:(snapshot,admission)=>assertEffectAdmission(snapshot,admission,true),
       onSendAttempt:()=>{sendAttempted=true;},
       inspectNative:async()=>{
         await detectWebRateLimit(page,"image-observation");
@@ -2459,7 +2482,7 @@ async function runNativeImage(action,payload) {
         return {model:applied?.model||null,effort:applied?.effort||null,raw:applied?.observed?.raw||null,
           verified:!!applied && !applied.uiModelUnverifiable && applied.model===selection.model && applied.effort===selection.effort};
       },
-      uploadImage:async(_,file,mime)=>{await api.authorizeIO(key);const result=await uploadImage(page,file,mime);await api.authorizeIO(key);return result;},
+      uploadImage:async(_,file,mime,admission)=>{await api.authorizeIO(key);const result=await uploadImage(page,file,mime,{beforeUpload:async()=>assertEffectAdmission(await ui.inspect(),admission,false)});await api.authorizeIO(key);return result;},
     });
     await assertOwnedRoute();
     return callback(ui,page);

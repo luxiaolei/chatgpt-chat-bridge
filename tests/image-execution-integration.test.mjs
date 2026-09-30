@@ -26,20 +26,20 @@ function fakeUi(f,r) {
 test('native send primitive uses one documented page.click and never Enter fallback',async()=>{
   let clicks=0,presses=0,checks=0;
   const page={fill:async()=>{},click:async()=>{clicks++;throw new Error('timeout');},press:async()=>{presses++;}};
-  const ui=createEgoImageUi({page,inspectNative:async()=>({sendAvailable:true,generating:false}),assertOwnedRoute:async()=>{checks++;},selectResources:async()=>selection});
+  const ui=createEgoImageUi({page,inspectNative:async()=>({sendAvailable:true,generating:false}),assertOwnedRoute:async()=>{checks++;},selectResources:async()=>selection,assertSendAdmission:async()=>{}});
   await assert.rejects(ui.sendOnce(),/timeout/);assert.equal(clicks,1);assert.equal(presses,0);assert.equal(checks,1);
 });
 test('native primitives require a verified observer and enforce ownership before side effects',async()=>{
   const page={fill:async()=>assert.fail('must not fill'),click:async()=>assert.fail('must not click')};
   assert.throws(()=>createEgoImageUi({page}),/OBSERVER_UNVERIFIED/);
-  const ui=createEgoImageUi({page,inspectNative:async()=>assert.fail('must not inspect'),assertOwnedRoute:async()=>{throw new Error('USER_CONTROL');},selectResources:async()=>selection});
+  const ui=createEgoImageUi({page,inspectNative:async()=>assert.fail('must not inspect'),assertOwnedRoute:async()=>{throw new Error('USER_CONTROL');},selectResources:async()=>selection,assertSendAdmission:async()=>{}});
   await assert.rejects(ui.sendOnce(),/USER_CONTROL/);await assert.rejects(ui.fill('fixture'),/USER_CONTROL/);
 });
 test('native upload is accepted only after existing upload and native readiness agree',async()=>{
   let uploaded=0;
   const page={fill:async()=>{},click:async()=>{}};
   let accepted=false;
-  const ui=createEgoImageUi({page,assertOwnedRoute:async()=>{},selectResources:async()=>selection,
+  const ui=createEgoImageUi({page,assertOwnedRoute:async()=>{},selectResources:async()=>selection,assertSendAdmission:async()=>{},
     uploadImage:async()=>{uploaded++;},inspectNative:async()=>({inputReady:true,generating:false,attachments:[{accepted}]})});
   assert.equal((await ui.upload({path:'/synthetic-only',mimeType:'image/png'})).accepted,false);
   accepted=true;assert.equal((await ui.upload({path:'/synthetic-only',mimeType:'image/png'})).accepted,true);assert.equal(uploaded,2);
@@ -55,11 +55,53 @@ test('image facade requires native entry and forwards to real wired executor',as
 test('prepare authenticates the persisted exact route without starting Ego',async()=>{
   const f=await fixture();try {
     const {r,g,key}=f.setup();
-    const prepared=await imageCli('prepare',{request:r,grantId:g.grantId},{coordinated:f.call,liveAction:'start'});
+    const prepared=await imageCli('prepare',{request:r,grantId:g.grantId,callerContext:{kind:'invented'}},{coordinated:f.call,liveAction:'start',callerEnv:f.env});
     assert.deepEqual(prepared.route,r.route);assert.deepEqual(prepared.payload.key,key);
-    assert.deepEqual((await imageCli('prepare',{key},{coordinated:f.call,liveAction:'reconcile'})).route,r.route);
+    assert.equal(prepared.callerContext.kind,'local-owner');assert.equal(prepared.callerContext.owner.threadId,f.env.CODEX_THREAD_ID);
+    assert.deepEqual((await imageCli('prepare',{key},{coordinated:f.call,liveAction:'reconcile',callerEnv:f.env})).route,r.route);
     await assert.rejects(imageCli('prepare',{key:{...key,callerRef:'invented'}},{coordinated:f.call,liveAction:'characterize'}),/IMAGE_ACCESS_DENIED/);
   }finally{await f.close();}
+});
+test('actual CLI prepare carries exact original owner into an env-less Ego stage and rejects remote operator claims',async()=>{
+  const globals=['__CHAT_BRIDGE_IMAGE_MODULE_PATH__','__CHAT_BRIDGE_COORDINATOR_PATH__','__CHAT_BRIDGE_STORE_PATH__','__CHAT_BRIDGE_CONFIG_DIR__','__CHAT_BRIDGE_STATE_DIR__','__CHAT_BRIDGE_IMAGE_PREPARED__','__CHAT_BRIDGE_ARGS__'];
+  const names=['CODEX_THREAD_ID','CHAT_BRIDGE_FROM_ACCOUNT_ID','CHAT_BRIDGE_FROM_SPACE'];
+  const prior=Object.fromEntries(globals.map(name=>[name,globalThis[name]])),priorEnv=Object.fromEntries(names.map(name=>[name,process.env[name]]));
+  try {
+    for(const mode of ['local-owner','remote-origin','revoked']) {
+      const f=await fixture();try {
+        const base=JSON.parse(f.sql("select payload from documents where kind='registry'")[0][0]),registry=structuredClone(base);
+        const projectId='g-p-'+'1'.repeat(32),conversationId='11111111-1111-1111-1111-111111111111';
+        Object.assign(registry.projects.P.bindings.a,{projectId,projectUrl:`https://chatgpt.com/g/${projectId}/project`});Object.assign(registry.chats.w,{conversationId,url:`https://chatgpt.com/g/${projectId}/c/${conversationId}`});
+        const stored=spawnSync('python3',[path.resolve('src/state-store.py'),'put',f.config,f.state,'registry'],{env:f.env,encoding:'utf8',input:JSON.stringify({base,next:registry})});assert.equal(stored.status,0,stored.stderr);
+        const r=f.request({route:{...f.request().route,projectId,conversationId}}),g=f.grant(r);for(const feature of ['generate','export'])g.capabilities.features[feature].mode='ASSISTED';
+        const {key}=f.setup(r,g),payload={request:r,grantId:g.grantId,key,operatorRef:f.owner,attemptId:'context-attempt',eventId:'context-begin',callerContext:{kind:'local-owner',owner:{threadId:f.env.CODEX_THREAD_ID}}};
+        const clientEnv=mode==='remote-origin'?{...f.env,CODEX_THREAD_ID:'',CHAT_BRIDGE_FROM_ACCOUNT_ID:f.accountId}:f.env;
+        const result=spawnSync(process.execPath,[path.resolve('src/capabilities/image/chatgpt-ego.cli.js'),'prepare','start'],{env:clientEnv,encoding:'utf8',input:JSON.stringify(payload)});assert.equal(result.status,0,result.stderr);
+        const prepared=JSON.parse(result.stdout);assert.equal(prepared.callerContext.kind,mode==='remote-origin'?'remote-origin':'local-owner');
+        Object.assign(globalThis,{__CHAT_BRIDGE_IMAGE_MODULE_PATH__:path.resolve('src/capabilities/image/chatgpt-ego.js'),__CHAT_BRIDGE_COORDINATOR_PATH__:path.resolve('src/coordinator.py'),__CHAT_BRIDGE_STORE_PATH__:path.resolve('src/state-store.py'),
+          __CHAT_BRIDGE_CONFIG_DIR__:await realpath(f.config),__CHAT_BRIDGE_STATE_DIR__:await realpath(f.state),__CHAT_BRIDGE_IMAGE_PREPARED__:prepared,__CHAT_BRIDGE_ARGS__:['image','start']});
+        for(const name of names)delete process.env[name];
+        if(mode==='revoked')f.call('image-revoke',{issuerRef:f.owner,grantId:g.grantId});
+        for(const name of ['control-routing','page-pool','liveness-policy','task-policy','web-policy','model-policy','session-policy'])await import(`../src/${name}.js`);
+        let rounds=0;const observed={url:registry.chats.w.url,online:true,conversationMode:'normal',messagesComplete:true,inputReady:true,sendAvailable:true,generating:false,composerText:'',attachments:[],alerts:[],
+          messages:[{id:'old-user',role:'user',text:'fixture'},{id:'old-assistant',role:'assistant',images:[],settled:null,nativeProvenanceVerified:false}]};
+        const page={url:async()=>registry.chats.w.url,fill:async()=>assert.fail('no manual Send'),click:async()=>assert.fail('no manual Send'),evaluate:async fn=>fn.toString().includes('/api/auth/session')?'one':structuredClone(observed)};
+        const source=(await readFile(path.resolve('src/main.js'),'utf8')).split('const cmd=args[0] || "help";')[0],AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+        const run=await new AsyncFunction('registry','page','round',source+`
+          const reg=registry;loadRuntime=async()=>({tasks:{},projects:{},sessions:{}});ensurePage=async()=>{round();return {page,task:{spaceId:7}};};
+          listTaskSpaces=async()=>[{id:7,ownership:'agent'}];assertWebAvailable=async()=>{};detectWebRateLimit=async()=>{};
+          applyDispatchModel=async(_,chat,model,effort)=>({model,effort,observed:{raw:'Pro'}});return runNativeImage;
+        `)(registry,page,()=>{rounds++;});
+        // Uses the real main coordinated spawnSync; no fixture transport override.
+        if(mode==='local-owner'){const started=await run('start',prepared.payload);assert.equal(started.action,'MANUAL_SEND_REQUIRED');assert.equal(rounds,1);assert.equal(f.api.inspect(key).status,'SUBMISSION_UNKNOWN');}
+        else {await assert.rejects(run('start',prepared.payload),mode==='remote-origin'?/IMAGE_OPERATOR_HOST_OWNER_REQUIRED/:/EXPIRED_OR_REVOKED/);assert.equal(rounds,0);assert.equal(f.api.inspect(key).attempts.length,0);}
+        assert.equal(process.env.CODEX_THREAD_ID,undefined);assert.equal(process.env.CHAT_BRIDGE_FROM_ACCOUNT_ID,undefined);
+      }finally{await f.close();}
+    }
+  }finally{
+    for(const name of globals){if(prior[name]===undefined)delete globalThis[name];else globalThis[name]=prior[name];}
+    for(const name of names){if(priorEnv[name]===undefined)delete process.env[name];else process.env[name]=priorEnv[name];}
+  }
 });
 
 test('assisted official Save bytes pass C decode/manifest and A export; same host source uses current grant',async()=>{
@@ -249,6 +291,67 @@ test('real main factories execute ASSISTED reservation, exact-owner observation 
     for(const key of injected) {if(prior[key]===undefined)delete globalThis[key];else globalThis[key]=prior[key];}
     if(oldDecoder===undefined)delete process.env.CHAT_BRIDGE_IMAGE_DECODER;else process.env.CHAT_BRIDGE_IMAGE_DECODER=oldDecoder;
     await f.close();
+  }
+});
+test('real final Send/upload gates reject authority, route, draft, baseline and attachment changes after awaited inspection',async()=>{
+  const injected=['__CHAT_BRIDGE_IMAGE_MODULE_PATH__','__CHAT_BRIDGE_STATE_DIR__'],prior=Object.fromEntries(injected.map(key=>[key,globalThis[key]]));
+  const oldDecoder=process.env.CHAT_BRIDGE_IMAGE_DECODER;
+  try {
+    for(const mode of ['clean','revocation','composer-change','route-change','baseline-change','attachment-change','upload-revocation']) {
+      const f=await fixture();try {
+        const base=JSON.parse(f.sql("select payload from documents where kind='registry'")[0][0]),registry=structuredClone(base);
+        const projectId='g-p-'+'1'.repeat(32),conversationId='11111111-1111-1111-1111-111111111111';
+        Object.assign(registry.projects.P.bindings.a,{projectId,projectUrl:`https://chatgpt.com/g/${projectId}/project`});
+        Object.assign(registry.chats.w,{conversationId,url:`https://chatgpt.com/g/${projectId}/c/${conversationId}`});
+        const stored=spawnSync('python3',[path.resolve('src/state-store.py'),'put',f.config,f.state,'registry'],{env:f.env,encoding:'utf8',input:JSON.stringify({base,next:registry})});assert.equal(stored.status,0,stored.stderr);
+        let r=f.request({route:{...f.request().route,projectId,conversationId}}),g=f.grant(r);
+        if(mode==='upload-revocation')g.capabilities.features.export.mode='ASSISTED';
+        let {key,job}=f.setup(r,g);
+        if(mode==='upload-revocation') {
+          const ready=f.generated(key,f.begin(key,job)),bytes=png(),sha256=createHash('sha256').update(bytes).digest('hex');
+          const io=await createHostImageArtifacts({api:f.api,key,stateDir:await realpath(f.state),decode,coordinated:f.call}),inbox=await io.prepareInbox();
+          await writeFile(inbox.originalPath,bytes,{mode:0o600});
+          await io.importOfficialOriginal({...inbox,path:inbox.originalPath,operatorRef:f.owner,sha256,outputId:'output-1',mimeType:'image/png',officialSave:{confirmed:true,requestDigest:r.requestDigest,attemptId:ready.attempts[0].attemptId,turnId:'new-assistant',outputId:'output-1',originalRef:inbox.originalRef,route:r.route}});
+          const output=f.api.inspect(key).outputs[0],baseRevision={artifactRef:output.artifactRef,sha256:output.sha256,revisionId:'gate-v1',jobId:r.jobId,outputId:output.outputId};
+          r=f.request({jobId:'gate-edit',operation:'edit',route:r.route,inputs:[{...baseRevision,role:'source'}],baseRevision});g=f.grant(r,'gate-edit-grant');({key}=f.setup(r,g));
+        }
+        for(const name of ['control-routing','page-pool','liveness-policy','task-policy','web-policy','model-policy','session-policy'])await import(`../src/${name}.js`);
+        globalThis.__CHAT_BRIDGE_IMAGE_MODULE_PATH__=path.resolve('src/capabilities/image/chatgpt-ego.js');globalThis.__CHAT_BRIDGE_STATE_DIR__=await realpath(f.state);
+        if(MAGICK)process.env.CHAT_BRIDGE_IMAGE_DECODER=MAGICK;
+        const observed={url:registry.chats.w.url,online:true,conversationMode:'normal',messagesComplete:true,inputReady:true,sendAvailable:true,generating:false,composerText:'',attachments:[],alerts:[],
+          messages:[{id:'old-user',role:'user',text:'fixture'},{id:'old-assistant',role:'assistant',parentUserId:null,images:[],settled:null,nativeProvenanceVerified:false,characterization:[]}]};
+        let inspections=0,sends=0,uploads=0,pageUrl=observed.url;
+        const page={url:async()=>pageUrl,fill:async(_,text)=>{observed.composerText=text;},click:async()=>{sends++;},setInputFiles:async()=>{uploads++;observed.attachments=[{accepted:true}];},waitForFunction:async()=>{},evaluate:async fn=>{
+          if(fn.toString().includes('/api/auth/session'))return 'one';
+          if(fn.toString().includes('data-chat-bridge-upload-target')){f.call('image-revoke',{issuerRef:f.owner,grantId:g.grantId});return {count:1};}
+          inspections++;
+          if(inspections===5){
+            if(mode==='revocation')f.call('image-revoke',{issuerRef:f.owner,grantId:g.grantId});
+            if(mode==='composer-change')observed.composerText='current human draft';
+            if(mode==='route-change')observed.url=pageUrl=`https://chatgpt.com/g/g-p-${'2'.repeat(32)}/c/22222222-2222-2222-2222-222222222222`;
+            if(mode==='baseline-change')observed.messages.push({id:'intervening-user',role:'user',text:'other message'});
+            if(mode==='attachment-change')observed.attachments=[{accepted:true}];
+          }
+          return structuredClone(observed);
+        }};
+        const source=(await readFile(path.resolve('src/main.js'),'utf8')).split('const cmd=args[0] || "help";')[0],AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+        const run=await new AsyncFunction('f','registry','page',source+`
+          const reg=registry;coordinated=(...args)=>f.call(...args);loadRuntime=async()=>({tasks:{},projects:{},sessions:{}});
+          ensurePage=async()=>({page,task:{spaceId:7}});listTaskSpaces=async()=>[{id:7,ownership:'agent'}];
+          assertWebAvailable=async()=>{};detectWebRateLimit=async()=>{};applyDispatchModel=async(_,chat,model,effort)=>({model,effort,observed:{raw:'Pro'}});
+          return runNativeImage;
+        `)(f,registry,page);
+        const payload={request:r,grantId:g.grantId,key,attemptId:'gate-attempt',eventId:'gate-begin'};
+        if(mode==='upload-revocation')await assert.rejects(run('start',payload),MAGICK?/EXPIRED_OR_REVOKED/:/IMAGE_DECODER_REQUIRED/);
+        else {const result=await run('start',payload);assert.equal(result.status,'SUBMISSION_UNKNOWN');}
+        assert.equal(sends,mode==='clean'?1:0,mode);assert.equal(uploads,0,mode);assert.equal(f.api.inspect(key).status,'SUBMISSION_UNKNOWN');
+        const replay=await run('start',{...payload,attemptId:'different',eventId:'different'});assert.equal(replay.action,'RECONCILE_ONLY');assert.equal(sends,mode==='clean'?1:0);
+        if(mode==='composer-change')assert.equal(observed.composerText,'current human draft');
+      }finally{await f.close();}
+    }
+  }finally{
+    for(const key of injected){if(prior[key]===undefined)delete globalThis[key];else globalThis[key]=prior[key];}
+    if(oldDecoder===undefined)delete process.env.CHAT_BRIDGE_IMAGE_DECODER;else process.env.CHAT_BRIDGE_IMAGE_DECODER=oldDecoder;
   }
 });
 test('SQLite real contract accepts adapter-generated events and reconstructed reconcile never sends twice',async()=>{

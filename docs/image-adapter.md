@@ -29,6 +29,12 @@ and reservation. It does not use the ordinary text sender's Enter/retrigger
 fallback. Inputs use the existing #58 upload helper after current source rights,
 immutable bytes/hash/revision checks and private staging. Edit/refine require the
 exact authorized source; refine also requires its saved same-conversation parent.
+After the final awaited DOM inspection, Send rechecks its exact attempt,
+unchanged baseline IDs, actual URL, expected prompt and accepted input count,
+then sole reservation/current authority before the click. Upload performs its
+corresponding current admission after the awaited file-control lookup and before
+`setInputFiles`. Changed human draft/route/input/baseline or revoked authority
+never reaches those effects; an already reserved ambiguous attempt stays UNKNOWN.
 Only one image and one source are supported. Masks, multiple references, batch
 outputs and temporary/unknown conversations remain explicitly unsupported.
 
@@ -71,6 +77,20 @@ chat-bridge image start < image-start.json > image-start-result.json
 permission. Installed copies remain separate from this checkout until explicitly
 installed and verified.
 
+Ego's Node process does not inherit the local Codex caller environment. The CLI
+therefore captures a separate invocation context after actual grant access and
+immutable original owner/thread/host verification. It binds action, exact key,
+request digest and route. The trusted CLI script carries this context into Ego;
+only scoped coordinator subprocesses receive the genuine captured environment.
+The shared Node process environment is never changed. External request fields
+cannot create that context, and captured remote/tunnel origins cannot use the
+ASSISTED local-owner operator path.
+
+For a reviewed source-only canary, invoke this checkout's `bin/chat-bridge`
+directly and set `CHAT_BRIDGE_IMAGE_DECODER=/opt/homebrew/bin/magick` to the
+existing maintained executable. The CLI resolves its adjacent source modules;
+no install, restart or overriding the installed CLI is required.
+
 ## Executable ASSISTED official-original path
 
 When native provenance is unavailable, the owner may issue explicit model/route
@@ -90,6 +110,12 @@ UNKNOWN; do not submit the prompt again. Wait outside Bridge's UI lease. When T
 is idle and its actual output is complete, use ChatGPT's official Save action to
 save the original to **the returned `originalPath`**. Do not use a thumbnail,
 private URL, copied cookie, arbitrary local file or reference image.
+The manual operator waits for the preceding account UI lease to end and the
+normal pacing delay, preserves the existing ownership/user-pause gates, and
+does not call generic `send`, `retry` or `stop` to bypass the reservation. A
+scripted operator action, if separately authorized, needs its own reviewed
+bounded invocation under the existing lease; ASSISTED start has no automatic
+Send or original-extraction action.
 
 The original local owner supplies an explicit official-UI attestation:
 

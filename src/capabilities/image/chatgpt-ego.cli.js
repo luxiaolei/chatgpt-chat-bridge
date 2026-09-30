@@ -1,7 +1,7 @@
 /** Local queries stay local; prepare authenticates a live route before Ego starts. */
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {homedir} from 'node:os';
+import {homedir,hostname} from 'node:os';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {constants} from 'node:fs';
@@ -12,6 +12,42 @@ import {normalizeExecutionRequest,imageExecutionProbe} from './chatgpt-ego.js';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const need=(condition,code)=>{if(!condition) {const error=new Error(code);error.code=code;throw error;}};
+
+/** Only prepare creates this envelope, from its actual authenticated client
+ * environment. Ego does not inherit that environment. Forward it solely to the
+ * exact invocation's coordinator calls, never into persistent process.env.
+ */
+export function imageCallerEnvironment(prepared,command,payload,environment=process.env) {
+  if(!command.startsWith('image-') && command!=='local-owner-contract')return undefined;
+  const context=prepared?.callerContext;
+  need(context && context.version===1 && context.host===hostname() && canonicalImageJSON(context.key)===canonicalImageJSON(prepared.payload.key) && canonicalImageJSON(context.route)===canonicalImageJSON(prepared.route),'IMAGE_CALLER_CONTEXT_REQUIRED');
+  const caller=context.environment;
+  need(caller && Object.keys(caller).sort().join(',')==='CHAT_BRIDGE_FROM_ACCOUNT_ID,CHAT_BRIDGE_FROM_SPACE,CODEX_THREAD_ID' && Object.values(caller).every(value=>typeof value==='string'),'IMAGE_CALLER_CONTEXT_REQUIRED');
+  if(context.kind==='local-owner')need(!caller.CHAT_BRIDGE_FROM_ACCOUNT_ID && !caller.CHAT_BRIDGE_FROM_SPACE && context.owner?.threadId===caller.CODEX_THREAD_ID && context.owner.host===context.host,'IMAGE_CALLER_CONTEXT_REQUIRED');
+  else if(context.kind==='remote-origin')need(caller.CHAT_BRIDGE_FROM_ACCOUNT_ID===context.route.accountId,'IMAGE_CALLER_CONTEXT_REQUIRED');
+  else need(context.kind==='host' && !caller.CHAT_BRIDGE_FROM_ACCOUNT_ID && !caller.CHAT_BRIDGE_FROM_SPACE,'IMAGE_CALLER_CONTEXT_REQUIRED');
+  if(command==='image-submit')need(payload.grantId===context.key.grantId && payload.request.requestDigest===context.requestDigest && canonicalImageJSON(imageJobKey(payload.request,payload.grantId))===canonicalImageJSON(context.key),'IMAGE_CALLER_SCOPE_MISMATCH');
+  else if(command==='image-session-occupancy')need(payload.session.accountId===context.route.accountId && (!payload.key || canonicalImageJSON(payload.key)===canonicalImageJSON(context.key) && payload.session.conversationId===context.route.conversationId),'IMAGE_CALLER_SCOPE_MISMATCH');
+  else if(command==='local-owner-contract')need(context.kind==='local-owner' && payload.taskId===context.controllerTaskId && payload.project===context.route.project && payload.sessionRef===context.route.sessionRef && payload.callerRef===`codex:${context.owner.threadId}`,'IMAGE_OPERATOR_HOST_OWNER_REQUIRED');
+  else need(canonicalImageJSON({grantId:payload.grantId,callerRef:payload.callerRef,jobId:payload.jobId,scope:payload.scope})===canonicalImageJSON(context.key) && (!payload.event?.route || canonicalImageJSON(payload.event.route)===canonicalImageJSON(context.route)),'IMAGE_CALLER_SCOPE_MISMATCH');
+  return {...environment,...caller};
+}
+
+function captureImageCaller(job,key,action,coordinated,callerEnv) {
+  const environment=Object.fromEntries(['CODEX_THREAD_ID','CHAT_BRIDGE_FROM_ACCOUNT_ID','CHAT_BRIDGE_FROM_SPACE'].map(name=>[name,String(callerEnv[name]||'')]));
+  const context={version:1,host:hostname(),action,key,route:job.route,requestDigest:job.requestDigest,controllerTaskId:job.controllerTaskId,environment};
+  if(environment.CHAT_BRIDGE_FROM_ACCOUNT_ID) {
+    need(environment.CHAT_BRIDGE_FROM_ACCOUNT_ID===job.route.accountId,'IMAGE_ACCESS_DENIED');
+    return {...context,kind:'remote-origin'};
+  }
+  need(!environment.CHAT_BRIDGE_FROM_SPACE,'IMAGE_ORIGIN_UNVERIFIED');
+  if(environment.CODEX_THREAD_ID) {
+    const owner=coordinated('local-owner-contract',{taskId:job.controllerTaskId,project:job.route.project,sessionRef:job.route.sessionRef,callerRef:`codex:${environment.CODEX_THREAD_ID}`});
+    need(owner.kind==='codex' && owner.threadId===environment.CODEX_THREAD_ID && owner.host===context.host,'IMAGE_OPERATOR_HOST_OWNER_REQUIRED');
+    return {...context,kind:'local-owner',owner};
+  }
+  return {...context,kind:'host'};
+}
 
 async function readOfficialFile(file) {
   need(typeof file==='string' && path.isAbsolute(file) && await fs.realpath(file)===path.resolve(file),'IMAGE_ORIGINAL_FILE_UNSAFE');
@@ -30,7 +66,7 @@ async function readOfficialFile(file) {
 /** Existing durable grant is host authority. This store only persists authorized
  * evidence/original bytes; it is not another job database or a remote resolver.
  */
-export async function createHostImageArtifacts({api,key,stateDir,contract=contractModule,decode,coordinated}={}) {
+export async function createHostImageArtifacts({api,key,stateDir,contract=contractModule,decode,coordinated,callerContext}={}) {
   const [exporter,verifier,manifest]=await Promise.all([import('./exporter.js'),import('./verifier.js'),import('./manifest.js')]);
   const job=await api.inspect(key),targetRef=job.request.authorizedOutput.targetRef;
   const base=path.join(stateDir,'image-artifacts'),root=path.join(base,hash(targetRef));
@@ -41,7 +77,9 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
   let outputStore;
   async function store() {return outputStore ||= await storeFor(root);}
   async function assertOperator(operatorRef) {
-    need(!process.env.CHAT_BRIDGE_FROM_ACCOUNT_ID && !process.env.CHAT_BRIDGE_FROM_SPACE && typeof coordinated==='function','IMAGE_OPERATOR_HOST_OWNER_REQUIRED');
+    const origin=callerContext?.environment||process.env;
+    need(!origin.CHAT_BRIDGE_FROM_ACCOUNT_ID && !origin.CHAT_BRIDGE_FROM_SPACE && typeof coordinated==='function','IMAGE_OPERATOR_HOST_OWNER_REQUIRED');
+    if(callerContext)need(callerContext.kind==='local-owner' && callerContext.host===hostname() && canonicalImageJSON(callerContext.key)===canonicalImageJSON(key) && operatorRef===`codex:${callerContext.owner?.threadId}` && callerContext.owner.host===callerContext.host,'IMAGE_OPERATOR_HOST_OWNER_REQUIRED');
     await api.authorizeIO(key);
     const current=await api.inspect(key);
     const owner=await coordinated('local-owner-contract',{taskId:current.controllerTaskId,project:current.route.project,
@@ -160,7 +198,7 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
   return Object.freeze({saveEvidence,resolveSource,assertOperator,prepareInbox,verifyAssistedOriginal,exportOriginal,importOfficialOriginal});
 }
 
-export async function imageCli(action,payload={}, {coordinated,executor,liveAction,decode,stateDir=process.env.CHAT_BRIDGE_STATE_DIR||path.join(homedir(),'.local/state/chat-bridge')}={}) {
+export async function imageCli(action,payload={}, {coordinated,executor,liveAction,decode,callerEnv=process.env,stateDir=process.env.CHAT_BRIDGE_STATE_DIR||path.join(homedir(),'.local/state/chat-bridge')}={}) {
   if (action==='probe') return imageExecutionProbe(payload.route ?? null);
   if (action==='validate') {
     const request=normalizeExecutionRequest(payload.request);
@@ -178,7 +216,7 @@ export async function imageCli(action,payload={}, {coordinated,executor,liveActi
     const request=liveAction==='start'?normalizeExecutionRequest(payload.request):null;
     const key=request?imageJobKey(request,payload.grantId):payload.key;
     const job=request?await api.submit(request,{grantId:payload.grantId}):await api.inspect(key);
-    return {payload:{...payload,key,...(request?{request}:{} )},route:job.route};
+    return {payload:{...payload,key,...(request?{request}:{} )},route:job.route,callerContext:captureImageCaller(job,key,liveAction,coordinated,callerEnv)};
   }
   if (action==='submit') return api.submit(normalizeExecutionRequest(payload.request),{grantId:payload.grantId});
   if (action==='cancel') return api.cancel(payload.key,payload.event);
