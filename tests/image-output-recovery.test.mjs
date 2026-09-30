@@ -29,6 +29,7 @@ const observation=(s,revision=2)=>({eventId:'late-generated',expectedRevision:re
 test('recovery is owner-issued, immutable, bounded and cannot grant ordinary effects',async()=>{
   const f=await fixture();try {
     const s=await setup(f);const before=f.api.inspect(s.key);
+    await assert.rejects(imageCli('recovery-authorize',{issuerRef:f.owner,grant:s.g},{coordinated:f.call}),/IMAGE_RECOVERY_REQUIRED/);
     f.fail('image-authorize',{issuerRef:'other',grant:s.grant},/OWNER_REQUIRED/);
     for(const patch of [{controllerOperationId:'other'},{controllerTaskId:'other'},{requestDigest:'f'.repeat(64)},
       {attemptId:'other'},{route:{...s.r.route,conversationId:'other'}},{userMessageId:'old-user'},

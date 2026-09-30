@@ -624,5 +624,6 @@ test('install source packages ESM image module directory; it is not run or used 
   const script=await readFile(new URL('../scripts/install.sh',import.meta.url),'utf8');
   assert.match(script,/capabilities\/image\/package.json/);assert.match(script,/cp -R .*src\/capabilities\/image/);
   const cli=await readFile(new URL('../src/capabilities/image/chatgpt-ego.cli.js',import.meta.url),'utf8');
-  assert.doesNotMatch(cli,/taskSpace\(|page\.fetch\(|image-authorize/);
+  assert.doesNotMatch(cli,/taskSpace\(|page\.fetch\(/);
+  assert.match(cli,/action==='recovery-authorize'[\s\S]*?payload\.grant\?\.kind==='OUTPUT_RECOVERY'[\s\S]*?coordinated\('image-authorize',payload\)/);
 });

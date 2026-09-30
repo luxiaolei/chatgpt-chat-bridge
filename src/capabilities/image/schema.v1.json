@@ -1041,6 +1041,13 @@
           "items": {
             "$ref": "#/$defs/OutputRevision"
           }
+        },
+        "lateOutputRevisions": {
+          "type": "array",
+          "maxItems": 48,
+          "items": {
+            "$ref": "#/$defs/OutputRevision"
+          }
         }
       },
       "required": [
