@@ -51,6 +51,12 @@ PY
 CMD="${1:-help}"
 SUB="${2:-}"
 
+if [[ "$CMD" == "image" ]]; then
+  IMAGE_CLI="${MAIN:h}/capabilities/image/chatgpt-ego.cli.js"
+  [[ -f "$IMAGE_CLI" ]] || { echo '{"ok":false,"code":"IMAGE_ADAPTER_NOT_INSTALLED","deliveryStage":"PRE_SEND"}' >&2; exit 2; }
+  exec node "$IMAGE_CLI" "${2:-probe}"
+fi
+
 if [[ "$CMD" == "ask" ]]; then
   ASK_WRAPPER="${MAIN:h}/ask-wrapper.py"
   [[ -f "$ASK_WRAPPER" ]] || { echo "chat-bridge: ask wrapper missing: $ASK_WRAPPER" >&2; exit 127; }
