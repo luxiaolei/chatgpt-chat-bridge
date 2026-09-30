@@ -54,7 +54,7 @@ chat-bridge github-project bind \
   --status-field Status
 ```
 
-Each source query must explicitly include both `repo:` and `is:open`. This prevents an accidental global/broad import and prevents a closed source object being treated as a new work candidate.
+Each source query must contain positive `repo:OWNER/REPO` and exact `is:open` qualifiers. The restricted grammar also supports `is:issue`, `is:pr`, and unquoted `label:NAME` (letters, digits, `_`, `:`, `.`, `+`, `-`). Bare text, quoted or negated qualifiers, parentheses, boolean operators, and other qualifiers are rejected. Every search result and pre-add source read must belong to a positively listed repository.
 
 A board such as QuantCompany Research and QuantCompany Dev may intentionally use different queries even when both reference the same repository.
 
@@ -73,6 +73,8 @@ chat-bridge github-project inspect --project "PROJECT"
 - source labels without truncation;
 - configured source-query completeness;
 - planned nonterminal status changes.
+
+`inspect` returns every item ID, archive flag, source identity/URL/title/state/labels, current status, and field values. Custom single-select, text, number, date and iteration values include their field IDs/names; field definitions are also returned. Draft items expose their ID/title; inaccessible content is null. Reads are bounded to 100 pages of 100 items and 100 field values per item; exceeding a bound fails explicitly.
 
 The response flags an enabled `Auto-close issue` workflow as a risk. It does not alter that workflow.
 
@@ -101,11 +103,13 @@ Remote writes are bounded and guarded:
 - a missing source reference is re-read immediately before adding;
 - board membership is re-read immediately before adding to tolerate a concurrent native Auto-add;
 - status changes apply only to open **Issues**, not PRs;
-- status changes require an explicit label→Project-status mapping;
+- status changes require an explicit label→Project-status mapping and only fill an empty status; every populated status is preserved, including Ready, Blocked and Done;
 - source identity/state/updatedAt/labels are re-read before a status write;
 - current Project field value, field ID and option ID are re-read before a status write;
-- concurrent source/Project changes fail as `CONFLICT` instead of overwriting;
+- changes observed in the latest board snapshot (item identity, source version, archive flag and status) fail as `CONFLICT` before writing;
 - terminal/acceptance-like values such as Done, Closed, Complete, Accepted, Merged, Deployed, Released, Passed and Approved are rejected.
+
+GitHub provides no conditional expected-value argument for this mutation. A change after the final read can still race with the write; these guards are best-effort checks, not atomic compare-and-swap.
 
 The adapter never closes or edits the source Issue, merges a PR, dispatches a Chat, retries an UNKNOWN delivery, acknowledges a worker result, or switches an installed runtime.
 

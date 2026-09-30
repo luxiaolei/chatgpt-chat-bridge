@@ -57,7 +57,7 @@ SOURCE_FRAGMENT = (
     + "... on Issue { "
     + COMMON_SOURCE
     + " stateReason }\n"
-    + "... on PullRequest { "
+    + "... on DraftIssue { id title }\n... on PullRequest { "
     + COMMON_SOURCE
     + " isDraft headRefOid baseRefName reviewDecision }\n}"
 )
@@ -68,6 +68,14 @@ fragment ItemFields on ProjectV2Item {
   fieldValues(first:100) {
     pageInfo { hasNextPage endCursor }
     nodes {
+      __typename
+      ... on ProjectV2ItemFieldTextValue { text field { ... on ProjectV2Field { id name } } }
+      ... on ProjectV2ItemFieldNumberValue { number field { ... on ProjectV2Field { id name } } }
+      ... on ProjectV2ItemFieldDateValue { date field { ... on ProjectV2Field { id name } } }
+      ... on ProjectV2ItemFieldIterationValue {
+        title iterationId startDate duration
+        field { ... on ProjectV2IterationField { id name } }
+      }
       ... on ProjectV2ItemFieldSingleSelectValue {
         name optionId
         field { ... on ProjectV2SingleSelectField { id name } }
@@ -147,12 +155,25 @@ def validate_source_query(query: str) -> str:
     query = " ".join(str(query).split())
     if not query:
         raise InvalidConfig("empty --source-query")
-    lower = query.lower()
-    if "is:open" not in lower:
+    tokens = query.split()
+    if "is:open" not in tokens:
         raise InvalidConfig("each --source-query must explicitly contain is:open")
-    if "repo:" not in lower:
-        raise InvalidConfig("each --source-query must explicitly scope at least one repo:")
+    for token in tokens:
+        if token in ("is:open", "is:issue", "is:pr"):
+            continue
+        if re.fullmatch(r"repo:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", token):
+            continue
+        if re.fullmatch(r"label:[A-Za-z0-9_:.+-]+", token):
+            continue
+        raise InvalidConfig(f"unsupported source-query qualifier: {token}")
+    if not any(token.startswith("repo:") for token in tokens):
+        raise InvalidConfig("each --source-query must positively scope at least one repo:")
     return query
+
+
+def query_repositories(query: str) -> set[str]:
+    return {token[5:].lower() for token in validate_source_query(query).split()
+            if token.startswith("repo:")}
 
 
 class Gh:
@@ -474,6 +495,7 @@ def workflow_risks(snapshot: dict[str, Any]) -> list[str]:
 def search_sources(gh: Gh, queries: list[str]) -> list[dict[str, Any]]:
     by_id: dict[str, dict[str, Any]] = {}
     for query in queries:
+        allowed_repositories = query_repositories(query)
         page = 1
         seen = 0
         total_count: int | None = None
@@ -502,6 +524,11 @@ def search_sources(gh: Gh, queries: list[str]) -> list[dict[str, Any]]:
                 state = str(item.get("state") or "").upper()
                 if state != "OPEN":
                     raise Conflict(f"source query returned non-open item: {item.get('html_url')}")
+                repository_url = str(item.get("repository_url") or "")
+                repository = repository_url.removeprefix("https://api.github.com/repos/")
+                if (not repository_url.startswith("https://api.github.com/repos/")
+                        or repository.lower() not in allowed_repositories):
+                    raise Conflict(f"source query returned repository outside scope: {repository_url}")
                 candidate = {
                     "id": node_id,
                     "url": item.get("html_url"),
@@ -551,6 +578,9 @@ def candidate_guard(gh: Gh, candidate: dict[str, Any]) -> dict[str, Any]:
     latest = get_source(gh, str(candidate["id"]))
     if latest is None:
         raise Conflict(f"source disappeared before add: {candidate.get('url')}")
+    repository = str((latest.get("repository") or {}).get("nameWithOwner") or "")
+    if repository.lower() not in query_repositories(str(candidate.get("query") or "")):
+        raise Conflict("source repository outside configured scope before add")
     if latest.get("state") != "OPEN":
         raise Conflict(f"source closed before add: {candidate.get('url')}")
     if latest.get("id") != candidate.get("id"):
@@ -635,7 +665,7 @@ def status_plan(
                 f'Project status option "{target}" not found in field "{field_name}"'
             )
         old = item_values(item).get(field_name)
-        if old == target:
+        if old not in (None, ""):
             continue
         result.append(
             {
@@ -662,26 +692,21 @@ def guarded_status_write(
     if source_version(latest_source) != source_version(change["source"]):
         raise Conflict(f"source changed before status write: {change['source'].get('url')}")
 
-    item_query = (
-        """query($id:ID!) { node(id:$id) { ...ItemFields } }\n"""
-        + ITEM_FRAGMENT
-    )
-    item = gh.graphql(item_query, id=change["itemId"]).get("node")
-    if (
-        not isinstance(item, dict)
-        or item.get("isArchived")
-        or not isinstance(item.get("content"), dict)
-    ):
-        raise Conflict("Project item removed, archived or inaccessible before status write")
+    fresh_snapshot = project_snapshot(gh, binding)
+    matches = [item for item in fresh_snapshot["items"] if item.get("id") == change["itemId"]]
+    if len(matches) != 1:
+        raise Conflict("Project item identity missing or duplicated before status write")
+    item = matches[0]
+    if item.get("isArchived") or not isinstance(item.get("content"), dict):
+        raise Conflict("Project item archived or inaccessible before status write")
     if source_version(item["content"]) != source_version(change["source"]):
-        raise Conflict(f"Project item source changed before status write: {change['source'].get('url')}")
+        raise Conflict("Project item source changed before status write")
     current = item_values(item).get(change["field"])
     if current == change["new"]:
         return False
-    if current != change["old"]:
+    if current != change["old"] or current not in (None, ""):
         raise Conflict("Project Status changed concurrently; refusing overwrite")
 
-    fresh_snapshot = project_snapshot(gh, binding)
     field = status_field(fresh_snapshot, change["field"])
     if field.get("id") != change["fieldId"]:
         raise Conflict("Project Status field identity changed before write")
@@ -737,6 +762,14 @@ def snapshot_summary(
     }
     result: dict[str, Any] = {
         "project": snapshot["project"],
+        "items": [
+            {"id": item["id"], "isArchived": bool(item.get("isArchived")),
+             "source": item.get("content"),
+             "status": item_values(item).get(binding.get("statusField") or DEFAULT_STATUS_FIELD),
+             "fieldValues": (item.get("fieldValues") or {}).get("nodes") or []}
+            for item in items
+        ],
+        "fields": snapshot.get("fields") or [],
         "itemCount": len(items),
         "activeItemCount": sum(not item.get("isArchived") for item in items),
         "archivedItemCount": sum(bool(item.get("isArchived")) for item in items),

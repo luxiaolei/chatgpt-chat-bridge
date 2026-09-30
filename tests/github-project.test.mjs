@@ -95,14 +95,14 @@ if args and args[0]=="api" and "graphql" in args:
                 print("bad cursor",file=sys.stderr); raise SystemExit(2)
         elif scenario=="concurrent":
             connection={"pageInfo":{"hasNextPage":False,"endCursor":None},
-                        "nodes":[item(1,labels=["status:ready"],status="Backlog")]}
+                        "nodes":[item(1,labels=["status:ready"],status="")]}
         else:
             connection={"pageInfo":{"hasNextPage":False,"endCursor":None},"nodes":[item(1)]}
         emit({"data":{"node":{"items":connection}}})
         raise SystemExit(0)
     if "...ItemFields" in query:
         if scenario=="concurrent":
-            value=item(1,labels=["status:ready"],status="Backlog")
+            value=item(1,labels=["status:ready"],status="")
         else:
             value=item(1)
         emit({"data":{"node":value}})
@@ -198,6 +198,12 @@ test('Project item pagination is complete across multiple pages', async()=>{
     assert.equal(value.status,'READ_COMPLETE');
     assert.equal(value.itemCount,2);
     assert.equal(value.activeItemCount,2);
+    assert.deepEqual(value.items.map(item => item.source.url), [
+      'https://github.com/o/r/issues/1', 'https://github.com/o/r/issues/2'
+    ]);
+    assert.equal(value.items[0].source.title, 'Issue 1');
+    assert.equal(value.items[0].status, 'Backlog');
+    assert.equal(value.items[0].fieldValues[0].field.name, 'Status');
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
@@ -259,4 +265,72 @@ test('github-project CLI stays local and never starts ego-browser', async()=>{
     assert.equal(JSON.parse(r.stdout).status,'BOUND');
     await assert.rejects(access(marker));
   } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test('source scope, manual statuses and latest-snapshot guards fail closed', ()=>{
+  const r=spawnSync('python3',['-c',String.raw`
+import copy, importlib.util, sys
+spec=importlib.util.spec_from_file_location('adapter',sys.argv[1])
+m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+def refuses(fn, error):
+    try: fn()
+    except error: return
+    raise AssertionError('expected '+error.__name__)
+for query in ['-repo:o/r is:open', 'repo:o/r -is:open', '"repo:o/r" is:open',
+              'repo:o/r is:open OR repo:else/where', 'repo:o/r is:open bare',
+              'repo:o/r "is:open"', 'repo:o/r is:open is:closed']:
+    refuses(lambda: m.validate_source_query(query), m.InvalidConfig)
+assert m.query_repositories('repo:O/R repo:x/y is:open label:status:ready') == {'o/r','x/y'}
+class Search:
+    def rest(self, *args, **kwargs):
+        return {'total_count':1,'items':[{'node_id':'I','state':'open',
+            'repository_url':'https://api.github.com/repos/else/where'}]}
+refuses(lambda: m.search_sources(Search(), ['repo:o/r is:open']), m.Conflict)
+source={'id':'I','__typename':'Issue','state':'OPEN','updatedAt':'v1',
+        'url':'https://github.com/o/r/issues/1','repository':{'nameWithOwner':'o/r'},
+        'labels':{'totalCount':1,'nodes':[{'name':'status:ready'}]}}
+field={'id':'F','name':'Status','__typename':'ProjectV2SingleSelectField',
+       'options':[{'id':'R','name':'Ready'}]}
+item={'id':'ITEM','isArchived':False,'content':source,
+      'fieldValues':{'nodes':[], 'pageInfo':{'hasNextPage':False}}}
+board={'project':{},'fields':[field],'items':[item]}
+binding={'id':'P','statusFromLabels':{'status:ready':'Ready'}}
+for status in ['Done','Blocked','Backlog','Ready','Custom']:
+    manual=copy.deepcopy(board)
+    manual['items'][0]['fieldValues']['nodes']=[{'field':{'name':'Status'},'name':status}]
+    assert m.status_plan(manual,binding)==[], status
+change=m.status_plan(board,binding)[0]
+class Gh:
+    def __init__(self): self.writes=0
+    def graphql(self, *args, **kwargs):
+        self.writes+=1
+        return {'updateProjectV2ItemFieldValue':{'projectV2Item':{'id':'ITEM'}}}
+gh=Gh()
+m.get_source=lambda *_: copy.deepcopy(source)
+candidate={'id':'I','url':source['url'],'query':'repo:x/y is:open'}
+refuses(lambda: m.candidate_guard(gh,candidate),m.Conflict)
+for kind in ['status','archive','source','identity','removed']:
+    fresh=copy.deepcopy(board)
+    if kind=='status': fresh['items'][0]['fieldValues']['nodes']=[{'field':{'name':'Status'},'name':'Blocked'}]
+    if kind=='archive': fresh['items'][0]['isArchived']=True
+    if kind=='source': fresh['items'][0]['content']['id']='OTHER'
+    if kind=='identity': fresh['items'][0]['id']='OTHER'
+    if kind=='removed': fresh['items']=[]
+    m.project_snapshot=lambda *_: fresh
+    refuses(lambda: m.guarded_status_write(gh,binding,change),m.Conflict)
+    assert gh.writes==0
+m.project_snapshot=lambda *_: board
+assert m.guarded_status_write(gh,binding,change) is True
+assert gh.writes==1
+for typename, key, value in [('Text','text','research'),('Number','number',3),
+                             ('Date','date','2026-10-01'),('Iteration','title','Sprint 1')]:
+    item['fieldValues']['nodes'].append({'__typename':'ProjectV2ItemField'+typename+'Value',
+        'field':{'id':typename,'name':typename},key:value})
+summary=m.snapshot_summary(board,binding)
+assert summary['items'][0]['fieldValues']==item['fieldValues']['nodes']
+assert summary['items'][0]['source']['url']==source['url']
+item['fieldValues']['pageInfo']['hasNextPage']=True
+refuses(lambda: m.snapshot_summary(board,binding),m.IncompleteRead)
+`,adapter],{encoding:'utf8'});
+  assert.equal(r.status,0,r.stderr+'\n'+r.stdout);
 });
