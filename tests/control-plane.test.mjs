@@ -738,6 +738,10 @@ test("control status distinguishes no work, in progress, awaiting ACK and comple
     r=f.call("work-one",[],null,{CHAT_BRIDGE_TEST_FAIL_STAGE:"PRE_SEND"});
     assert.equal(r.status,0,r.stderr);
     assert.equal(JSON.parse(r.stdout).status,"FAILED_PRE_SEND");
+    const replacement=spawnSync("python3",["-c",
+      "import sqlite3,sys,uuid; d=sqlite3.connect(sys.argv[1]); old=d.execute(\"select callback_operation_id from task_results where task_id='ts' and result_version='1'\").fetchone()[0]; new=str(uuid.uuid4()); d.execute(\"insert into operations(id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,role,message,task_id,created_at,updated_at,not_before,kind,event_id,original_message) select ?,?,payload_hash,'SENT',project,account_alias,account_id,caller_ref,session_ref,role,message,task_id,created_at,updated_at,not_before,kind,event_id,original_message from operations where id=?\",(new,'replacement:'+new,old)); d.execute(\"update task_results set callback_operation_id=? where task_id='ts' and result_version='1'\",(new,)); d.commit()",
+      path.join(f.state,"bridge.sqlite3")],{encoding:"utf8"});
+    assert.equal(replacement.status,0,replacement.stderr);
     const undelivered=JSON.parse(f.call("control",["status","--project","P"]).stdout).projects[0];
     assert.equal(undelivered.results.awaitingControllerAck,1);
     assert.equal(undelivered.attention.awaitingControllerAck,1);
