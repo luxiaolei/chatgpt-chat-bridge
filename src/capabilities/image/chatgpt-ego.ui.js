@@ -14,21 +14,61 @@ export async function inspectEgoImagePage(page) {
     const root=document.querySelector('main, [role="main"]') || document.body;
     const visible=node=>!node.closest('[hidden], [aria-hidden="true"], [inert]') &&
       getComputedStyle(node).display!=='none' && getComputedStyle(node).visibility!=='hidden' && node.getClientRects().length>0;
-    const legacy=[...root.querySelectorAll('[data-message-author-role]')].filter(visible);
-    const nodes=legacy.length?legacy:[...root.querySelectorAll('[data-chatgpt-search-unit-key$=":user"], [data-chatgpt-search-unit-key$=":assistant"]')].filter(visible);
-    const fallback=nodes.length?nodes:[...root.querySelectorAll('[data-content-search-unit-key$=":user"], [data-content-search-unit-key$=":assistant"]')].filter(visible);
-    const messages=[],seen=new Set();let ambiguous=false;
-    for(const node of fallback) {
-      const key=node.getAttribute('data-chatgpt-search-unit-key')||node.getAttribute('data-content-search-unit-key')||'';
-      const role=node.getAttribute('data-message-author-role')||/:(user|assistant)$/.exec(key)?.[1];
+    const roleSelector='[data-message-author-role], [data-chatgpt-search-unit-key$=":user"], [data-chatgpt-search-unit-key$=":assistant"], [data-content-search-unit-key$=":user"], [data-content-search-unit-key$=":assistant"]';
+    const candidateSelector=roleSelector+', [data-chatgpt-search-message-ids]';
+    const gallerySelector='[data-testid="generated-image-gallery"]';
+    const roleOf=node=>node?.getAttribute('data-message-author-role')||
+      /:(user|assistant)$/.exec(node?.getAttribute('data-chatgpt-search-unit-key')||node?.getAttribute('data-content-search-unit-key')||'')?.[1];
+    const nodes=[...root.querySelectorAll(candidateSelector)].filter(visible);
+    const messages=[],seen=new Map(),owners=new Map();let messagesIncompleteReason=null;
+    const incomplete=reason=>{messagesIncompleteReason ||= reason;};
+    for(const node of nodes) {
+      let role=roleOf(node);
+      if(!role) {
+        const galleries=[...node.querySelectorAll(gallerySelector)].filter(gallery=>gallery.closest('[data-chatgpt-search-message-ids]')===node);
+        if(!galleries.length || node.closest('form')) continue;
+        role=roleOf(node.closest(roleSelector));
+        if(role==='user') continue; // Input thumbnails do not add assistant turns.
+        if(!galleries.some(visible)) {if(!role)incomplete('IMAGE_DOM_IMAGE_NOT_VISIBLE');continue;}
+        if(!role) {
+          // Image-only replies expose an ID wrapper and an explicit role heading
+          // in the same public turn, without a role-bearing message unit.
+          const turn=node.closest('[data-content-search-turn-key]');
+          let region=node.parentElement;
+          while(region && region!==turn && ![...region.children].some(child=>child.getAttribute('data-conversation-role'))) region=region.parentElement;
+          const markers=[...(region && region!==turn?region.querySelectorAll(roleSelector+', [data-conversation-role]'):[])].filter(marker=>
+            visible(marker) && marker.closest('[data-content-search-turn-key]')===turn &&
+            !marker.contains(node) && (marker.compareDocumentPosition(node)&4));
+          const marker=markers.at(-1);
+          role=marker?.getAttribute('data-conversation-role')||roleOf(marker);
+        }
+        if(role!=='assistant') {incomplete('IMAGE_DOM_IMAGE_ROLE_UNVERIFIED');continue;}
+      }
       if(!['user','assistant'].includes(role)) continue;
       // Current public assistant units can repeat the same message ID token.
-      // Repetition is one identity; distinct IDs and duplicate nodes stay unsafe.
-      const ids=[...new Set((node.getAttribute('data-chatgpt-search-message-ids')||'').trim().split(/\s+/).filter(Boolean))];
-      const id=node.getAttribute('data-message-id')|| (ids.length===1?ids[0]:null) ||
+      // Nested aliases are one identity; separate duplicate nodes stay unsafe.
+      const identity=node.getAttribute('data-message-id')||node.getAttribute('data-chatgpt-search-message-ids')?node:
+        node.closest('[data-message-id], [data-chatgpt-search-message-ids]')||node;
+      const ids=[...new Set((identity.getAttribute('data-chatgpt-search-message-ids')||'').trim().split(/\s+/).filter(Boolean))];
+      const id=identity.getAttribute('data-message-id')|| (ids.length===1?ids[0]:null) ||
         node.querySelector('[data-chatgpt-selection-message-id]')?.getAttribute('data-chatgpt-selection-message-id');
-      if(!id || ids.length>1) {ambiguous=true;continue;}
-      if(seen.has(id)) {ambiguous=true;continue;} seen.add(id);
+      const selected=[node.getAttribute('data-chatgpt-selection-message-id'),...[...node.querySelectorAll('[data-chatgpt-selection-message-id]')].map(element=>element.getAttribute('data-chatgpt-selection-message-id'))].filter(Boolean);
+      if(ids.length>1 || ids.length===1 && ids[0]!==id || selected.some(value=>value!==id)) {incomplete('IMAGE_DOM_MESSAGE_ID_AMBIGUOUS');continue;}
+      if(!id) {incomplete('IMAGE_DOM_MESSAGE_ID_UNVERIFIED');continue;}
+      const enclosing=node.parentElement?.closest('[data-message-id], [data-chatgpt-search-message-ids]');
+      if(enclosing && enclosing!==identity) {
+        const outerIds=[enclosing.getAttribute('data-message-id'),...(enclosing.getAttribute('data-chatgpt-search-message-ids')||'').trim().split(/\s+/)].filter(Boolean);
+        if(outerIds.some(value=>value!==id)) {incomplete('IMAGE_DOM_NESTED_MESSAGE_AMBIGUOUS');continue;}
+      }
+      let parent=node.parentElement;
+      while(parent && !owners.has(parent)) parent=parent.parentElement;
+      if(parent && (owners.get(parent).id!==id || owners.get(parent).role!==role)) {incomplete('IMAGE_DOM_NESTED_MESSAGE_AMBIGUOUS');continue;}
+      const previous=seen.get(id);
+      if(previous) {
+        if(previous.role!==role || previous.node===node || !previous.node.contains?.(node)) {incomplete('IMAGE_DOM_MESSAGE_ID_DUPLICATE');continue;}
+        owners.set(node,{id,role});continue;
+      }
+      seen.set(id,{node,role});owners.set(node,{id,role});
       if(role==='user') {
         const content=node.querySelector('[data-user-message-bubble="true"]')||node;
         messages.push({id,role,text:(content.innerText||content.textContent||'').trim().replace(/^You said:\s*/i,'')});
@@ -42,6 +82,10 @@ export async function inspectEgoImagePage(page) {
         messages.push({id,role,parentUserId:node.getAttribute('data-parent-message-id')||null,
           images:[],settled:null,nativeProvenanceVerified:false,characterization:facts});
       }
+    }
+    for(const gallery of [...root.querySelectorAll(gallerySelector+', [data-testid="generated-image-preview"]')].filter(visible)) {
+      if(gallery.closest('form') || roleOf(gallery.closest(roleSelector))==='user') continue;
+      if(owners.get(gallery.closest(candidateSelector))?.role!=='assistant') incomplete('IMAGE_DOM_IMAGE_MESSAGE_UNVERIFIED');
     }
     const buttons=[...document.querySelectorAll('button')].filter(visible);
     const enabled=button=>!button.disabled && button.getAttribute('aria-disabled')!=='true';
@@ -58,7 +102,8 @@ export async function inspectEgoImagePage(page) {
     const challengeRequired=!!document.querySelector('iframe[src*="challenges.cloudflare.com"], [name="cf-turnstile-response"]');
     return {url:location.href,online:navigator.onLine,loginRequired,challengeRequired,
       conversationMode:/\/c\/[0-9a-f-]+(?:[/?#]|$)/i.test(location.href)?'normal':'unknown',
-      messagesComplete:!ambiguous && fallback.length>0,messages,generating:stop,
+      messagesComplete:!messagesIncompleteReason && messages.length>0,
+      messagesIncompleteReason:messagesIncompleteReason||(messages.length?null:'IMAGE_DOM_MESSAGES_NOT_OBSERVED'),messages,generating:stop,
       inputReady:!!composer && !stop,composerText:(composer?.innerText||composer?.textContent||'').trim(),
       sendAvailable,attachments,alerts};
   },{composerSelector,sendSelector});

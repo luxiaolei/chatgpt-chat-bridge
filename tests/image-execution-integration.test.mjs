@@ -6,9 +6,9 @@ import path from 'node:path';
 import {createRuntime} from '../src/runtime.js';
 import {createEgoImageUi,inspectEgoImagePage} from '../src/capabilities/image/chatgpt-ego.ui.js';
 import {imageCli,createHostImageArtifacts} from '../src/capabilities/image/chatgpt-ego.cli.js';
-import {createImageExecutionAdapter} from '../src/capabilities/image/chatgpt-ego.js';
+import {createImageExecutionAdapter,imageExecutionPrompt,classifyImageObservation,assertImageSnapshot} from '../src/capabilities/image/chatgpt-ego.js';
 import {fixture} from './image-persistence-fixtures.mjs';
-import {snapshot,generated,selection} from './image-execution-fixtures.mjs';
+import {snapshot,generated,selection,request} from './image-execution-fixtures.mjs';
 import {png,decode,MAGICK} from './image-artifacts-fixtures.mjs';
 import {createHash} from 'node:crypto';
 
@@ -182,7 +182,7 @@ test('production public DOM observer captures actual IDs/controls but gives prev
   const preview=element({tag:'IMG','alt':'generated original','src':'https://private/thumbnail'}),save=element({tag:'BUTTON','aria-label':'Save image'});
   const user=element({'data-message-author-role':'user','data-message-id':'dom-user'},'Generate one image.');
   const assistant=element({'data-message-author-role':'assistant','data-message-id':'dom-assistant'},'Generated!', [preview,save]);
-  const root={querySelectorAll:()=>[user,assistant]},form={querySelectorAll:()=>[]},composer=element({},''),send=element({tag:'BUTTON','data-testid':'send-button'});
+  const root={querySelectorAll:selector=>selector.includes('generated-image')?[]:[user,assistant]},form={querySelectorAll:()=>[]},composer=element({},''),send=element({tag:'BUTTON','data-testid':'send-button'});
   composer.closest=send.closest=selector=>selector==='form'?form:null;
   const values={document:{querySelector:selector=>selector==='main, [role="main"]'?root:selector.includes('prompt-textarea')?composer:null,
     querySelectorAll:selector=>selector.startsWith('form:has(')||selector==='button'?[send]:selector.includes('prompt-textarea')?[composer]:[]},location:{href:'https://chatgpt.com/c/11111111-1111-1111-1111-111111111111'},
@@ -225,6 +225,84 @@ test('observed rich-unit repeated identical IDs are unambiguous; distinct, missi
       for(const message of result.messages.filter(message=>message.role==='assistant')){
         assert.equal(message.parentUserId,null);assert.equal(message.nativeProvenanceVerified,false);assert.equal(message.settled,null);assert.deepEqual(message.images,[]);
       }
+    }
+  }finally{for(const [key,descriptor] of prior){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key];}}
+});
+
+test('public image-only wrappers join mixed message layouts in DOM order and keep ambiguous image identity incomplete',async()=>{
+  // Extend the existing public-DOM fixture with ancestry and document order.
+  // IDs come only from attributes; neither fixture order nor previews provide IDs.
+  const matches=(node,selector)=>selector.split(',').some(part=>{
+    const value=part.trim(),attribute=/^\[([^\s=$\]]+)(?:(\$?=)"([^"]*)")?\]$/.exec(value);
+    if(!attribute) return node.tagName.toLowerCase()===value;
+    const actual=node.getAttribute(attribute[1]);
+    return actual!==null && (!attribute[2] || (attribute[2]==='$='?actual.endsWith(attribute[3]):actual===attribute[3]));
+  });
+  const descendants=node=>node.children.flatMap(child=>[child,...descendants(child)]);
+  const element=(attrs={},text='',children=[])=>{
+    const node={tagName:attrs.tag||'DIV',children,parentElement:null,innerText:text,textContent:text,disabled:false,
+      getAttribute:name=>attrs[name]??null,getClientRects:()=>[{}],naturalWidth:1254,naturalHeight:1254,complete:true,
+      querySelectorAll:selector=>{const found=descendants(node).filter(child=>matches(child,selector));return Object.assign({length:found.length,[Symbol.iterator]:()=>found.values()},found);},
+      querySelector:selector=>node.querySelectorAll(selector)[0]||null,
+      closest:selector=>{let current=node;while(current && !matches(current,selector))current=current.parentElement;return current;},
+      contains:other=>{let current=other;while(current && current!==node)current=current.parentElement;return current===node;},
+      compareDocumentPosition:other=>{let top=node;while(top.parentElement)top=top.parentElement;const order=[top,...descendants(top)];return order.indexOf(node)<order.indexOf(other)?4:2;},
+    };
+    for(const child of children)child.parentElement=node;
+    return node;
+  };
+  let root;
+  const values={document:{querySelector:selector=>selector==='main, [role="main"]'?root:null,querySelectorAll:()=>[]},
+    location:{href:'https://chatgpt.com/c/11111111-1111-1111-1111-111111111111'},navigator:{onLine:true},getComputedStyle:()=>({display:'block',visibility:'visible'})};
+  const prior=new Map(Object.keys(values).map(key=>[key,Object.getOwnPropertyDescriptor(globalThis,key)]));
+  const imageId='73f067bf-47c0-47fa-a2ef-20ac32a6ed82',r=request(),attempt={attemptId:'attempt-fixture',baselineTurnIds:['old-user','old-assistant']};
+  const good=['image-only','repeated-identical','nested-identical','nested-role-alias','input-thumbnail','composer-thumbnail','multiple-galleries'];
+  try {
+    for(const [key,value] of Object.entries(values))Object.defineProperty(globalThis,key,{value,configurable:true});
+    for(const mode of [...good,'distinct-ids','duplicate-wrapper','nested-distinct','missing-id','missing-role','heading-after','unrelated-heading','intervening-user','conflicting-role','preview-only','hidden-gallery','selection-conflict','identity-conflict']) {
+      const preview=()=>element({tag:'BUTTON','data-testid':'generated-image-preview','aria-label':'Generated image 1'},'',[
+        element({tag:'IMG',alt:'generated original',src:'https://private/preview'})]);
+      const gallery=()=>element({'data-testid':'generated-image-gallery',...(mode==='hidden-gallery'?{hidden:''}:{})},'',[preview()]);
+      const ids=mode==='distinct-ids'?imageId+' other-id':mode==='repeated-identical'?imageId+' '+imageId:imageId;
+      let group=element(mode==='missing-id'?{}:{'data-chatgpt-search-message-ids':ids},'',mode==='preview-only'?[preview()]:[gallery()]);
+      if(mode==='identity-conflict')group=element({'data-message-id':'other-id','data-chatgpt-search-message-ids':ids},'',[gallery()]);
+      if(mode==='multiple-galleries')group=element({'data-chatgpt-search-message-ids':ids},'',[gallery(),gallery()]);
+      if(mode==='nested-identical'||mode==='nested-distinct')group=element({'data-chatgpt-search-message-ids':mode==='nested-distinct'?'other-id':imageId},'',[group]);
+      if(mode==='nested-role-alias')group=element({'data-message-author-role':'assistant','data-message-id':imageId},'',[group]);
+      if(mode==='conflicting-role')group=element({'data-message-author-role':'assistant','data-message-id':imageId},'',[
+        element({'data-message-author-role':'user','data-message-id':imageId},'',[group])]);
+      const heading=element({tag:'H4','data-conversation-role':'assistant'},'Localized role heading');
+      let region=[heading,group];
+      if(mode==='missing-role')region=[group];
+      if(mode==='heading-after')region=[group,heading];
+      if(mode==='unrelated-heading')region=[element({},'',[heading]),element({},'',[group])];
+      if(mode==='intervening-user')region=[heading,element({'data-conversation-role':'user'}),group];
+      if(mode==='duplicate-wrapper')region.push(element({'data-chatgpt-search-message-ids':imageId},'',[gallery()]));
+      const input=mode==='input-thumbnail'?element({'data-chatgpt-search-message-ids':'input-thumbnail-id'},'',[gallery()]):null;
+      const user=element({'data-chatgpt-search-unit-key':'fallback-turn-2:0:user','data-chatgpt-search-message-ids':'new-user'},imageExecutionPrompt(r,attempt.attemptId),
+        [element({'data-content-search-unit-key':'fallback-turn-2:0:user'},imageExecutionPrompt(r,attempt.attemptId)),...(input?[input]:[])]);
+      root=element({},'',[
+        element({'data-message-author-role':'user','data-message-id':'old-user'},'Old prompt'),
+        element({'data-chatgpt-search-unit-key':'fallback-turn-1:1:assistant','data-chatgpt-search-message-ids':'old-assistant old-assistant'},'',[
+          element({'data-content-search-unit-key':'fallback-turn-1:1:assistant','data-chatgpt-selection-message-id':mode==='selection-conflict'?'other-id':'old-assistant'})]),
+        element({'data-content-search-turn-key':'fallback-turn-2'},'',[user,element({},'',region)]),
+        ...(mode==='composer-thumbnail'?[element({tag:'FORM'},'',[element({'data-chatgpt-search-message-ids':'composer-input-id'},'',[gallery()])])]:[]),
+      ]);
+      const result=await inspectEgoImagePage({evaluate:async(fn,arg)=>fn(arg)}),complete=good.includes(mode);
+      assert.equal(result.messagesComplete,complete,mode);
+      if(complete) {
+        assert.equal(result.messagesIncompleteReason,null,mode);
+        assert.deepEqual(result.messages.map(({id})=>id),['old-user','old-assistant','new-user',imageId],mode);
+        const assistant=result.messages.at(-1);assert.equal(assistant.role,'assistant');assert.equal(assistant.parentUserId,null);
+        assert.equal(assistant.nativeProvenanceVerified,false);assert.equal(assistant.settled,null);assert.deepEqual(assistant.images,[]);
+        const observed={...snapshot(r),...result};
+        assert.equal(classifyImageObservation({request:r,attempt,snapshot:observed}).reason,'IMAGE_PARENT_USER_UNVERIFIED');
+      } else {
+        assert.match(result.messagesIncompleteReason,/^IMAGE_DOM_/i,mode);
+        if(mode==='hidden-gallery')assert.equal(result.messages.some(message=>message.id===imageId),false);
+        assert.throws(()=>assertImageSnapshot(r,{...snapshot(r),...result}),/IMAGE_TURN_EVIDENCE_INCOMPLETE/,mode);
+      }
+      assert.doesNotMatch(JSON.stringify(result),/private\/preview|generated original|Localized role heading/);
     }
   }finally{for(const [key,descriptor] of prior){if(descriptor)Object.defineProperty(globalThis,key,descriptor);else delete globalThis[key];}}
 });

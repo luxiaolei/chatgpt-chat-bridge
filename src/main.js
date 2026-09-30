@@ -2493,6 +2493,7 @@ async function runNativeImage(action,payload) {
     const observed=await ui.inspect();
     const evidence={adapterVersion:execution.IMAGE_ADAPTER_VERSION,route,observedAt:new Date().toISOString(),
       conversationMode:observed.conversationMode,messagesComplete:observed.messagesComplete,
+      messagesIncompleteReason:observed.messagesIncompleteReason||null,
       messages:observed.messages.map(({promptHash,...message})=>message),
       generating:observed.generating,inputReady:observed.inputReady,sendAvailable:observed.sendAvailable,
       attachmentCount:observed.attachments.length,nativeProvenanceVerified:false};
