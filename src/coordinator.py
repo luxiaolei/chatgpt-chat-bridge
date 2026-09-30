@@ -2961,7 +2961,8 @@ def image_batch_read(config, state, command, payload):
             if command == "image-batch-decision":
                 proof = {"key":key,"requestDigest":job["requestDigest"],"quotaRemaining":None,"reason":None}
                 try:
-                    proof.update(image_io_admission(db, saved, job, now))
+                    admission = image_io_admission(db, saved, job, now)
+                    proof.update(allowed=admission["allowed"], expiresAt=admission["expiresAt"])
                     if any((r["caller_ref"],r["job_id"]) != (job["caller"]["ref"],job["jobId"])
                            for r in image_session_reservations(db, job["route"])):
                         raise ValueError("IMAGE_SESSION_BUSY")
