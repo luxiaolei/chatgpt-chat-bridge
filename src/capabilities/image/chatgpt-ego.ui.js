@@ -72,8 +72,15 @@ export async function inspectEgoImagePage(page) {
       }
       seen.set(id,{node,role});owners.set(node,{id,role});
       if(role==='user') {
-        const content=node.querySelector('[data-user-message-bubble="true"]')||node;
-        messages.push({id,role,text:(content.innerText||content.textContent||'').trim().replace(/^You said:\s*/i,'')});
+        const bubbles=[...node.querySelectorAll('[data-user-message-bubble="true"]')];
+        if(bubbles.length>1) {incomplete('IMAGE_DOM_USER_BUBBLE_AMBIGUOUS');continue;}
+        const bubble=bubbles[0],targets=[...(bubble?.querySelectorAll('[data-search-result-target]')||[])];
+        if(targets.length>1) {incomplete('IMAGE_DOM_USER_CONTENT_AMBIGUOUS');continue;}
+        // The public content target contains the full authored text even when
+        // CSS clips it. Ellipsis and expansion controls are outside this target.
+        const content=targets[0]||bubble||node;
+        const text=targets.length ? content.textContent : content.innerText||content.textContent;
+        messages.push({id,role,text:(text||'').trim()});
       } else {
         const facts=[...node.querySelectorAll('[data-testid], [data-message-id], [data-parent-message-id], button, img')].filter(visible).slice(0,128).map(element=>({
           tag:element.tagName.toLowerCase(),testId:element.getAttribute('data-testid'),
