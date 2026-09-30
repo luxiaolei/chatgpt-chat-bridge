@@ -5,7 +5,7 @@
   "description": "ChatGPT Project chat routing and orchestration over Ego Lite's native ego-browser runtime.",
   "license": "MIT",
   "scripts": {
-    "check": "node --check src/main.js && node --check src/luna-routing.mjs && zsh -n bin/chat-bridge scripts/install.sh scripts/uninstall.sh scripts/install-watchdog.sh scripts/uninstall-watchdog.sh scripts/install-coordinator.sh scripts/uninstall-coordinator.sh",
+    "check": "node --check src/main.js && node --check src/native-codex.mjs && node --check src/luna-routing.mjs && zsh -n bin/chat-bridge scripts/install.sh scripts/uninstall.sh scripts/install-watchdog.sh scripts/uninstall-watchdog.sh scripts/install-coordinator.sh scripts/uninstall-coordinator.sh",
     "test": "node --test --test-concurrency=4 tests/*.test.mjs && zsh tests/static.sh && zsh tests/pacing.sh"
   },
   "engines": {

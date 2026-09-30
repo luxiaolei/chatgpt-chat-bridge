@@ -37,6 +37,13 @@ ChatGPT Project + conversations
 
 No desktop screen coordinates are required for the normal path.
 
+An explicit `queue submit --runtime codex` routes through the same durable queue
+to a Bridge-dedicated thread on an existing shared native app-server. Native
+bindings and turn receipts live in operations; they do not enter Web chat/page
+pools. Results and owner ACK retain the same contract. See
+[`native-codex-delivery.md`](native-codex-delivery.md) for startup, ownership,
+readback/cancellation and the boundary from ordinary desktop conversations.
+
 ## Registry and runtime state
 
 The bridge keeps **routing identity** and **operational state** separate.
