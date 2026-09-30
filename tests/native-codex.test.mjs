@@ -27,6 +27,24 @@ test('native adapter validates target, catalog and busy state before start; unkn
   }
 });
 
+test('standard installation includes native adapter and a missing adapter is PRE_SEND',async()=>{
+  const root=await mkdtemp(path.join(tmpdir(),'bridge-native-install-'));
+  const config=path.join(root,'config'),state=path.join(root,'state'),share=path.join(root,'share');
+  try {
+    await mkdir(config);await mkdir(state);
+    const env={...process.env,CHAT_BRIDGE_BIN_DIR:path.join(root,'bin'),CHAT_BRIDGE_SHARE_DIR:share,CHAT_BRIDGE_SKILLS_DIR:path.join(root,'skills'),CHAT_BRIDGE_FROM_ACCOUNT_ID:'',CHAT_BRIDGE_FROM_SPACE:'',CHAT_BRIDGE_NODE_BIN:process.execPath};
+    const installed=spawnSync('zsh',['scripts/install.sh'],{env,encoding:'utf8'});
+    assert.equal(installed.status,0,installed.stderr);
+    assert.equal(await readFile(path.join(share,'native-codex.mjs'),'utf8'),await readFile('src/native-codex.mjs','utf8'));
+    const create=()=>spawnSync('python3',[path.join(share,'coordinator.py'),'native-create',config,state,'--native-host',hostname(),'--native-cwd',root,'--native-socket',path.join(root,'absent.sock'),'--confirm'],{env,encoding:'utf8'});
+    let result=create();assert.equal(result.status,2,result.stderr);
+    assert.equal(JSON.parse(result.stdout).code,'NATIVE_SHARED_RUNTIME_UNAVAILABLE');
+    await rm(path.join(share,'native-codex.mjs'));
+    result=create();assert.equal(result.status,2,result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout),{ok:false,code:'NATIVE_ADAPTER_UNAVAILABLE',deliveryStage:'PRE_SEND'});
+  } finally {await rm(root,{recursive:true,force:true});}
+});
+
 test('native queue is durable, isolated from Web pools, pause-aware, correlated, and owner ACK is separate',async()=>{
   const root=await mkdtemp(path.join(tmpdir(),'bridge-native-'));
   const config=path.join(root,'config'),state=path.join(root,'state'),socket=path.join(root,'native.sock');
@@ -39,6 +57,7 @@ const fs=require('fs'),input=JSON.parse(process.argv[3]);
 let turn;try{turn=JSON.parse(fs.readFileSync(process.env.NATIVE_SAVED))}catch{}
 let receipt;
 if(input.action==='send') {
+ if(process.env.NATIVE_PRE_SEND==='1'){console.log(JSON.stringify({ok:false,deliveryStage:'PRE_SEND',code:'NATIVE_MODEL_UNAVAILABLE'}));process.exit(2);}
  turn={turnId:'native-turn',message:input.message,clientUserMessageId:input.operationId,status:'inProgress'};
  fs.writeFileSync(process.env.NATIVE_SAVED,JSON.stringify(turn));
  if(process.env.NATIVE_DROP==='1')process.exit(1);
@@ -75,6 +94,7 @@ console.log(JSON.stringify(receipt));
     const received=call('receive',{taskId:op.taskId,callerRef});assert.equal(received.acceptanceStatus,null);
     assert.equal(call('ack',{taskId:op.taskId,callerRef,status:'ACCEPTED',resultVersion:'1'}).status,'ACCEPTED');
     assert.equal(call('status',null,[op.operationId]).taskStatus,'COMPLETE');
+    assert.match(raw('submit',{...input,requestId:'reuse-cancelled-task'}).stderr,/TASK_ID_ALREADY_DISPATCHED/);
     assert.deepEqual(JSON.parse(await readFile(path.join(config,'registry.json'),'utf8')).chats,{});
     assert.deepEqual(JSON.parse(await readFile(path.join(state,'runtime.json'),'utf8')).tasks,{});
     const selectedChoice={id:'native',runtime:'codex',model:'gpt-6-astra',effort:'xhigh',nativeHost:hostname(),nativeThread:workerThread,nativeCwd:root,nativeSocket:socket};
@@ -83,6 +103,8 @@ console.log(JSON.stringify(receipt));
     const nextInput={...input,requestId:'uncertain',taskId:'NATIVE-2',model:'gpt-6-astra',effort:'xhigh',routingAdvicePath};
     assert.match(raw('submit',{...nextInput,message:'changed'}).stderr,/ROUTING_ADVICE_MISMATCH/);
     assert.match(raw('submit',{...nextInput,model:'gpt-6-luna'}).stderr,/ROUTING_ADVICE_MISMATCH/);
+    const retryOp=call('submit',{...input,requestId:'retry-A',taskId:'NATIVE-RETRY-A'});
+    assert.equal(call('work-one',{},[],{NATIVE_PRE_SEND:'1'}).status,'FAILED_PRE_SEND');
     const next=call('submit',nextInput);
     assert.equal(next.routingAdvice.advice.choiceId,'native');assert.match(next.routingAdvice.receiptSha256,/^[a-f0-9]{64}$/);
     assert.equal(call('submit',nextInput).operationId,next.operationId);
@@ -90,5 +112,16 @@ console.log(JSON.stringify(receipt));
     assert.equal(call('work-one',{}).status,'IDLE');
     assert.equal(call('reconcile',null,['--operation',next.operationId]).outcome,'RECONCILED_DELIVERED');
     assert.equal(call('status',null,[next.operationId]).turnId,'native-turn');
+    assert.match(raw('retry',null,['--operation',retryOp.operationId]).stderr,/TARGET_SESSION_BUSY/);
+    // A queue persisted before the retry guard was installed must still fail
+    // the final reservation check, even while the native thread itself is idle.
+    const setRetryState=status=>spawnSync('python3',['-c','import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);d.execute("UPDATE operations SET status=?,not_before=0 WHERE id=?",(sys.argv[2],sys.argv[3]));d.commit()',path.join(state,'bridge.sqlite3'),status,retryOp.operationId]);
+    assert.equal(setRetryState('QUEUED').status,0);
+    const blockedRetry=call('work-one',{});
+    assert.equal(blockedRetry.reason,'NATIVE_TARGET_RESERVED');
+    assert.equal(blockedRetry.status,'FAILED_PRE_SEND');
+    assert.equal(JSON.parse(await readFile(saved,'utf8')).clientUserMessageId,next.operationId);
+    assert.equal(setRetryState('DISPATCHING').status,0);
+    assert.match(raw('native-admission',null,[retryOp.operationId]).stderr,/TARGET_SESSION_BUSY/);
   } finally {await rm(root,{recursive:true,force:true});}
 });

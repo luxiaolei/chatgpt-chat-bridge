@@ -132,7 +132,10 @@ export async function dispatchNative(input, connect = connectNative) {
     if (thread.status?.type !== 'idle' || thread.canAcceptDirectInput !== true) fail('NATIVE_TARGET_BUSY');
     if (input.admission) {
       const gate = spawnSync('python3',[fileURLToPath(new URL('./coordinator.py',import.meta.url)), 'native-admission', '', input.admission.state, input.admission.operationId],{encoding:'utf8'});
-      if (gate.status !== 0) fail('NATIVE_ADMISSION_BLOCKED');
+      if (gate.status !== 0) {
+        let detail; try {detail=JSON.parse(gate.stderr);} catch {}
+        fail(detail?.error==='TARGET_SESSION_BUSY'?'NATIVE_TARGET_RESERVED':'NATIVE_ADMISSION_BLOCKED');
+      }
     }
     attempted = true;
     const {turn} = await client.rpc('turn/start',{threadId:target.threadId,input:[{type:'text',text:input.message}],clientUserMessageId:input.operationId,model,effort});
@@ -144,7 +147,7 @@ export async function dispatchNative(input, connect = connectNative) {
   } finally {client?.close();}
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(await realpath(process.argv[1])).href) {
   const receipt = await dispatchNative(JSON.parse(process.argv[2]));
   console.log(JSON.stringify(receipt)); process.exitCode = receipt.ok ? 0 : 2;
 }

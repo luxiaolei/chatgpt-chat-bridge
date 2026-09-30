@@ -92,6 +92,10 @@ Pause/drain are checked at enqueue, claim and immediately before native turn
 start. An unavailable socket or rejected target is PRE_SEND; a lost turn/start
 response is DELIVERY_UNKNOWN. An unrecorded worker result keeps the target busy.
 An explicit retry is permitted only for proven FAILED_PRE_SEND operations.
+Retry and the final pre-send check revalidate the thread reservation. A conflicting
+saved retry fails PRE_SEND, releasing its claim so another queued operation can
+proceed. Native task IDs cannot be reused after cancellation; a fresh task ID
+prevents old results or acceptance from attaching to later work.
 
 The worker itself uses the control footer's `queue result`. Native result
 recording checks the executing thread/host against the saved target. The owner

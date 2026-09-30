@@ -460,7 +460,10 @@ def native_target(payload, creating=False):
 
 
 def native_call(payload):
-    command = [os.environ.get("CHAT_BRIDGE_NODE_BIN") or "node", str(pathlib.Path(__file__).with_name("native-codex.mjs")), json.dumps(payload)]
+    adapter = pathlib.Path(__file__).with_name("native-codex.mjs")
+    if not adapter.is_file():
+        return {"ok": False, "code": "NATIVE_ADAPTER_UNAVAILABLE", "deliveryStage": "PRE_SEND"}
+    command = [os.environ.get("CHAT_BRIDGE_NODE_BIN") or "node", str(adapter), json.dumps(payload)]
     try:
         completed = run_bridge(command)
         receipt = parse_worker_receipt(completed)
@@ -490,7 +493,16 @@ def native_tasks(db):
     return tasks
 
 
+def native_reservation(db, session_ref, operation_id=None):
+    return db.execute("""SELECT id FROM operations o WHERE native_target IS NOT NULL AND session_ref=? AND id!=?
+        AND status NOT IN ('CANCELLED','FAILED_PRE_SEND')
+        AND NOT EXISTS (SELECT 1 FROM task_results r WHERE r.task_id=o.task_id) LIMIT 1""",
+        (session_ref, operation_id or "")).fetchone()
+
+
 def work_native(db, row):
+    if native_reservation(db, row["session_ref"], row["id"]):
+        return finish(db, row, "FAILED_PRE_SEND", "NATIVE_TARGET_RESERVED", pre_send_failure=True)
     payload = native_operation_payload(row)
     payload["admission"] = {"state": str(state_dir_for(db)), "operationId": row["id"]}
     receipt = native_call(payload)
@@ -612,13 +624,15 @@ def submit(db, payload):
         if not task_id or len(task_id) > 128 or not all(ch.isalnum() or ch in "._:-" for ch in task_id):
             raise ValueError("INVALID_TASK_ID")
         prior_task = db.execute("""SELECT id,status FROM operations WHERE kind='dispatch' AND task_id=?
-                                   AND status!='CANCELLED'
+                                   AND (status!='CANCELLED' OR native_target IS NOT NULL OR ?)
                                    ORDER BY CASE WHEN status IN ('DELIVERY_UNKNOWN','SUPERSEDED') THEN 0 ELSE 1 END,
-                                            created_at DESC LIMIT 1""", (task_id,)).fetchone()
+                                            created_at DESC LIMIT 1""", (task_id, native)).fetchone()
         if prior_task:
             if prior_task["status"] in {"DELIVERY_UNKNOWN", "SUPERSEDED"}:
                 raise ValueError("TASK_DELIVERY_UNKNOWN_RECONCILE_REQUIRED:" + prior_task["id"])
             raise ValueError("TASK_ID_ALREADY_DISPATCHED:" + prior_task["id"])
+        if native and db.execute("SELECT 1 FROM task_results WHERE task_id=? LIMIT 1", (task_id,)).fetchone():
+            raise ValueError("TASK_ID_ALREADY_RECORDED")
 
         if native:
             target = native_target(payload)
@@ -627,9 +641,7 @@ def submit(db, payload):
                 raise ValueError("NATIVE_SESSION_MISMATCH")
             if workgroup and workgroup not in (project_record.get("workgroups") or {}):
                 raise ValueError("WORKGROUP_NOT_REGISTERED")
-            busy = db.execute("""SELECT id FROM operations o WHERE native_target IS NOT NULL AND session_ref=?
-                AND status NOT IN ('CANCELLED','FAILED_PRE_SEND')
-                AND NOT EXISTS (SELECT 1 FROM task_results r WHERE r.task_id=o.task_id) LIMIT 1""", (session_ref,)).fetchone()
+            busy = native_reservation(db, session_ref)
             if busy:
                 raise ValueError("TARGET_SESSION_BUSY:" + busy["id"])
             model = requested_model or "gpt-6-astra"
@@ -2772,6 +2784,8 @@ def main():
             row = db.execute("SELECT * FROM operations WHERE id=?", (args[0],)).fetchone()
             if not row or not row["native_target"] or row["status"] != "DISPATCHING":
                 raise ValueError("NATIVE_OPERATION_NOT_CLAIMED")
+            if native_reservation(db, row["session_ref"], row["id"]):
+                raise ValueError("TARGET_SESSION_BUSY")
             mode = management_mode(db, row["project"], row["workgroup_id"])
             if mode["mode"] != "RUNNING":
                 raise ValueError("ADMISSION_" + mode["mode"])
@@ -3034,7 +3048,10 @@ def main():
         elif command == "retry":
             if len(args)!=2 or args[0]!="--operation":
                 raise ValueError("retry requires --operation ID")
-            prior = db.execute("SELECT kind FROM operations WHERE id=? AND status='FAILED_PRE_SEND'", (args[1],)).fetchone()
+            begin_immediate(db)
+            prior = db.execute("SELECT * FROM operations WHERE id=? AND status='FAILED_PRE_SEND'", (args[1],)).fetchone()
+            if prior and prior["native_target"] and native_reservation(db, prior["session_ref"], prior["id"]):
+                raise ValueError("TARGET_SESSION_BUSY")
             changed = db.execute("UPDATE operations SET status='QUEUED',pre_send_failures=0,not_before=?,updated_at=? WHERE id=? AND status='FAILED_PRE_SEND'",
                                  (time.time(),stamp(),args[1]))
             if changed.rowcount != 1:
