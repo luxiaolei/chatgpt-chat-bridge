@@ -21,6 +21,13 @@ export function imageCallerEnvironment(prepared,command,payload,environment=proc
   if(!command.startsWith('image-') && command!=='local-owner-contract')return undefined;
   const context=prepared?.callerContext;
   need(context && context.version===1 && context.host===hostname() && canonicalImageJSON(context.key)===canonicalImageJSON(prepared.payload.key) && canonicalImageJSON(context.route)===canonicalImageJSON(prepared.route),'IMAGE_CALLER_CONTEXT_REQUIRED');
+  need(canonicalImageJSON(context.recovery||null)===canonicalImageJSON(prepared.payload.recovery||null),'IMAGE_CALLER_SCOPE_MISMATCH');
+  if(context.recovery) {
+    need(['characterize','assist-observe'].includes(context.action),'IMAGE_RECOVERY_EFFECT_FORBIDDEN');
+    if(command==='image-output-io-admission')need(Object.keys(context.recovery).every(field=>canonicalImageJSON(payload[field])===canonicalImageJSON(context.recovery[field])),'IMAGE_CALLER_SCOPE_MISMATCH');
+    if(command==='image-apply')need(canonicalImageJSON(payload.recovery||null)===canonicalImageJSON(context.recovery),'IMAGE_CALLER_SCOPE_MISMATCH');
+    if(command==='image-submit')need(false,'IMAGE_RECOVERY_EFFECT_FORBIDDEN');
+  } else if(payload.recovery || command==='image-output-io-admission')need(false,'IMAGE_CALLER_SCOPE_MISMATCH');
   const caller=context.environment;
   need(caller && Object.keys(caller).sort().join(',')==='CHAT_BRIDGE_FROM_ACCOUNT_ID,CHAT_BRIDGE_FROM_SPACE,CODEX_THREAD_ID' && Object.values(caller).every(value=>typeof value==='string'),'IMAGE_CALLER_CONTEXT_REQUIRED');
   if(context.kind==='local-owner')need(!caller.CHAT_BRIDGE_FROM_ACCOUNT_ID && !caller.CHAT_BRIDGE_FROM_SPACE && context.owner?.threadId===caller.CODEX_THREAD_ID && context.owner.host===context.host,'IMAGE_CALLER_CONTEXT_REQUIRED');
@@ -72,9 +79,11 @@ async function readOfficialFile(file) {
 /** Existing durable grant is host authority. This store only persists authorized
  * evidence/original bytes; it is not another job database or a remote resolver.
  */
-export async function createHostImageArtifacts({api,key,stateDir,contract=contractModule,decode,coordinated,callerContext,decoderExecutable=process.env.CHAT_BRIDGE_IMAGE_DECODER}={}) {
+export async function createHostImageArtifacts({api,key,stateDir,contract=contractModule,decode,coordinated,callerContext,recovery=null,decoderExecutable=process.env.CHAT_BRIDGE_IMAGE_DECODER}={}) {
   const [exporter,verifier,manifest]=await Promise.all([import('./exporter.js'),import('./verifier.js'),import('./manifest.js')]);
   const job=await api.inspect(key),targetRef=job.request.authorizedOutput.targetRef;
+  if(recovery) contract.validateImageShape({...key,...recovery,action:'observe'},'OutputRecoveryQuery');
+  const admit=(action='verify',binding={})=>recovery?api.authorizeRecovery(key,recovery,action,binding):api.authorizeIO(key);
   const base=path.join(stateDir,'image-artifacts'),root=path.join(base,hash(targetRef));
   async function storeFor(target) {
     await fs.mkdir(base,{recursive:true,mode:0o700});
@@ -86,14 +95,14 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
     const origin=callerContext?.environment||process.env;
     need(!origin.CHAT_BRIDGE_FROM_ACCOUNT_ID && !origin.CHAT_BRIDGE_FROM_SPACE && typeof coordinated==='function','IMAGE_OPERATOR_HOST_OWNER_REQUIRED');
     if(callerContext)need(callerContext.kind==='local-owner' && callerContext.host===hostname() && canonicalImageJSON(callerContext.key)===canonicalImageJSON(key) && operatorRef===`codex:${callerContext.owner?.threadId}` && callerContext.owner.host===callerContext.host,'IMAGE_OPERATOR_HOST_OWNER_REQUIRED');
-    await api.authorizeIO(key);
+    await admit('observe');
     const current=await api.inspect(key);
     const owner=await coordinated('local-owner-contract',{taskId:current.controllerTaskId,project:current.route.project,
       sessionRef:current.route.sessionRef,callerRef:operatorRef});
     need(owner.kind==='codex' && operatorRef===`codex:${owner.threadId}`,'IMAGE_OPERATOR_HOST_OWNER_REQUIRED');
   }
   async function prepareInbox() {
-    await api.authorizeIO(key);
+    await admit('save');
     const current=await api.inspect(key),attempt=current.attempts.at(-1);
     need(attempt,'IMAGE_BASELINE_REQUIRED');
     const inboxBase=path.join(stateDir,'image-original-inbox');
@@ -101,15 +110,15 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
     const binding=hash(canonicalImageJSON({key,requestDigest:current.requestDigest,attemptId:attempt.attemptId}));
     const inboxRoot=path.join(inboxBase,binding),originalRef=`urn:chatbridge:official-save:${binding}`;
     await exporter.createControlledImageStore({root:inboxRoot,targetRef:originalRef});
-    await api.authorizeIO(key);
+    await admit('save');
     return {originalPath:path.join(inboxRoot,'original.bin'),originalRef};
   }
   async function saveEvidence(evidence) {
-    await api.authorizeIO(key);
+    await admit('save');
     need(canonicalImageJSON(evidence.route)===canonicalImageJSON(job.route),'IMAGE_EVIDENCE_ROUTE_MISMATCH');
     const bytes=Buffer.from(canonicalImageJSON(evidence)),digest=hash(bytes);
     await (await store()).putImmutable(`evidence-${digest}.json`,bytes);
-    await api.authorizeIO(key);
+    await admit('save');
     return `artifact:cbimg-evidence:${hash(targetRef)}:${digest}`;
   }
   function decoder() {
@@ -118,7 +127,7 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
     return verifier.createImageMagickDecoder({executable:decoderExecutable});
   }
   async function authorize(binding) {
-    const authority=await api.authorizeIO(key),current=await api.inspect(key),attempt=current.attempts.at(-1);
+    const authority=await admit(),current=await api.inspect(key),attempt=current.attempts.at(-1);
     need(binding.action==='export' && binding.callerRef===current.caller.ref && binding.jobId===current.jobId &&
       binding.requestDigest===current.requestDigest && binding.targetRef===targetRef &&
       canonicalImageJSON(binding.scope)===canonicalImageJSON(current.scope) && canonicalImageJSON(binding.route)===canonicalImageJSON(current.route) &&
@@ -129,7 +138,8 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
     return {allowed:true,bindingDigest:hash(manifest.canonicalArtifactJSON(binding)),expiresAt:authority.expiresAt};
   }
   async function resolveSource(source) {
-    const authority=await api.authorizeIO(key);
+    need(!recovery,'IMAGE_RECOVERY_EFFECT_FORBIDDEN');
+    const authority=await admit();
     const current=await api.inspect(key);
     need(current.request.inputs.some(input=>canonicalImageJSON(input)===canonicalImageJSON(source)),'IMAGE_SOURCE_NOT_GRANTED');
     const authenticated=authority.sources?.find(item=>canonicalImageJSON(item.source)===canonicalImageJSON(source));
@@ -157,13 +167,13 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
     const verified=await verifier.verifyImageBytes(bytes,{mimeType:output.mimeType,expectedSha256:output.sha256,
       expectedWidth:output.width,expectedHeight:output.height,decode:decoder()});
     need(verified.byteLength===output.byteLength && verified.pixelSha256===record.verified.pixelSha256,'IMAGE_SOURCE_BINDING_MISMATCH');
-    const fresh=await api.authorizeIO(key);
+    const fresh=await admit();
     need(fresh.sources?.some(item=>canonicalImageJSON(item)===canonicalImageJSON(authenticated)),'IMAGE_SOURCE_REVISION_MISMATCH');
     return {...source,path:path.join(sourceRoot,`original-${locator[2]}.bin`),mimeType:verified.mimeType,
       turnId:record.binding.turnId,route:current.route};
   }
   async function exportOriginal(input) {
-    await api.authorizeIO(key);
+    await admit();
     const current=await api.inspect(key),attempt=current.attempts.at(-1);
     need(attempt?.turnId && attempt.candidateOutputIds.includes(input.outputId),'IMAGE_NEW_OUTPUT_REQUIRED');
     const kind=input.kind,mode=kind==='NATIVE_ORIGINAL'?'NATIVE':'ASSISTED';
@@ -173,23 +183,25 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
       outputs:[{outputId:input.outputId,status:'AVAILABLE',attemptId:attempt.attemptId,turnId:attempt.turnId,
         originalRef:input.originalRef,...(input.sha256?{expectedSha256:input.sha256}:{} )}]};
     const provider=async binding=>{
-      await api.authorizeIO(key);
+      await admit();
       const bytes=await readOfficialFile(input.path);
-      await api.authorizeIO(key);
+      if(recovery)need(bytes.length<=(await admit()).maxByteLength,'IMAGE_RECOVERY_BYTE_BUDGET');
+      await admit();
       return {bytes,mimeType:input.mimeType||verifier.sniffImageMime(bytes),provenance:{kind,jobId:current.jobId,
         attemptId:attempt.attemptId,turnId:attempt.turnId,outputId:binding.outputId,originalRef:binding.originalRef}};
     };
     const result=await exporter.createImageExporter({contract,store:await store(),authorize,readOriginal:provider,decode:decoder()}).exportOriginals(plan);
-    await api.authorizeIO(key);
+    await admit();
     if(!result.manifestPersisted || !result.manifest.outputs.length) return {ok:false,status:result.status,manifest:result.publicManifest,retryAllowed:false};
     const latest=await api.inspect(key);
-    const saved=await api.export(key,manifest.imageExportEvent(result,{eventId:'export-'+hash(`${result.manifestRef}:${latest.revision}`),expectedRevision:latest.revision,route:current.route}));
+    const saved=await api.export(key,manifest.imageExportEvent(result,{eventId:'export-'+hash(`${result.manifestRef}:${latest.revision}`),expectedRevision:latest.revision,route:current.route}),{recovery});
+    const revisions=await api.result(key);
     return {ok:true,status:saved.status,manifest:result.publicManifest,manifestRef:result.manifestRef,
-      outputRevisions:(await api.result(key)).outputRevisions,deliveryStatus:'NOT_RECEIVED',businessApproval:'NOT_EVALUATED'};
+      outputRevisions:revisions.outputRevisions,lateOutputRevisions:revisions.lateOutputRevisions,deliveryStatus:'NOT_RECEIVED',businessApproval:'NOT_EVALUATED'};
   }
   async function importOfficialOriginal(input) {
     await assertOperator(input.operatorRef);
-    await api.authorizeIO(key);
+    await admit();
     const current=await api.inspect(key),attempt=current.attempts.at(-1),proof=input.officialSave;
     const inbox=await prepareInbox();
     need(input.path===inbox.originalPath && input.originalRef===inbox.originalRef,'IMAGE_ORIGINAL_INBOX_REQUIRED');
@@ -203,40 +215,95 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
   }
   async function verifyAssistedOriginal(input) {
     await assertOperator(input.operatorRef);
-    await api.authorizeIO(key);
+    await admit();
     const inbox=await prepareInbox();
     need(input.path===inbox.originalPath && input.originalRef===inbox.originalRef,'IMAGE_ORIGINAL_INBOX_REQUIRED');
-    need(/^[a-f0-9]{64}$/.test(input.sha256||''),'IMAGE_ORIGINAL_HASH_REQUIRED');
+    need(recovery && input.sha256===undefined || /^[a-f0-9]{64}$/.test(input.sha256||''),'IMAGE_ORIGINAL_HASH_REQUIRED');
     const bytes=await readOfficialFile(inbox.originalPath);
+    if(recovery)need(bytes.length<=(await admit()).maxByteLength,'IMAGE_RECOVERY_BYTE_BUDGET');
     const verified=await verifier.verifyImageBytes(bytes,{mimeType:input.mimeType||verifier.sniffImageMime(bytes),expectedSha256:input.sha256,decode:decoder()});
-    await api.authorizeIO(key);
+    await admit();
     const current=await api.inspect(key);
     need(!current.request.inputs.some(source=>source.sha256===verified.sha256),'IMAGE_SOURCE_IMAGE_REUSED');
     return verified;
   }
-  return Object.freeze({saveEvidence,resolveSource,assertOperator,prepareInbox,verifyAssistedOriginal,exportOriginal,importOfficialOriginal});
+  async function receiveExisting(binding) {
+    need(recovery,'IMAGE_RECOVERY_REQUIRED');
+    const authority=await admit('receive',binding),output=authority.output;
+    need(output.byteLength<=authority.maxByteLength,'IMAGE_RECOVERY_BYTE_BUDGET');
+    const destination=path.join(stateDir,'image-received',hash(binding.destinationRef));
+    await fs.mkdir(path.dirname(destination),{recursive:true,mode:0o700});
+    const receiverStore=await exporter.createControlledImageStore({root:destination,targetRef:binding.destinationRef});
+    const authorizeReceive=async bound=>{
+      need(bound.action==='receive' && bound.jobId===job.jobId && bound.requestDigest===job.requestDigest &&
+        bound.outputId===output.outputId && bound.artifactRef===output.artifactRef && bound.sha256===output.sha256 &&
+        bound.consumerRef===binding.consumerRef && bound.destinationRef===binding.destinationRef,'IMAGE_RECOVERY_RECEIVER_BINDING');
+      const fresh=await admit('receive',binding);
+      return {allowed:true,bindingDigest:hash(manifest.canonicalArtifactJSON(bound)),expiresAt:fresh.expiresAt};
+    };
+    const resolveArtifact=async()=>{
+      await admit('receive',binding);
+      const locator=/^artifact:cbimg:([a-f0-9]{64}):([a-f0-9]{64})$/.exec(output.artifactRef);
+      need(locator && locator[1]===hash(targetRef),'IMAGE_SOURCE_BINDING_MISMATCH');
+      const producerStore=await store(),recordBytes=await producerStore.read(`record-${locator[2]}.json`);
+      need(recordBytes,'IMAGE_SOURCE_RESOLUTION_UNAVAILABLE');
+      const record=JSON.parse(recordBytes.toString('utf8'));
+      need(record.schemaVersion==='chatbridge.image.original-record.v1' && record.artifactRef===output.artifactRef &&
+        record.binding.requestDigest===job.requestDigest && locator[2]===hash(canonicalImageJSON({requestDigest:job.requestDigest,outputId:output.outputId})) &&
+        ['jobId','attemptId','turnId','outputId'].every(field=>record.binding[field]===output[field]) &&
+        ['sha256','mimeType','width','height','byteLength'].every(field=>record.verified[field]===output[field]),'IMAGE_SOURCE_BINDING_MISMATCH');
+      const bytes=await producerStore.read(`original-${locator[2]}.bin`);
+      need(bytes,'IMAGE_SOURCE_RESOLUTION_UNAVAILABLE');
+      await admit('receive',binding);
+      return {bytes,mimeType:output.mimeType};
+    };
+    const result=await manifest.createImageConsumerReceiver({contract,store:receiverStore,authorize:authorizeReceive,resolveArtifact,decode:decoder()})
+      .receive({jobId:job.jobId,requestDigest:job.requestDigest,output,consumerRef:binding.consumerRef});
+    return {...result,deliveryStatus:'RECEIVED',businessApproval:'NOT_EVALUATED'};
+  }
+  return Object.freeze({admit,saveEvidence,resolveSource,assertOperator,prepareInbox,verifyAssistedOriginal,exportOriginal,importOfficialOriginal,receiveExisting});
 }
 
 export async function imageCli(action,payload={}, {coordinated,executor,liveAction,decode,callerEnv=process.env,stateDir=process.env.CHAT_BRIDGE_STATE_DIR||path.join(homedir(),'.local/state/chat-bridge')}={}) {
   if (['batch-create','batch-inspect','batch-decision'].includes(action)) return coordinated('image-'+action,payload);
+  if(action==='recovery-authorize') {
+    need(payload.grant?.kind==='OUTPUT_RECOVERY','IMAGE_RECOVERY_REQUIRED');
+    return coordinated('image-authorize',payload);
+  }
+  if(action==='recovery-admission')return createImageJobAPI({coordinated}).authorizeRecovery(payload.key,payload.recovery,payload.action,payload.binding);
+  if(['recovery-inbox','recovery-receive'].includes(action)) {
+    need(payload.recovery,'IMAGE_RECOVERY_REQUIRED');
+    const io=await createHostImageArtifacts({api:createImageJobAPI({coordinated}),key:payload.key,recovery:payload.recovery,stateDir,decode,coordinated});
+    if(action==='recovery-inbox')return {...await io.prepareInbox(),action:'MANUAL_OFFICIAL_SAVE_REQUIRED',retryAllowed:false};
+    need(Object.keys(payload).every(k=>['key','recovery','outputId','artifactRef','sha256','consumerRef','destinationRef'].includes(k)),'IMAGE_RECOVERY_RECEIVER_BINDING');
+    const {key,recovery,...binding}=payload;
+    return io.receiveExisting(binding);
+  }
   if (action==='probe') return imageExecutionProbe(payload.route ?? null);
   if (action==='validate') {
     const request=normalizeExecutionRequest(payload.request);
     return {ok:true,requestDigest:request.requestDigest,operation:request.operation,jobId:request.jobId};
   }
   if (['start','reconcile'].includes(action)) {
+    need(!payload.recovery,'IMAGE_RECOVERY_EFFECT_FORBIDDEN');
     if (!executor) throw new Error('IMAGE_NATIVE_ENTRY_REQUIRED');
     return action==='start'?executor.start(payload.request,payload):executor.reconcile(payload.key);
   }
   if (!['prepare','submit','inspect','result','cancel','import-original'].includes(action)) throw new Error('IMAGE_COMMAND_UNSUPPORTED');
   const api=createImageJobAPI({coordinated});
-  if (action==='import-original') return (await createHostImageArtifacts({api,key:payload.key,stateDir,decode,coordinated})).importOfficialOriginal(payload);
+  if (action==='import-original') return (await createHostImageArtifacts({api,key:payload.key,recovery:payload.recovery,stateDir,decode,coordinated})).importOfficialOriginal(payload);
   if (action==='prepare') {
     if (!['start','reconcile','characterize','download-original','assist-observe'].includes(liveAction)) throw new Error('IMAGE_COMMAND_UNSUPPORTED');
+    if(payload.recovery)need(['characterize','assist-observe'].includes(liveAction),'IMAGE_RECOVERY_EFFECT_FORBIDDEN');
     const request=liveAction==='start'?normalizeExecutionRequest(payload.request):null;
     const key=request?imageJobKey(request,payload.grantId):payload.key;
     const job=request?await api.submit(request,{grantId:payload.grantId}):await api.inspect(key);
     const callerContext=captureImageCaller(job,key,liveAction,coordinated,callerEnv);
+    if(payload.recovery) {
+      need(['characterize','assist-observe'].includes(liveAction) && callerContext.kind==='local-owner','IMAGE_RECOVERY_EFFECT_FORBIDDEN');
+      await api.authorizeRecovery(key,payload.recovery,'observe');
+      callerContext.recovery=JSON.parse(canonicalImageJSON(payload.recovery));
+    }
     // Runtime configuration is captured after access/owner validation, outside
     // the request payload. No caller-provided path or whole environment is used.
     const decoderExecutable=callerEnv.CHAT_BRIDGE_IMAGE_DECODER||null;
@@ -244,7 +311,10 @@ export async function imageCli(action,payload={}, {coordinated,executor,liveActi
     return {payload:{...payload,key,...(request?{request}:{} )},route:job.route,callerContext,
       runtimeConfig:{nodeExecutable:process.execPath,decoderExecutable}};
   }
-  if (action==='submit') return api.submit(normalizeExecutionRequest(payload.request),{grantId:payload.grantId});
+  if (action==='submit') {
+    need(!payload.recovery,'IMAGE_RECOVERY_EFFECT_FORBIDDEN');
+    return api.submit(normalizeExecutionRequest(payload.request),{grantId:payload.grantId});
+  }
   if (action==='cancel') return api.cancel(payload.key,payload.event);
   return api[action](payload);
 }

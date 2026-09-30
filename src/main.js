@@ -2431,18 +2431,23 @@ async function runNativeImage(action,payload) {
     import(pathMod.join(directory,"contract.js")),import(pathMod.join(directory,"chatgpt-ego.cli.js")),
   ]);
   const api=contract.createImageJobAPI({coordinated}),key=payload.key;
+  const recovery=payload.recovery||null;
+  if(recovery && !['characterize','assist-observe'].includes(action))throw new Error("IMAGE_RECOVERY_EFFECT_FORBIDDEN");
   const callerContext=globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__?.callerContext;
   if(callerContext && callerContext.action!==action)throw new Error("IMAGE_CALLER_SCOPE_MISMATCH");
+  if(callerContext && contract.canonicalImageJSON(callerContext.recovery||null)!==contract.canonicalImageJSON(recovery))throw new Error("IMAGE_CALLER_SCOPE_MISMATCH");
   const job=await api.inspect(key);
   if(callerContext && (callerContext.requestDigest!==job.requestDigest || contract.canonicalImageJSON(callerContext.route)!==contract.canonicalImageJSON(job.route)))throw new Error("IMAGE_CALLER_SCOPE_MISMATCH");
   const route=job.route,chat=resolveChat(reg,route.sessionRef,route.project,route.accountAlias);
   if((chat.conversationId||chat.id)!==route.conversationId || accountScope(reg,chat.account)!==route.accountId || chat.status!=="active") throw new Error("IMAGE_ROUTE_MISMATCH");
-  const io=await artifacts.createHostImageArtifacts({api,key,stateDir:STATE_DIR,contract,coordinated,callerContext,
+  const io=await artifacts.createHostImageArtifacts({api,key,recovery,stateDir:STATE_DIR,contract,coordinated,callerContext,
     decoderExecutable:globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__?.runtimeConfig?.decoderExecutable});
   const withUi=async(expected,callback)=>{
     if(contract.canonicalImageJSON(expected)!==contract.canonicalImageJSON(route)) throw new Error("IMAGE_ROUTE_MISMATCH");
+    if(recovery)await io.admit('observe');
     const {task,page}=await ensurePage(reg,chat,{pauseOnUserControl:true});
     async function assertOwnedRoute() {
+      if(recovery)await io.admit('observe');
       await assertWebAvailable(chat.account);
       const current=(await loadRuntime()).tasks[job.controllerTaskId];
       if(current?.watchdogPausedForUserControl) throw new Error("IMAGE_USER_CONTROL_PAUSED");
@@ -2470,6 +2475,7 @@ async function runNativeImage(action,payload) {
       if(!Array.isArray(snapshot.attachments) || snapshot.attachments.length!==expectedInputs || snapshot.attachments.some(input=>input.accepted!==true)) throw new Error("IMAGE_ATTACHMENT_CHANGED");
       const occupancy=await api.sessionOccupancy({accountId:route.accountId,conversationId:route.conversationId},key);
       if(!occupancy.reservedByJob) throw new Error("IMAGE_SESSION_OCCUPIED_RECONCILE_ONLY");
+      if(recovery)throw new Error("IMAGE_RECOVERY_EFFECT_FORBIDDEN");
       await api.authorizeIO(key);
     }
     const ui=uiModule.createEgoImageUi({page,assertOwnedRoute,
@@ -2506,6 +2512,7 @@ async function runNativeImage(action,payload) {
     if(!attempt || attempt.capabilities.features[current.request.operation].mode!=="ASSISTED") throw new Error("IMAGE_ASSISTED_MODE_REQUIRED");
     if(proof?.confirmed!==true || proof.relationshipConfirmed!==true || proof.requestDigest!==current.requestDigest ||
         proof.attemptId!==attempt.attemptId || contract.canonicalImageJSON(proof.route)!==contract.canonicalImageJSON(route)) throw new Error("IMAGE_OFFICIAL_SAVE_ATTESTATION_REQUIRED");
+    if(recovery && (proof.userMessageId!==recovery.userMessageId || proof.turnId!==recovery.turnId))throw new Error("IMAGE_RECOVERY_TURN_BINDING");
     return withUi(route,async ui=>{
       const snapshot=await ui.inspect();execution.assertImageSnapshot(current.request,snapshot);
       if(snapshot.generating) throw new Error("IMAGE_NATIVE_TOOL_NOT_SETTLED");
@@ -2524,18 +2531,19 @@ async function runNativeImage(action,payload) {
       const outputId="image-"+crypto.createHash("sha256").update(contract.canonicalImageJSON({requestDigest:current.requestDigest,attemptId:attempt.attemptId,turnId:proof.turnId,originalSha256:verified.sha256})).digest("hex");
       const evidenceRef=await io.saveEvidence({adapterVersion:execution.IMAGE_ADAPTER_VERSION,route,observedAt:new Date().toISOString(),
         mode:"ASSISTED",proof:"authorized-owner-official-ui-attestation",operatorRef:payload.operatorRef,
+        ...(recovery?{recoveryGrantId:recovery.recoveryGrantId}:{}),
         requestDigest:current.requestDigest,attemptId:attempt.attemptId,promptHash,userMessageId:users[0].id,turnId:proof.turnId,
         parentUserId:proof.parentUserId,relationshipConfirmed:true,nativeParentProof:false,nativeAssetProof:false,
         outputId,originalRef:payload.originalRef,sha256:verified.sha256,width:verified.width,height:verified.height,
         sourceBinding,
         sourceHashes:current.request.inputs.map(input=>input.sha256),sourceTurnId:current.sourceTurnId,
         parentOutputId:current.request.baseRevision?.outputId||null,baseRevisionId:current.request.baseRevision?.revisionId||null});
-      await api.authorizeIO(key);
+      await io.admit('observe');
       const latest=await api.inspect(key);
       const saved=await api.record(key,{eventId:"assisted-"+crypto.createHash("sha256").update(`${evidenceRef}:${latest.revision}`).digest("hex"),expectedRevision:latest.revision,
-        attemptId:attempt.attemptId,route,status:"GENERATED",evidenceRef,userMessageId:users[0].id,turnId:proof.turnId,candidateOutputIds:[outputId],reason:"ASSISTED_OFFICIAL_SAVE_ATTESTED"});
+        attemptId:attempt.attemptId,route,status:"GENERATED",evidenceRef,userMessageId:users[0].id,turnId:proof.turnId,candidateOutputIds:[outputId],reason:"ASSISTED_OFFICIAL_SAVE_ATTESTED"},{recovery});
       return {ok:true,status:saved.status,mode:"ASSISTED",outputId,evidenceRef,retryAllowed:false,nativeReady:false,
-        importPayload:{key,operatorRef:payload.operatorRef,path:payload.path,originalRef:payload.originalRef,sha256:verified.sha256,mimeType:verified.mimeType,outputId,
+        importPayload:{key,...(recovery?{recovery}:{}),operatorRef:payload.operatorRef,path:payload.path,originalRef:payload.originalRef,sha256:verified.sha256,mimeType:verified.mimeType,outputId,
           officialSave:{...proof,outputId,originalRef:payload.originalRef}},deliveryStatus:"NOT_RECEIVED",businessApproval:"NOT_EVALUATED"};
     });
   }

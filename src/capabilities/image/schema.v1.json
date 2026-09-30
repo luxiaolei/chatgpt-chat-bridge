@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:chatbridge:image:v1",
-  "title": "ChatBridge ImageJob v1 — names and digests are not authorization",
+  "title": "ChatBridge ImageJob v1 \u2014 names and digests are not authorization",
   "$ref": "#/$defs/Request",
   "$defs": {
     "Scope": {
@@ -1495,6 +1495,187 @@
         "inputs",
         "mask",
         "output"
+      ]
+    },
+    "OutputRecoveryGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "OUTPUT_RECOVERY"
+        },
+        "grantId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "controllerOperationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "controllerTaskId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "key": {
+          "$ref": "#/$defs/Key"
+        },
+        "requestDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "route": {
+          "$ref": "#/$defs/Route"
+        },
+        "userMessageId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "turnId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "evidenceRef": {
+          "type": "string",
+          "pattern": "^(artifact|store|urn):[^\\s]+$",
+          "minLength": 3,
+          "maxLength": 512
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "targetRef": {
+          "type": "string",
+          "pattern": "^(artifact|store|urn):[^\\s]+$",
+          "minLength": 3,
+          "maxLength": 512
+        },
+        "consumerRef": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "destinationRef": {
+          "type": "string",
+          "pattern": "^(artifact|store|urn):[^\\s]+$",
+          "minLength": 3,
+          "maxLength": 512
+        },
+        "maxByteLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 33554432
+        }
+      },
+      "required": [
+        "kind",
+        "grantId",
+        "controllerOperationId",
+        "controllerTaskId",
+        "key",
+        "requestDigest",
+        "attemptId",
+        "route",
+        "userMessageId",
+        "turnId",
+        "evidenceRef",
+        "expiresAt",
+        "targetRef",
+        "consumerRef",
+        "destinationRef",
+        "maxByteLength"
+      ]
+    },
+    "OutputRecoveryQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "grantId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "callerRef": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "jobId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "recoveryGrantId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "requestDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "route": {
+          "$ref": "#/$defs/Route"
+        },
+        "userMessageId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "turnId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "action": {
+          "enum": [
+            "observe",
+            "save",
+            "verify",
+            "receive"
+          ]
+        },
+        "outputId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "artifactRef": {
+          "type": "string",
+          "pattern": "^(artifact|store|urn):[^\\s]+$",
+          "minLength": 3,
+          "maxLength": 512
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "consumerRef": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "destinationRef": {
+          "type": "string",
+          "pattern": "^(artifact|store|urn):[^\\s]+$",
+          "minLength": 3,
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "grantId",
+        "callerRef",
+        "jobId",
+        "scope",
+        "recoveryGrantId",
+        "requestDigest",
+        "attemptId",
+        "route",
+        "userMessageId",
+        "turnId",
+        "action"
       ]
     }
   }

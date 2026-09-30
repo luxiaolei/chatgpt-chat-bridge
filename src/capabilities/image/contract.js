@@ -160,22 +160,24 @@ export const validateImageReceipt = receipt => validateImageShape(receipt,'Recei
 export function createImageJobAPI({coordinated}) {
   if (typeof coordinated !== 'function') fail('IMAGE_COORDINATOR_REQUIRED');
   const read = (command,key) => coordinated(command,validateImageShape(copy(key),'Key'));
-  const apply = (type,key,event) => coordinated('image-apply',{...validateImageShape(copy(key),'Key'),event:{...copy(event),type}});
+  const apply = (type,key,event,{recovery}={}) => coordinated('image-apply',{...validateImageShape(copy(key),'Key'),event:{...copy(event),type},...(recovery?{recovery:copy(recovery)}:{})});
   return Object.freeze({
     submit:(request,{grantId})=>coordinated('image-submit',{grantId,request:normalizeImageRequest(request)}),
     inspect:key=>read('image-inspect',key),
     result:key=>read('image-result',key),
     authorizeIO:key=>read('image-io-admission',key),
+    authorizeRecovery:(key,recovery,action,binding={})=>coordinated('image-output-io-admission',validateImageShape(copy({...key,...recovery,action,...binding}),'OutputRecoveryQuery')),
     sessionOccupancy:(session,key)=>coordinated('image-session-occupancy',validateImageShape(copy({session:{accountId:session.accountId,conversationId:session.conversationId},...(key === undefined ? {} : {key})}),'SessionOccupancyQuery')),
     beginAttempt:(key,event)=>apply('beginAttempt',key,event),
-    record:(key,event)=>apply('observation',key,event),
-    export:(key,event)=>apply('export',key,event),
+    record:(key,event,options)=>apply('observation',key,event,options),
+    export:(key,event,options)=>apply('export',key,event,options),
     reconcile:(key,event)=>apply('reconcile',key,event),
     cancel:(key,event)=>apply('cancel',key,event),
   });
 }
 
 export function normalizeImageGrant(input, at = new Date().toISOString()) {
+  if (input.kind === 'OUTPUT_RECOVERY') fail('IMAGE_RECOVERY_EFFECT_FORBIDDEN');
   const request = normalizeImageRequest(input.request);
   const grant = copy({...input,request,capabilities:input.capabilities ?? unknownImageCapabilities(request.route)});
   validateImageShape(grant,'Grant');
@@ -186,7 +188,17 @@ export function normalizeImageGrant(input, at = new Date().toISOString()) {
   return grant;
 }
 
+/** Fresh read authority for an existing result; it never changes the request or grants generation. */
+export function normalizeOutputRecoveryGrant(input, at = new Date().toISOString()) {
+  const grant=validateImageShape(copy(input),'OutputRecoveryGrant');
+  const lifetime=Date.parse(grant.expiresAt)-Date.parse(at);
+  if (!(lifetime > 0 && lifetime <= 3600000)) fail('IMAGE_RECOVERY_EXPIRY');
+  if (grant.grantId === grant.key.grantId || grant.userMessageId === grant.turnId) fail('IMAGE_RECOVERY_BINDING');
+  return grant;
+}
+
 export function initialImageJob(grant, at = new Date().toISOString()) {
+  if (grant.kind === 'OUTPUT_RECOVERY') fail('IMAGE_RECOVERY_EFFECT_FORBIDDEN');
   const request = normalizeImageRequest(grant.request), gate = imageCapabilityGate(request,grant.capabilities,at);
   return {schemaVersion:IMAGE_SCHEMA_VERSION,jobId:request.jobId,requestDigest:request.requestDigest,
     controllerTaskId:grant.controllerTaskId,controllerOperationId:grant.controllerOperationId,grantId:grant.grantId,
@@ -225,6 +237,7 @@ function addWarning(job,warning) {if (!job.warnings.includes(warning)) job.warni
  * No UI call is made here. beginAttempt writes UNKNOWN before the adapter may send.
  */
 export function applyImageEvent(record, event, grant, {at = new Date().toISOString(),grantActive = true} = {}) {
+  if (grant.kind === 'OUTPUT_RECOVERY') fail('IMAGE_RECOVERY_EFFECT_FORBIDDEN');
   validateEvent(event);
   if (event.expectedRevision !== record.revision) fail('IMAGE_REVISION_CONFLICT');
   const job=copy(record), request=job.request;
@@ -331,6 +344,7 @@ export function imageJobResult(job) {
     controllerTaskId:job.controllerTaskId,controllerOperationId:job.controllerOperationId,caller:copy(job.caller),scope:copy(job.scope),route:copy(job.route),
     status:job.status,revision:job.revision,reason:job.reason,outputs:copy(job.outputs),lateOutputs:copy(job.lateOutputs),
     outputRevisions:job.outputs.filter(o=>o.validation.status === 'VERIFIED').map(o=>imageOutputRevision(job.request,o)),
+    lateOutputRevisions:job.lateOutputs.filter(o=>o.validation.status === 'VERIFIED').map(o=>imageOutputRevision(job.request,o)),
     missingCount:Math.max(0,job.request.count-job.outputs.length),warnings:copy(job.warnings),capabilities:copy(job.capabilities),
     requestedModel:job.request.requestedModel,requestedEffort:job.request.requestedEffort,
     modelSelection:copy(job.attempts.at(-1)?.modelSelection ?? {model:null,effort:null,raw:null,verified:false}),
@@ -346,6 +360,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     const value=JSON.parse(raw), action=process.argv[2];
     const result=action === 'normalize'?normalizeImageRequest(value.request):
       action === 'grant'?normalizeImageGrant(value.grant,value.at):
+      action === 'recovery-grant'?normalizeOutputRecoveryGrant(value.grant,value.at):
+      action === 'recovery-query'?validateImageShape(value,'OutputRecoveryQuery'):
       action === 'initial'?initialImageJob(value.grant,value.at):
       action === 'apply'?applyImageEvent(value.record,value.event,value.grant,{at:value.at,grantActive:value.grantActive}):
       action === 'result'?imageJobResult(value.record):

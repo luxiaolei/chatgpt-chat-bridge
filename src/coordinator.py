@@ -2696,6 +2696,8 @@ def image_route(db, row, request):
 
 def image_access(db, grant, payload):
     """Lookup names confer no authority; use persisted grant, origin, owner and scope."""
+    if grant.get("kind") == "OUTPUT_RECOVERY":
+        raise ValueError("IMAGE_RECOVERY_EFFECT_FORBIDDEN")
     row = image_operation(db, grant)
     request = grant["request"]
     if (payload.get("callerRef") != request["caller"]["ref"] or payload.get("jobId") != request["jobId"]
@@ -2713,7 +2715,7 @@ def image_access(db, grant, payload):
     return row
 
 
-def image_sources(db, request):
+def image_sources(db, request, grant=None):
     source_turn_id = None
     sources = []
     for source in request["inputs"]:
@@ -2727,6 +2729,10 @@ def image_sources(db, request):
         if parent["scope"] != request["scope"]:
             raise ValueError("IMAGE_SOURCE_SCOPE_MISMATCH")
         output = next((o for o in parent["outputs"] if o["outputId"] == source["outputId"]), None)
+        if not output and request["operation"] == "refine" and grant and grant.get("sourceExternalizationAuthorized"):
+            # The fresh normal grant explicitly names this immutable late source.
+            # Source access does not move it out of quarantine or adopt its job.
+            output = next((o for o in parent["lateOutputs"] if o["outputId"] == source["outputId"]), None)
         if (not output or output["artifactRef"] != source["artifactRef"] or output["sha256"] != source["sha256"]
                 or output["validation"]["status"] != "VERIFIED"):
             raise ValueError("IMAGE_SOURCE_NOT_VERIFIED")
@@ -2741,9 +2747,9 @@ def image_sources(db, request):
     return {"sourceTurnId": source_turn_id, "sources": sources}
 
 
-def image_admission(db, row, request):
+def image_admission(db, row, request, grant=None):
     image_route(db, row, request)
-    sources = image_sources(db, request)
+    sources = image_sources(db, request, grant)
     if row["status"] != "SENT":
         raise ValueError("IMAGE_CONTROLLER_DELIVERY_NOT_CONFIRMED")
     if db.execute("SELECT 1 FROM task_results WHERE task_id=? LIMIT 1", (row["task_id"],)).fetchone():
@@ -2847,6 +2853,8 @@ def image_batch_reserve(db, record, payload, now):
 
 def image_io_admission(db, saved, record, at=None):
     grant = json.loads(saved["payload"])
+    if grant.get("kind") == "OUTPUT_RECOVERY":
+        raise ValueError("IMAGE_RECOVERY_EFFECT_FORBIDDEN")
     key = {"grantId":record["grantId"], "callerRef":record["caller"]["ref"], "jobId":record["jobId"], "scope":record["scope"]}
     operation = image_access(db, grant, key)
     if (grant["grantId"] != record["grantId"] or grant["request"]["requestDigest"] != record["requestDigest"]
@@ -2867,11 +2875,88 @@ def image_io_admission(db, saved, record, at=None):
     batch = image_batch_for_job(db, record)
     if batch:
         expires = min(expires, image_batch_deadline(json.loads(batch["document"]), instant))
-    sources = image_admission(db, operation, grant["request"])
+    sources = image_admission(db, operation, grant["request"], grant)
     gate = image_contract("gate", {"request":grant["request"], "capabilities":grant["capabilities"], "at":instant.isoformat()})
     if not gate["allowed"]:
         raise ValueError(gate["reason"])
     return {"allowed":True, "expiresAt":expires.isoformat(), "sources":sources["sources"]}
+
+
+def image_recovery_binding(db, grant):
+    key = grant["key"]
+    saved = db.execute("SELECT * FROM image_grants WHERE grant_id=?", (key["grantId"],)).fetchone()
+    row = db.execute("SELECT document FROM image_jobs WHERE caller_ref=? AND job_id=?",
+                     (key["callerRef"], key["jobId"])).fetchone()
+    if not saved or not row:
+        raise ValueError("IMAGE_RECOVERY_BINDING")
+    original, record = json.loads(saved["payload"]), json.loads(row[0])
+    operation = image_access(db, original, key)
+    image_owner(db, operation, operation["caller_ref"])
+    if (record["grantId"] != key["grantId"] or record["scope"] != key["scope"]
+            or record["requestDigest"] != grant["requestDigest"] or original["request"]["requestDigest"] != grant["requestDigest"]
+            or record["controllerOperationId"] != grant["controllerOperationId"]
+            or record["controllerTaskId"] != grant["controllerTaskId"] or record["route"] != grant["route"]
+            or record["request"]["authorizedOutput"]["targetRef"] != grant["targetRef"]):
+        raise ValueError("IMAGE_RECOVERY_BINDING")
+    attempts = record["attempts"]
+    if (record["request"]["operation"] != "generate" or record["request"]["count"] != 1
+            or record["request"]["inputs"] or len(attempts) != 1
+            or attempts[0]["capabilities"]["features"]["generate"]["mode"] != "ASSISTED"
+            or attempts[0]["capabilities"]["features"]["export"]["mode"] != "ASSISTED"):
+        raise ValueError("IMAGE_RECOVERY_MODE_UNSUPPORTED")
+    attempt = attempts[0]
+    now = datetime.now(timezone.utc)
+    expired = min(datetime.fromisoformat(t.replace("Z", "+00:00"))
+                  for t in (original["expiresAt"], original["request"]["budget"]["deadlineAt"])) <= now
+    timed_out = datetime.fromisoformat(attempt["startedAt"].replace("Z", "+00:00")) + timedelta(milliseconds=record["request"]["budget"]["maxDurationMs"]) <= now
+    if not (expired or saved["revoked_at"] or timed_out):
+        raise ValueError("IMAGE_RECOVERY_NOT_LATE")
+    if (attempt["attemptId"] != grant["attemptId"] or attempt["status"] == "FAILED_PRE_SEND"
+            or grant["userMessageId"] in attempt["baselineTurnIds"] or grant["turnId"] in attempt["baselineTurnIds"]
+            or attempt["userMessageId"] not in (None, grant["userMessageId"])
+            or attempt["turnId"] not in (None, grant["turnId"])):
+        raise ValueError("IMAGE_RECOVERY_TURN_BINDING")
+    if record["cancelRequestedAt"]:
+        raise ValueError("IMAGE_CANCEL_REQUESTED")
+    image_admission(db, operation, original["request"], original)
+    gate = image_contract("gate", {"request":{**original["request"], "operation":"export"},
+                          "capabilities":attempt["capabilities"], "at":stamp()})
+    if not gate["allowed"]:
+        raise ValueError(gate["reason"])
+    return record
+
+
+def image_recovery_admission(db, payload):
+    query = image_contract("recovery-query", payload)
+    saved = db.execute("SELECT * FROM image_grants WHERE grant_id=?", (query["recoveryGrantId"],)).fetchone()
+    if not saved:
+        raise ValueError("IMAGE_RECOVERY_ACCESS_DENIED")
+    grant = json.loads(saved["payload"])
+    if grant.get("kind") != "OUTPUT_RECOVERY":
+        raise ValueError("IMAGE_RECOVERY_ACCESS_DENIED")
+    expires = datetime.fromisoformat(grant["expiresAt"].replace("Z", "+00:00"))
+    if saved["revoked_at"] or expires <= datetime.now(timezone.utc):
+        raise ValueError("IMAGE_RECOVERY_EXPIRED_OR_REVOKED")
+    if ({k:query[k] for k in grant["key"]} != grant["key"]
+            or any(query[k] != grant[k] for k in ("requestDigest", "attemptId", "route", "userMessageId", "turnId"))):
+        raise ValueError("IMAGE_RECOVERY_BINDING")
+    record = image_recovery_binding(db, grant)
+    value = {"allowed":True, "expiresAt":expires.isoformat(), "targetRef":grant["targetRef"],
+             "maxByteLength":grant["maxByteLength"], "evidenceRef":grant["evidenceRef"]}
+    receive_fields = {"outputId", "artifactRef", "sha256", "consumerRef", "destinationRef"}
+    if query["action"] == "receive":
+        if not receive_fields.issubset(query) or any(query[k] != grant[k] for k in ("consumerRef", "destinationRef")):
+            raise ValueError("IMAGE_RECOVERY_RECEIVER_BINDING")
+        output = next((o for o in record["lateOutputs"] if o["outputId"] == query["outputId"]), None)
+        if (not output or output["validation"]["status"] != "VERIFIED" or output["attemptId"] != grant["attemptId"]
+                or output["turnId"] != grant["turnId"] or any(output[k] != query[k] for k in ("artifactRef", "sha256"))
+                or output["byteLength"] > grant["maxByteLength"]):
+            raise ValueError("IMAGE_RECOVERY_OUTPUT_NOT_VERIFIED")
+        value["outputRevision"] = image_contract("output-revision", {"request":record["request"], "output":output})
+        value["output"] = output
+    elif receive_fields.intersection(query):
+        raise ValueError("IMAGE_RECOVERY_RECEIVER_BINDING")
+    return value
 
 
 def image_batch_create(db, payload):
@@ -2985,8 +3070,9 @@ def image_batch_read(config, state, command, payload):
 
 def image_local_read(config, state, command, payload):
     occupancy = command == "image-session-occupancy"
-    payload = image_contract("occupancy-query" if occupancy else "key", payload)
-    session, key = (payload["session"], payload.get("key")) if occupancy else (None, payload)
+    recovery = command == "image-output-io-admission"
+    payload = image_contract("recovery-query" if recovery else "occupancy-query" if occupancy else "key", payload)
+    session, key = (payload["session"], payload.get("key")) if occupancy else (None, None if recovery else payload)
     origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
     if occupancy and origin and origin != session["accountId"]:
         raise ValueError("IMAGE_ACCESS_DENIED")
@@ -2995,7 +3081,7 @@ def image_local_read(config, state, command, payload):
     empty = {"occupied": False, "reservedByJob": False}
     path = state / "bridge.sqlite3"
     if not path.exists():
-        if key:
+        if key or recovery:
             raise ValueError("IMAGE_ACCESS_DENIED")
         return empty
     # Same query-only WAL read pattern as state-store.py peek. mode=rw cannot
@@ -3005,6 +3091,8 @@ def image_local_read(config, state, command, payload):
     try:
         db.execute("PRAGMA query_only=ON")
         db.execute("BEGIN")
+        if recovery:
+            return image_recovery_admission(db, payload)
         if key:
             if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='image_grants'").fetchone():
                 raise ValueError("IMAGE_ACCESS_DENIED")
@@ -3042,10 +3130,14 @@ def image_api(db, command, payload):
     try:
         now = stamp()
         if command == "image-authorize":
-            grant = image_contract("grant", {"grant": payload["grant"], "at": now})
+            recovery = payload["grant"].get("kind") == "OUTPUT_RECOVERY"
+            grant = image_contract("recovery-grant" if recovery else "grant", {"grant": payload["grant"], "at": now})
             operation = image_operation(db, grant)
             image_owner(db, operation, payload.get("issuerRef"))
-            image_route(db, operation, grant["request"])
+            if recovery:
+                image_recovery_binding(db, grant)
+            else:
+                image_route(db, operation, grant["request"])
             encoded = json.dumps(grant, sort_keys=True, ensure_ascii=False)
             prior = db.execute("SELECT * FROM image_grants WHERE grant_id=?", (grant["grantId"],)).fetchone()
             if prior and prior["payload"] != encoded:
@@ -3053,7 +3145,7 @@ def image_api(db, command, payload):
             if not prior:
                 db.execute("INSERT INTO image_grants(grant_id,controller_operation_id,payload,created_at) VALUES (?,?,?,?)",
                            (grant["grantId"], grant["controllerOperationId"], encoded, now))
-            value = {"grantId": grant["grantId"], "requestDigest": grant["request"]["requestDigest"],
+            value = {"grantId": grant["grantId"], "requestDigest": grant["requestDigest"] if recovery else grant["request"]["requestDigest"],
                      "idempotent": bool(prior), "revoked": bool(prior and prior["revoked_at"])}
         else:
             saved = db.execute("SELECT * FROM image_grants WHERE grant_id=?", (payload.get("grantId"),)).fetchone()
@@ -3065,6 +3157,8 @@ def image_api(db, command, payload):
                 db.execute("UPDATE image_grants SET revoked_at=COALESCE(revoked_at,?) WHERE grant_id=?", (now, grant["grantId"]))
                 value = {"grantId": grant["grantId"], "revoked": True}
             else:
+                if grant.get("kind") == "OUTPUT_RECOVERY":
+                    raise ValueError("IMAGE_RECOVERY_EFFECT_FORBIDDEN")
                 request = grant["request"]
                 if command == "image-submit":
                     request = image_contract("normalize", {"request": payload["request"]})
@@ -3089,7 +3183,7 @@ def image_api(db, command, payload):
                     else:
                         if not active:
                             raise ValueError("IMAGE_GRANT_EXPIRED_OR_REVOKED")
-                        sources = image_admission(db, operation, request)
+                        sources = image_admission(db, operation, request, grant)
                         value = image_contract("initial", {"grant": grant, "at": now})
                         value["sourceTurnId"] = sources["sourceTurnId"]
                         db.execute("""INSERT INTO image_jobs(caller_ref,job_id,controller_operation_id,request_digest,
@@ -3106,6 +3200,15 @@ def image_api(db, command, payload):
                         value = record if command == "image-inspect" else image_contract("result", {"record": record})
                     elif command == "image-apply":
                         event = payload["event"]
+                        if payload.get("recovery"):
+                            if event.get("type") not in {"observation", "export"} or (event.get("type") == "observation" and event.get("status") != "GENERATED"):
+                                raise ValueError("IMAGE_RECOVERY_EFFECT_FORBIDDEN")
+                            query = {**{k:payload[k] for k in ("grantId", "callerRef", "jobId", "scope")},
+                                     **payload["recovery"], "action":"observe" if event["type"] == "observation" else "verify"}
+                            image_recovery_admission(db, query)
+                            if (event.get("attemptId") != query["attemptId"] or event.get("route") != query["route"]
+                                    or (event["type"] == "observation" and (event.get("userMessageId") != query["userMessageId"] or event.get("turnId") != query["turnId"]))):
+                                raise ValueError("IMAGE_RECOVERY_TURN_BINDING")
                         event_id = event.get("eventId")
                         digest = hashlib.sha256(json.dumps(event, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
                         previous = db.execute("SELECT * FROM image_events WHERE caller_ref=? AND job_id=? AND event_id=?", (*identity,event_id)).fetchone()
@@ -3117,7 +3220,7 @@ def image_api(db, command, payload):
                                 value["effectAdmission"] = "RECONCILE_ONLY"
                         else:
                             if event.get("type") == "beginAttempt":
-                                image_admission(db, operation, request)
+                                image_admission(db, operation, request, grant)
                                 image_batch_reserve(db, record, payload, now)
                                 if any((r["caller_ref"],r["job_id"]) != identity for r in image_session_reservations(db, request["route"])):
                                     raise ValueError("IMAGE_SESSION_BUSY")
@@ -3146,7 +3249,7 @@ def main():
     if command in {"image-batch-inspect", "image-batch-decision"}:
         print(json.dumps(image_batch_read(config, state, command, json.load(sys.stdin))))
         return
-    if command in {"image-session-occupancy", "image-io-admission"}:
+    if command in {"image-session-occupancy", "image-io-admission", "image-output-io-admission"}:
         print(json.dumps(image_local_read(config, state, command, json.load(sys.stdin))))
         return
     db = connection(config, state)
