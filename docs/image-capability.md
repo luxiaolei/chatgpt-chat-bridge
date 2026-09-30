@@ -26,6 +26,13 @@ and expected-revision compare-and-swap. Duplicate event IDs replay the saved
 snapshot; changed content conflicts. Concurrent updates to one revision cannot
 both commit. No image job is projected into the reconstructable runtime cache.
 
+Fresh attempts also exclude any other unresolved native job for the real
+`accountId + conversationId`, in the same transaction. Caller, tenant, Project,
+account alias and session alias do not partition that physical conversation.
+Several jobs may be submitted, but only one can reserve its native side effect;
+the loser receives only `IMAGE_SESSION_BUSY`, without another job's identity.
+Same-event replay still returns `RECONCILE_ONLY`.
+
 `normalizeImageRequest(input)` fills inputs/base/mask/count/ratio/conversation
 policy defaults and hashes recursively key-sorted JSON without `requestDigest`.
 Every request field is covered, including caller, tenant/namespace/purpose,
@@ -79,6 +86,22 @@ independently authenticate actor/service principal, tenant, object rights and
 current receiving permissions; that gateway is outside #77 and is NOT_RUN here.
 Neither an old callback nor a hash is authority to receive/adopt an asset.
 
+An external owner/executor may establish a dedicated target using an ordinary,
+exact-target control-only dispatch: initialize the target, verify readiness,
+reply READY and wait. READY is not a terminal `queue result`; the default
+watchdog leaves that task active as `AWAITING_DURABLE_UPDATE` and notifies its
+owner. It needs no additional readiness phase. After the target is idle, the
+external executor obtains the owner grant, saves the ImageJob and actual
+native baseline, and reserves the attempt before the first image Send. It must
+not put an image prompt in the bootstrap or have an active worker send to
+itself. The owner, executor, controller task and image job remain separate
+identities. Grants remain bound to the exact dispatch target; neither a
+different target nor an unsent/completed bootstrap can admit image work.
+The final controller result and owner ACK follow remote settlement, original
+export/consumer evidence and owner review; technical ImageJob success cannot
+complete that controller task. The HZ gateway remains unavailable until its
+authentication and current actor/tenant/object-right checks are implemented.
+
 Admission rechecks the existing registered account identity, binding, Project,
 session/conversation, requested model/effort, controller delivery `SENT`, absence
 of a controller result, management pause/drain, account cooldown and recorded
@@ -115,16 +138,49 @@ const job = image.submit(request, {grantId});
 | submit | request, `{grantId}` | Persist or replay the authorized immutable job |
 | inspect | `{grantId,callerRef,jobId,scope}` | Read job, attempts and original request |
 | result | key | Read technical projection; omit full prompt |
+| authorizeIO | key | Recheck current host grant and admission; `{allowed:true,expiresAt}` or explicit failure |
+| sessionOccupancy | `{accountId,conversationId}`, optional key | Read only `{occupied,reservedByJob}`; no UI or permission grant |
 | beginAttempt | key, event | Persist baseline and UNKNOWN before a possible send |
 | record | key, event | Persist adapter observation; never execute a send |
 | export | key, event | Persist exporter's byte evidence; no download or filesystem I/O |
 | reconcile | key, event | Observe the original route/attempt only; never resend |
 | cancel | key, event | Before attempt: cancel; after possible send: request stop only |
 
-These route to `image-submit`, `image-inspect`, `image-result` and `image-apply`.
+Mutations route to `image-submit` / `image-apply`; ordinary reads use
+`image-inspect` / `image-result`, with the two query-only checks described below.
 No installed runtime/CLI behavior changes in #77. Entry wiring and actual adapter
 are #78's unique write domain; original-byte exporter and consumer receipts are
 #79's. The controller installs only after independent review and integration.
+
+`sessionOccupancy` calls `image-session-occupancy` with
+`{session:{accountId,conversationId},key?}`. The local query uses a query-only
+SQLite read transaction, never creates a missing store/image table, repairs a
+projection or wakes Ego. A generic call returns no job, tenant, prompt or grant
+details; an origin-account hint must match the queried account, and a Space-only
+hint fails closed. A supplied key must pass existing grant access and exact
+real-session binding. `reservedByJob` is true only when that saved grant/job is
+the **sole** unresolved reservation; conflicting legacy rows make it false.
+This is occupancy evidence, not current grant or I/O authorization.
+
+`authorizeIO(key)` calls `image-io-admission` with the exact Key. It uses the
+same query-only read path and requires the persisted job's current grant,
+origin/local-owner access, current registered route, SENT controller with no
+result, management/cooldown/manual admission, valid grant/deadline/attempt
+duration, no revocation or cancel request and the request capability gate.
+It returns only
+`{allowed:true,expiresAt}` or an explicit failure. The expiry is the exact
+minimum of the saved grant, request deadline and applicable attempt deadline;
+it is not a new TTL or authority source. #78/#79 must call it before and after
+awaited source/export I/O; `inspect` deliberately remains readable after
+revocation and cannot authorize that I/O. This does not grant an image Send or
+implement external actor/tenant/object/revision/receiving authorization.
+
+#78 must consult this same occupancy before generic send/watch/recovery/prune/
+detach behavior: unresolved image work permits observation/reconciliation, not
+generic Retry, Continue, Stop, replay or automatic detach. An image executor
+rechecks exclusive ownership with its key before upload/Send, alongside existing
+live pacing, manual ownership and current authorization. A stale read cannot
+authorize a side effect; only fresh `beginAttempt` supplies `NEWLY_RESERVED`.
 
 Every event has `eventId` and `expectedRevision`. Example events below use
 synthetic identifiers; a real adapter supplies observed evidence, not these
@@ -200,6 +256,16 @@ and late observations after terminal failure are kept in `lateObservations` /
 outputs or become approved/published. Reads and evidence reconciliation remain
 available during pause; new attempts do not.
 
+The native reservation is retained for UNKNOWN, GENERATING, BLOCKED, FAILED or
+EXPORT_UNAVAILABLE attempts. Cancel requests, expired/revoked grants, deadlines
+and top-level terminal labels do not prove remote settlement. Only proven
+`FAILED_PRE_SEND` or positively observed native `GENERATED/PARTIAL` settlement
+releases it; #78 must verify that the native tool is settled before recording
+those completion states. Late native settlement may release the conversation
+while its outputs remain quarantined. Failure without such proof conservatively
+stays occupied. Export-only work never reserves a native generation slot, but
+its fresh begin also refuses another unresolved native job on that conversation.
+
 ## Capability observations and asset mapping
 
 `unknownImageCapabilities(route)` defaults every feature to UNKNOWN.
@@ -210,6 +276,16 @@ or `imageParts` is not evidence of generation. Requested model, subscription
 names and the moving label Latest imply neither an image model nor unlimited
 quota. New capability evidence requires a separately authorized snapshot, not
 an external caller's preferred mode.
+
+Every positive model-dependent feature requires the capability snapshot's
+`modelSelection.verified=true`, a non-null model/effort and an exact match to
+`requestedModel/requestedEffort`. Mismatches/unverified resources block the job
+and fail before attempt reservation. `beginAttempt` independently verifies the
+current UI selection; snapshot evidence cannot replace that check. Native export
+is model-dependent. Only ASSISTED export of an already authorized original is
+model-independent, still requiring its own route/version/time/evidence, exact
+source turn, current rights and independent byte verification. ASSISTED
+generate/edit/refine and any other required features keep the resource check.
 
 Features are generate/edit/refine/export/multiReference/mask/
 deterministicComposite/batch. Native region and deterministic composition are
@@ -264,13 +340,18 @@ session/resource URLs must not be copied to public GitHub evidence/logs.
 
 ## Model and R0 provenance (2026-09-30)
 
-User request: Latest + Pro, not Extra High. Development task
+Original frontend task: Latest + Pro. Development task
 CBIMG-77-20260930-03 has persisted send receipt
 `a546be04-603f-42d8-be41-65bcd248d14d` with observed
 `{model:"Latest",effort:"Pro",raw:"Pro",verified:true}` on authorized default /
 Ru Wang, Chat Bridge Project `g-p-6abca54a9ea88191b5b4a9f64ee1d75c`.
 This is developer-chat selection, not image generation/model/quota evidence.
 Historical hzcodex identity/model observations do not override this route.
+
+The 2026-09-30 review corrections are locally authorized on the same isolated
+#77 branch, using the user's current local GPT-6.1 Sol / Extra High preference.
+That supersedes the earlier frontend-only Git-write arrangement; it supplies
+neither native image capability evidence nor a real image acceptance result.
 
 R0 is separate PR #83 at `9dc2e76d7713a45b952f0089f633947ff9049e0b`, containing
 only the original `3691b60` and `9dc2e76` commits above main

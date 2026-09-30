@@ -1271,6 +1271,39 @@
           "$ref": "#/$defs/CancelEvent"
         }
       ]
+    },
+    "SessionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "accountId": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "conversationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        }
+      },
+      "required": [
+        "accountId",
+        "conversationId"
+      ]
+    },
+    "SessionOccupancyQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/SessionIdentity"
+        },
+        "key": {
+          "$ref": "#/$defs/Key"
+        }
+      },
+      "required": [
+        "session"
+      ]
     }
   }
 }
