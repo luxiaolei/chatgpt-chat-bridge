@@ -321,6 +321,38 @@ def temporary_queue(coordinator, fakes, *, existing=True, worker_body):
 
 
 def integration_case(case, coordinator, runner, runner_path, fakes):
+    if case in ('cancelled-claim-commit', 'cancelled-claim-after-commit'):
+        marker = fakes.directory/'must-not-spawn'
+        db, op, config, state = temporary_queue(coordinator, fakes,
+            worker_body=f"open({str(marker)!r},'w').write('started')\n")
+        class CommitSignal:
+            injected = False
+            def __getattr__(self, name):
+                return getattr(db, name)
+            def commit(self):
+                inject = not self.injected and sys._getframe(1).f_code.co_name == 'claim'
+                if inject:
+                    self.injected = True
+                    if case == 'cancelled-claim-commit':
+                        os.kill(os.getpid(), signal.SIGTERM)
+                db.commit()
+                if inject and case == 'cancelled-claim-after-commit':
+                    os.kill(os.getpid(), signal.SIGTERM)
+        handle = CommitSignal()
+        try:
+            try:
+                with coordinator.bridge_cancellation():
+                    coordinator.work_one(handle)
+            except SystemExit as error:
+                assert error.code == 128 + signal.SIGTERM
+            else:
+                raise AssertionError('cancellation was not delivered')
+            assert handle.injected and not marker.exists()
+            row = db.execute('SELECT status,reason,attempts,claimed_at FROM operations WHERE id=?', (op['operationId'],)).fetchone()
+            assert tuple(row) == ('QUEUED', None, 0, None), tuple(row)
+        finally:
+            db.close()
+        return
     if case == 'cancelled-claim-lock':
         marker = fakes.directory/'must-not-spawn'
         db, op, config, state = temporary_queue(coordinator, fakes,

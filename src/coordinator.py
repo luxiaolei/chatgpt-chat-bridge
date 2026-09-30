@@ -2176,6 +2176,7 @@ def claim(db):
             AND NOT EXISTS (SELECT 1 FROM operations AS active WHERE active.status='DISPATCHING' AND active.account_id=candidate.account_id)
             ORDER BY CASE candidate.kind WHEN 'management' THEN 0 WHEN 'callback' THEN 1 WHEN 'rotation' THEN 2 ELSE 3 END,
                      created_at,id LIMIT 1""", (time.time(),)).fetchone()
+        queued = row
         if row:
             db.execute("UPDATE operations SET status='DISPATCHING',attempts=attempts+1,claimed_at=?,updated_at=?,reason=NULL WHERE id=?",
                        (time.time(), stamp(), row["id"]))
@@ -2186,6 +2187,15 @@ def claim(db):
             db.rollback()
             return None
         db.commit()
+        if row and _bridge_interrupted is not None:
+            # COMMIT can also latch cancellation; this claim has spawned nothing.
+            begin_immediate(db)
+            db.execute("""UPDATE operations SET status='QUEUED',attempts=?,claimed_at=?,reason=?,updated_at=?
+                          WHERE id=? AND status='DISPATCHING' AND attempts=? AND claimed_at=?""",
+                       (queued["attempts"], queued["claimed_at"], queued["reason"], stamp(),
+                        row["id"], row["attempts"], row["claimed_at"]))
+            db.commit()
+            return None
         return row
     except Exception:
         db.rollback()
