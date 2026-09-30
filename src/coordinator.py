@@ -2300,7 +2300,7 @@ def stop_bridge(process):
         return pending.output or stdout, pending.stderr or stderr
 
 
-def run_bridge(args, timeout=None):
+def run_bridge(args, timeout=None, capture=True):
     timeout = bridge_timeout() if timeout is None else timeout
     with bridge_cancellation():
         if _bridge_interrupted is not None:
@@ -2308,7 +2308,8 @@ def run_bridge(args, timeout=None):
         process, timed_out = None, False
         try:
             # Signals only latch here, including between real spawn and assignment.
-            process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            process = subprocess.Popen(args, stdout=subprocess.PIPE if capture else None,
+                                       stderr=subprocess.PIPE if capture else None,
                                        text=True, errors="replace", start_new_session=True)
             deadline = time.monotonic() + timeout
             while _bridge_interrupted is None:
