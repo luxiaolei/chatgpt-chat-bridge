@@ -77,6 +77,11 @@ if [[ "$CMD" == "control" ]]; then
   [[ -f "$COORDINATOR" ]] || { echo "chat-bridge: coordinator missing: $COORDINATOR" >&2; exit 127; }
   exec python3 "$COORDINATOR" control "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
 fi
+if [[ "$CMD" == "github-project" ]]; then
+  GITHUB_PROJECT="${MAIN:h}/github-project.py"
+  [[ -f "$GITHUB_PROJECT" ]] || { echo "chat-bridge: GitHub Project adapter missing: $GITHUB_PROJECT" >&2; exit 127; }
+  exec python3 "$GITHUB_PROJECT" "$SUB" "$CONFIG_DIR" "$STATE_DIR" "${@:3}"
+fi
 
 LOCAL_QUERY="${MAIN:h}/local-query.py"
 if [[ -f "$LOCAL_QUERY" ]]; then

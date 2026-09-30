@@ -73,6 +73,18 @@ chat-bridge new \
 
 同一个已验证 ChatGPT 登录/Profile 默认只保留一个 Bridge-managed Ego Space；这个 Space 可以同时承载多个 Project 和多个 Session 的 tab。逻辑 role/controller 是长期身份；具体 Conversation ID 是可接替的一代会话，Space/page 只是运行 attachment。运行中的任务默认保持 attached；任务结果已经持久化为 `RESULT_RECORDED` 或进入终态后，超过安全 grace period 且页面为非 active、Bridge-managed、无生成/草稿/人工 ownership 时，Bridge 才会自动关 tab，后续按 conversation URL lazy reattach。增加同账号 Space 不等于增加额度或并发容量。
 
+## GitHub Projects v2 管理入口
+
+一个 ChatBridge 逻辑项目可以选择绑定一个 GitHub Projects v2 看板，而不改变它的 ChatGPT Project、账号或会话位置。总控可以先从看板读取组合/状态，再进入所选原始 Issue/PR 核验依赖、review/CI 和固定证据。
+
+```bash
+chat-bridge github-project bind --project "My Project" --owner OWNER --number 8
+chat-bridge github-project inspect --project "My Project"
+chat-bridge github-project refresh --project "My Project"        # 默认仅预览
+```
+
+绑定动作**不会**创建 GitHub Project，也不会自动配置 Auto-add。远端安全同步必须显式使用 `--apply`，且只有已配置的 open source query / 非终态状态映射才可写；Done/Closed/Accepted/Deployed 等终态或验收式状态会被拒绝。没有绑定的旧项目继续按原 Issue-first 方式运行。详见 [GitHub Projects 接入说明](docs/github-projects.md)。
+
 ## 账号与 Space 绑定
 
 ```bash
