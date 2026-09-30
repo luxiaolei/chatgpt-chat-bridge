@@ -164,6 +164,7 @@ def connection(config, state, initialize=True):
         ("control_scope", "TEXT"),
         ("control_epoch", "INTEGER"),
         ("pre_send_failures", "INTEGER NOT NULL DEFAULT 0"),
+        ("local_owner", "TEXT"),
     ):
         ensure_column(db, "operations", name, declaration)
     db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS operations_active_placement
@@ -301,6 +302,33 @@ def runtime(db):
     return json.loads(row[0])
 
 
+def local_caller(caller, saved=None):
+    """Bind to this local Codex process; environment hints are not an auth boundary."""
+    thread = os.environ.get("CODEX_THREAD_ID", "")
+    if (not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", thread)
+            or caller != "codex:" + thread
+            or os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+            or os.environ.get("CHAT_BRIDGE_FROM_SPACE")):
+        raise ValueError("LOCAL_CALLER_CONTEXT_MISMATCH")
+    host = os.uname().nodename
+    if saved and (saved.get("threadId") != thread or saved.get("host") != host):
+        raise ValueError("LOCAL_CALLER_CONTEXT_MISMATCH")
+    return saved or {"kind": "codex", "threadId": thread, "host": host,
+                     "cwd": str(pathlib.Path.cwd().resolve()), "transport": "local-pull"}
+
+
+def local_owner_contract(db, payload):
+    """Validate browser-side task tracking against the immutable queue owner."""
+    row = db.execute("""SELECT * FROM operations WHERE kind='dispatch' AND task_id=?
+                        ORDER BY created_at DESC LIMIT 1""", (payload.get("taskId"),)).fetchone()
+    if (not row or not row["local_owner"] or row["caller_ref"] != payload.get("callerRef")
+            or row["project"] != payload.get("project")
+            or row["session_ref"] != payload.get("sessionRef")
+            or row["status"] not in {"QUEUED", "DISPATCHING", "SENT"}):
+        raise ValueError("LOCAL_OWNER_CONTRACT_MISMATCH")
+    return json.loads(row["local_owner"])
+
+
 def public(row):
     if row is None:
         raise ValueError("UNKNOWN_OPERATION")
@@ -331,6 +359,8 @@ def response(row):
     for source, target in aliases.items():
         if source in result:
             result[target] = result.pop(source)
+    if "local_owner" in row.keys() and row["local_owner"]:
+        result["localOwner"] = json.loads(row["local_owner"])
     return result
 
 
@@ -407,6 +437,9 @@ def submit(db, payload):
     original_message = str(payload.get("message") or "")
     if not caller or not request_id or not original_message or len(request_id) > 128 or len(original_message) > 100000:
         raise ValueError("callerRef, requestId and nonempty message are required")
+    local_owner = local_caller(caller) if caller.startswith("codex:") else None
+    if local_owner and (not payload.get("project") or not payload.get("sessionRef")):
+        raise ValueError("LOCAL_CALLER_REQUIRES_PROJECT_AND_SESSION")
     requested_model = str(payload.get("model") or "").strip() or None
     if requested_model and len(requested_model) > 80:
         raise ValueError("INVALID_MODEL")
@@ -420,14 +453,17 @@ def submit(db, payload):
     try:
         prior = db.execute("SELECT * FROM operations WHERE request_key=?", (key,)).fetchone()
         if prior:
+            if prior["local_owner"]:
+                local_caller(caller, json.loads(prior["local_owner"]))
             if prior["payload_hash"] != digest:
                 raise ValueError("IDEMPOTENCY_CONFLICT")
             db.commit()
             return response(prior)
         reg, rt = registry(db), runtime(db)
         source = (reg.get("chats") or {}).get(caller)
-        if not source or source.get("status", "active") != "active":
+        if not local_owner and (not source or source.get("status", "active") != "active"):
             raise ValueError("CALLER_REF_NOT_REGISTERED")
+        source = source or {}
         source_identity = ((reg.get("accounts") or {}).get(source.get("account")) or {}).get("identity")
         origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
         if origin and (not source_identity or account_id(source_identity) != origin):
@@ -557,11 +593,11 @@ def submit(db, payload):
         db.execute("""INSERT INTO operations(
             id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,
             role,message,task_id,created_at,updated_at,not_before,requested_model,requested_effort,
-            resource_policy_version,workgroup_id,affinity_key,placement_key,original_message,control_scope,control_epoch)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            resource_policy_version,workgroup_id,affinity_key,placement_key,original_message,control_scope,control_epoch,local_owner)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (operation_id,key,digest,"QUEUED",project,alias,stable,caller,target,role,message,task_id,now,now,time.time(),
              requested_model,requested_effort,policy_version,workgroup,affinity,placement_key,original_message,
-             mode.get("scope"),mode.get("epoch")))
+             mode.get("scope"),mode.get("epoch"),json.dumps(local_owner) if local_owner else None))
         row = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
         db.commit()
         return response(row)
@@ -578,14 +614,15 @@ def submit(db, payload):
 def task_contract(db, task_id):
     rt = runtime(db)
     task = (rt.get("tasks") or {}).get(task_id)
-    if task:
-        return task
-    row = db.execute("""SELECT project,account_alias,caller_ref,session_ref,role,workgroup_id
+    row = db.execute("""SELECT project,account_alias,caller_ref,session_ref,role,workgroup_id,local_owner
                         FROM operations WHERE kind='dispatch' AND task_id=?
                         ORDER BY created_at DESC LIMIT 1""", (task_id,)).fetchone()
+    if task and (not row or not row["local_owner"]):
+        return task
     if not row:
         return None
     return {
+        **(task or {}),
         "taskId": task_id,
         "project": row["project"],
         "account": row["account_alias"],
@@ -594,6 +631,7 @@ def task_contract(db, task_id):
         "sessionId": row["session_ref"],
         "role": row["role"],
         "workgroupId": row["workgroup_id"],
+        **({"localOwner": json.loads(row["local_owner"])} if row["local_owner"] else {}),
     }
 
 
@@ -758,6 +796,8 @@ def checkpoint_handoff(row):
 def result_owner(db, reg, task):
     """Resolve the persisted owner without treating a missing Chat as root."""
     explicit = str(task.get("replyToSessionRef") or task.get("controllerSessionRef") or "").strip() or None
+    if task.get("localOwner"):
+        return explicit, explicit, None
     if explicit:
         target_ref = resolve_successor(db, explicit)
         target = (reg.get("chats") or {}).get(target_ref)
@@ -998,7 +1038,7 @@ def result(db, payload):
                 (operation_id,request_key,hashlib.sha256(message.encode()).hexdigest(),"QUEUED",target["project"],alias,
                  account_id(identity),target_ref,target_ref,target.get("role") or target_ref,message,task_id,
                  now,now,time.time(),"callback",event_id,workgroup,message))
-        callback_status = "QUEUED" if operation_id else "WAITING_ROUTE"
+        callback_status = "WAITING_LOCAL" if task.get("localOwner") else ("QUEUED" if operation_id else "WAITING_ROUTE")
         db.execute("""INSERT INTO task_results(
             task_id,result_version,event_id,status,summary,github,next_text,payload_hash,
             callback_operation_id,callback_status,workgroup_id,owner_ref,owner_project,owner_account,recorded_at)
@@ -1048,20 +1088,24 @@ def result_ack(db, payload):
         raise ValueError("RESULT_TASK_NOT_REGISTERED")
     reg=registry(db)
     owner_ref=result_row["owner_ref"]
-    expected=resolve_successor(db, owner_ref) if owner_ref else result_owner(db,reg,task)[1]
+    local_owner = task.get("localOwner")
+    expected = owner_ref if local_owner else (resolve_successor(db, owner_ref) if owner_ref else result_owner(db,reg,task)[1])
     if not expected:
         raise ValueError("RESULT_ACK_OWNER_UNAVAILABLE")
     if caller!=expected:
         raise ValueError("RESULT_ACK_TARGET_MISMATCH")
-    chat=(reg.get("chats") or {}).get(expected)
-    if not chat or chat.get("status", "active") != "active" or chat.get("project") != task.get("project"):
-        raise ValueError("RESULT_ACK_OWNER_UNAVAILABLE")
-    if not target_matches_task_scope(task, chat, reg) or (result_row["workgroup_id"] or None) != task_workgroup(task):
-        raise ValueError("RESULT_ACK_WORKGROUP_MISMATCH")
-    identity=((reg.get("accounts") or {}).get(chat.get("account")) or {}).get("identity") if chat else None
-    origin=os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
-    if origin and (not identity or account_id(identity)!=origin):
-        raise ValueError("RESULT_ACK_ORIGIN_ACCOUNT_MISMATCH")
+    if local_owner:
+        local_caller(caller, local_owner)
+    else:
+        chat=(reg.get("chats") or {}).get(expected)
+        if not chat or chat.get("status", "active") != "active" or chat.get("project") != task.get("project"):
+            raise ValueError("RESULT_ACK_OWNER_UNAVAILABLE")
+        if not target_matches_task_scope(task, chat, reg) or (result_row["workgroup_id"] or None) != task_workgroup(task):
+            raise ValueError("RESULT_ACK_WORKGROUP_MISMATCH")
+        identity=((reg.get("accounts") or {}).get(chat.get("account")) or {}).get("identity") if chat else None
+        origin=os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+        if origin and (not identity or account_id(identity)!=origin):
+            raise ValueError("RESULT_ACK_ORIGIN_ACCOUNT_MISMATCH")
     now=stamp()
     begin_immediate(db)
     try:
@@ -1081,6 +1125,9 @@ def result_ack(db, payload):
                       WHERE task_id=? AND result_version=? AND acceptance_status IS NULL""",(status,message,now,task_id,version))
         if changed.rowcount != 1:
             raise ValueError("RESULT_ACK_CONFLICT")
+        if local_owner:
+            db.execute("""UPDATE task_results SET callback_status='RECEIVED_LOCAL',callback_delivered_at=?
+                          WHERE task_id=? AND result_version=?""", (now, task_id, version))
         row=db.execute("SELECT payload FROM documents WHERE kind='runtime'").fetchone()
         rt=json.loads(row[0])
         live=(rt.get("tasks") or {}).get(task_id)
@@ -1103,6 +1150,40 @@ def result_ack(db, payload):
         db.rollback()
         raise
     return {"taskId":task_id,"resultVersion":version,"status":status,"callerRef":expected,"message":message}
+
+
+def receive_local_result(db, payload):
+    """Bounded local wait. Reading is replayable; only the owner's ACK settles it."""
+    task_id = str(payload.get("taskId") or "")
+    caller = str(payload.get("callerRef") or "")
+    wait = float(payload.get("waitSeconds") or 0)
+    if not 0 <= wait <= 55:
+        raise ValueError("WAIT_SECONDS_MUST_BE_0_TO_55")
+    task = task_contract(db, task_id)
+    if not task or not task.get("localOwner") or caller != task.get("replyToSessionRef"):
+        raise ValueError("LOCAL_RESULT_OWNER_MISMATCH")
+    local_caller(caller, task["localOwner"])
+    deadline = time.monotonic() + wait
+    while True:
+        row = db.execute("""SELECT * FROM task_results WHERE task_id=?
+                            ORDER BY recorded_at DESC,event_id DESC LIMIT 1""", (task_id,)).fetchone()
+        if row:
+            if row["owner_ref"] != caller or row["owner_project"] != task["project"]:
+                raise ValueError("LOCAL_RESULT_OWNER_MISMATCH")
+            return {"status": "RESULT_AVAILABLE", "transport": "local-pull", "taskId": task_id,
+                    "owner": task["localOwner"], "callerRef": caller, "eventId": row["event_id"],
+                    "resultVersion": row["result_version"], "reportedStatus": row["status"],
+                    "summary": row["summary"], "github": row["github"], "next": row["next_text"],
+                    "callbackStatus": row["callback_status"], "acceptanceStatus": row["acceptance_status"]}
+        operation = db.execute("""SELECT * FROM operations WHERE task_id=? AND kind='dispatch'
+                                  ORDER BY created_at DESC LIMIT 1""", (task_id,)).fetchone()
+        if time.monotonic() >= deadline or operation["status"] in {"CANCELLED", "FAILED_PRE_SEND", "DELIVERY_UNKNOWN"}:
+            live = (runtime(db).get("tasks") or {}).get(task_id) or {}
+            return {"status": "PENDING", "transport": "local-pull", "taskId": task_id,
+                    "operation": response(operation), "taskStatus": live.get("status"),
+                    "blockedReason": live.get("blockedReason")}
+        # ponytail: local polling avoids a daemon; add push only after receiver integration is verified.
+        time.sleep(min(0.5, max(0, deadline - time.monotonic())))
 
 
 def configure(config, state, payload):
@@ -1474,7 +1555,8 @@ def control_status(db, project=None, workgroup=None):
         results = {
             "recorded": len(result_rows),
             "callbackPending": sum(1 for row in result_rows if not row["callback_status"]
-                                   or row["callback_status"] in {"QUEUED","DISPATCHING","WAITING_ROUTE"}),
+                                   or row["callback_status"] in {"QUEUED","DISPATCHING","WAITING_ROUTE","WAITING_LOCAL"}),
+            "callbackWaitingLocal": sum(1 for row in result_rows if row["callback_status"] == "WAITING_LOCAL"),
             "callbackWaitingRoute": sum(1 for row in result_rows if row["callback_status"] == "WAITING_ROUTE"),
             "callbackUnknown": sum(1 for row in result_rows if row["callback_status"]=="DELIVERY_UNKNOWN"),
             "awaitingControllerAck": sum(1 for row in result_rows
@@ -2385,6 +2467,17 @@ def main():
             value=checkpoint(db,payload)
         elif command == "callback":
             value = callback(db, json.load(sys.stdin))
+        elif command == "local-owner-contract":
+            value = local_owner_contract(db, json.load(sys.stdin))
+        elif command == "receive":
+            if args:
+                names = {"--task": "taskId", "--caller-ref": "callerRef", "--wait-seconds": "waitSeconds"}
+                if len(args) % 2 or any(args[i] not in names for i in range(0, len(args), 2)):
+                    raise ValueError("receive options must be name/value pairs")
+                payload = {names[args[i]]: args[i + 1] for i in range(0, len(args), 2)}
+            else:
+                payload = json.load(sys.stdin)
+            value = receive_local_result(db, payload)
         elif command == "result":
             if args:
                 names = {"--task": "taskId", "--status": "status", "--summary": "summary",

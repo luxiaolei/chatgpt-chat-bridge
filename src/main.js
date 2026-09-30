@@ -29,6 +29,15 @@ function coordinated(command, payload) {
   if(result.status!==0) throw new Error(`COORDINATOR_${command.toUpperCase()}: ${(result.stderr||result.error?.message||"unknown error").trim()}`);
   return JSON.parse(result.stdout);
 }
+function taskOwner(reg, taskId, project, sessionRef, callerRef, replyRef) {
+  if(callerRef?.startsWith("codex:")) {
+    if(replyRef!==callerRef) throw new Error("LOCAL_OWNER_TARGET_MISMATCH");
+    return coordinated("local-owner-contract",{taskId,project,sessionRef,callerRef});
+  }
+  if(callerRef) resolveControllerTarget(reg.chats,callerRef,project);
+  if(replyRef) resolveControllerTarget(reg.chats,replyRef,project);
+  return null;
+}
 const DEFAULT_ACCOUNT = "default";
 const CONTROL = globalThis.__CHAT_BRIDGE_CONTROL__;
 if(!CONTROL) throw new Error("chat-bridge control routing module was not loaded");
@@ -2665,10 +2674,9 @@ else if(cmd==="task"){
     const replyRef=opt("reply-to-session",old.replyToSessionRef||callerRef);
     const baselineCountText=opt("baseline-assistant-count",null);
     if(baselineCountText!==null && !/^\d+$/.test(baselineCountText)) throw new Error("baseline assistant count must be a nonnegative integer");
-    if(callerRef) resolveControllerTarget(reg.chats,callerRef,taskProject);
-    if(replyRef) resolveControllerTarget(reg.chats,replyRef,taskProject);
+    const localOwner=taskOwner(reg,taskId,taskProject,sessionId,callerRef,replyRef);
     const candidate={...old,...route,taskId,project:taskProject,role,
-      controllerSessionRef:callerRef,replyToSessionRef:replyRef,
+      controllerSessionRef:callerRef,replyToSessionRef:replyRef,localOwner,
       account:opt("account",old.account||taskAccount||null),sessionId,
       issue:opt("issue",old.issue||null),github:opt("github",old.github||null),status:opt("status",old.status||"RUNNING"),
       affinityKey:opt("affinity-key",old.affinityKey||null),
@@ -2774,10 +2782,9 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
       },rootController);
       const callerRef=opt("caller-ref",old.controllerSessionRef||null);
       const replyRef=opt("reply-to-session",old.replyToSessionRef||callerRef);
-      if(callerRef) resolveControllerTarget(reg.chats,callerRef,chat.project);
-      if(replyRef) resolveControllerTarget(reg.chats,replyRef,chat.project);
+      const localOwner=taskOwner(reg,taskId,chat.project,chat.id,callerRef,replyRef);
       tracked={...old,...route,taskId,project:chat.project,role:chat.role,account:chat.account,sessionId:chat.id,status:"DISPATCHED",
-        controllerSessionRef:callerRef,replyToSessionRef:replyRef,
+        controllerSessionRef:callerRef,replyToSessionRef:replyRef,localOwner,
         affinityKey:opt("affinity-key",old.affinityKey||chat.affinityKey||null),
         workgroupId:opt("workgroup",old.workgroupId||chat.workgroupId||null),
         requestedModel:requestedModel||old.requestedModel||chat.model||null,
