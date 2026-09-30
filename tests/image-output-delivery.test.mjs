@@ -95,6 +95,38 @@ test('new delivery uses its own bounded current authority, original SQLite creat
   }finally{await f.close();}
 });
 
+test('recorded worker result admits only fresh existing-output delivery; receive and ACK remain separate',async()=>{
+  const f=await fixture();try {
+    const s=await original(f),late=await original(f,{id:'late-before-result',late:true}),pendingRequest=f.request({jobId:'pending-before-result'});
+    const pending=f.setup(pendingRequest,f.grant(pendingRequest,'grant-pending'));
+    const facts=f.api.inspect(s.key),lateFacts=f.api.inspect(late.key),g=delivery(f,s),receiverBase=path.join(s.stateDir,'image-received');
+    const result=f.call('result',{taskId:f.op.taskId,status:'COMPLETE',summary:'offline saved original awaiting controller review'});
+    assert.equal(result.resultRecorded,true);assert.equal(result.acceptanceStatus,null);
+    assert.deepEqual(f.sql("select status from operations where kind='dispatch'"),[['SENT']]);
+    assert.throws(()=>f.api.authorizeIO(s.key),/IMAGE_CONTROLLER_RESULT_RECORDED/);
+    assert.throws(()=>f.begin(pending.key,pending.job),/IMAGE_CONTROLLER_RESULT_RECORDED/);
+    const later=f.request({jobId:'new-after-result'}),laterGrant=f.grant(later,'grant-after-result');f.authorize(laterGrant);
+    f.fail('image-submit',{grantId:laterGrant.grantId,request:later},/IMAGE_CONTROLLER_RESULT_RECORDED/);
+    f.fail('image-authorize',{issuerRef:f.owner,grant:{...late.recoveryGrant,grantId:'recovery-after-result'}},/IMAGE_CONTROLLER_RESULT_RECORDED/);
+    assert.throws(()=>f.api.authorizeRecovery(late.key,late.recovery,'receive',{consumerRef:'consumer-1',destinationRef:'store:receiver-1'}),/IMAGE_CONTROLLER_RESULT_RECORDED/);
+    await assert.rejects(stat(receiverBase),e=>e.code==='ENOENT');
+    authorize(f,g);assert.equal(f.call('image-delivery-io-admission',query(s,g)).allowed,true);
+    f.control('pause');await assert.rejects(receive(f,s,g),/ADMISSION_PAUSED/);await assert.rejects(stat(receiverBase),e=>e.code==='ENOENT');f.control('resume');
+    f.call('image-revoke',{issuerRef:f.owner,grantId:g.grantId});await assert.rejects(receive(f,s,g),/EXPIRED_OR_REVOKED/);await assert.rejects(stat(receiverBase),e=>e.code==='ENOENT');
+    const fresh=delivery(f,s,{grantId:'delivery-after-result'});authorize(f,fresh);
+    const received=await receive(f,s,fresh),observed=historical(f,s,fresh).deliveries[0];
+    assert.equal(received.receipt.status,'RECEIVED');assert.equal(received.businessApproval,'NOT_EVALUATED');
+    assert.deepEqual(observed.receipt,received.receipt);assert.equal(observed.copyHealth,'VERIFIED');
+    assert.deepEqual(f.api.inspect(s.key),facts);assert.deepEqual(f.api.inspect(late.key),lateFacts);
+    assert.deepEqual(f.sql('select acceptance_status from task_results'),[[null]]);
+    const unused=delivery(f,s,{grantId:'delivery-not-received',consumerRef:'consumer-never',destinationRef:'store:never'});authorize(f,unused);
+    assert.equal(historical(f,s,unused).deliveries[0].receipt,null);
+    f.call('ack',{taskId:f.op.taskId,resultVersion:'1',callerRef:f.owner,status:'ACCEPTED',message:'offline explicit controller review'});
+    assert.equal(historical(f,s,unused).deliveries[0].receipt,null);
+    assert.deepEqual(f.api.inspect(late.key),lateFacts);assert.equal(f.api.result(s.key).businessApproval,'NOT_EVALUATED');
+  }finally{await f.close();}
+});
+
 test('receive rechecks async revocation; concurrent retry converges on immutable consumer bytes and receipt',async()=>{
   const f=await fixture();try {
     const s=await original(f),g=delivery(f,s);authorize(f,g);let revoked=false;

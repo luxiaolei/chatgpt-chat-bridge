@@ -41,7 +41,10 @@ Admission rechecks delivery expiry/revocation, original owner/controller/route,
 existing management and user controls, cooldown and cancellation. An expired
 generation grant does not invalidate ownership of an existing ordinary original:
 fresh delivery may copy its actual bytes within the retention ceiling. Delivery
-cannot submit, beginAttempt, Send, upload, save/export a new original or authorize
+may follow a recorded worker result so the controller can receive before ACK;
+that result still blocks ordinary generation and OUTPUT_RECOVERY. Neither result
+recording nor ACK creates a consumer copy, delivery receipt or late-output adoption.
+Delivery cannot submit, beginAttempt, Send, upload, save/export a new original or authorize
 source externalization. Ordinary authorizeIO and generation entry points reject
 delivery authority. UNKNOWN reservations and generation-call budgets remain
 unchanged; no post-Send retry or remote settlement proof is added.

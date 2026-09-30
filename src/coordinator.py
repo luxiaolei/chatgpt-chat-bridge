@@ -2751,12 +2751,13 @@ def image_sources(db, request, grant=None):
     return {"sourceTurnId": source_turn_id, "sources": sources}
 
 
-def image_admission(db, row, request, grant=None):
+def image_admission(db, row, request, grant=None, *, existing_output_delivery=False):
     image_route(db, row, request)
     sources = image_sources(db, request, grant)
     if row["status"] != "SENT":
         raise ValueError("IMAGE_CONTROLLER_DELIVERY_NOT_CONFIRMED")
-    if db.execute("SELECT 1 FROM task_results WHERE task_id=? LIMIT 1", (row["task_id"],)).fetchone():
+    # A worker result stops generation; a separately bound receive-only grant can deliver existing bytes.
+    if not existing_output_delivery and db.execute("SELECT 1 FROM task_results WHERE task_id=? LIMIT 1", (row["task_id"],)).fetchone():
         raise ValueError("IMAGE_CONTROLLER_RESULT_RECORDED")
     mode = management_mode(db, row["project"], row["workgroup_id"])
     if mode["mode"] != "RUNNING":
@@ -3002,7 +3003,7 @@ def image_delivery_binding(db, grant, current=False):
             raise ValueError("IMAGE_CANCEL_REQUESTED")
         if retention <= datetime.now(timezone.utc):
             raise ValueError("IMAGE_DELIVERY_RETENTION_DEADLINE")
-        image_admission(db, operation, original["request"], original)
+        image_admission(db, operation, original["request"], original, existing_output_delivery=True)
     return {"record":record, "output":output, "outputRevision":revision,
             "retentionDeadline":retention.isoformat(), "retentionHours":original["request"]["authorizedOutput"]["retentionHours"],
             "retentionOrigin":row["created_at"]}
