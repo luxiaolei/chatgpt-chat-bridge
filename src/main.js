@@ -2436,7 +2436,8 @@ async function runNativeImage(action,payload) {
   if(callerContext && (callerContext.requestDigest!==job.requestDigest || contract.canonicalImageJSON(callerContext.route)!==contract.canonicalImageJSON(job.route)))throw new Error("IMAGE_CALLER_SCOPE_MISMATCH");
   const route=job.route,chat=resolveChat(reg,route.sessionRef,route.project,route.accountAlias);
   if((chat.conversationId||chat.id)!==route.conversationId || accountScope(reg,chat.account)!==route.accountId || chat.status!=="active") throw new Error("IMAGE_ROUTE_MISMATCH");
-  const io=await artifacts.createHostImageArtifacts({api,key,stateDir:STATE_DIR,contract,coordinated,callerContext});
+  const io=await artifacts.createHostImageArtifacts({api,key,stateDir:STATE_DIR,contract,coordinated,callerContext,
+    decoderExecutable:globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__?.runtimeConfig?.decoderExecutable});
   const withUi=async(expected,callback)=>{
     if(contract.canonicalImageJSON(expected)!==contract.canonicalImageJSON(route)) throw new Error("IMAGE_ROUTE_MISMATCH");
     const {task,page}=await ensurePage(reg,chat,{pauseOnUserControl:true});

@@ -30,7 +30,13 @@ export function imageCallerEnvironment(prepared,command,payload,environment=proc
   else if(command==='image-session-occupancy')need(payload.session.accountId===context.route.accountId && (!payload.key || canonicalImageJSON(payload.key)===canonicalImageJSON(context.key) && payload.session.conversationId===context.route.conversationId),'IMAGE_CALLER_SCOPE_MISMATCH');
   else if(command==='local-owner-contract')need(context.kind==='local-owner' && payload.taskId===context.controllerTaskId && payload.project===context.route.project && payload.sessionRef===context.route.sessionRef && payload.callerRef===`codex:${context.owner.threadId}`,'IMAGE_OPERATOR_HOST_OWNER_REQUIRED');
   else need(canonicalImageJSON({grantId:payload.grantId,callerRef:payload.callerRef,jobId:payload.jobId,scope:payload.scope})===canonicalImageJSON(context.key) && (!payload.event?.route || canonicalImageJSON(payload.event.route)===canonicalImageJSON(context.route)),'IMAGE_CALLER_SCOPE_MISMATCH');
-  return {...environment,...caller};
+  const runtime=prepared.runtimeConfig;
+  need(runtime && Object.keys(runtime).sort().join(',')==='decoderExecutable,nodeExecutable' &&
+    typeof runtime.nodeExecutable==='string' && path.isAbsolute(runtime.nodeExecutable) && !runtime.nodeExecutable.includes('\0') &&
+    (runtime.decoderExecutable===null || typeof runtime.decoderExecutable==='string' && path.isAbsolute(runtime.decoderExecutable) && !runtime.decoderExecutable.includes('\0')),'IMAGE_RUNTIME_CONFIG_REQUIRED');
+  // The coordinator's existing schema helper invokes node by name. Ego's PATH
+  // lacks the actual CLI Node installation; add only its captured directory.
+  return {...environment,...caller,PATH:[path.dirname(runtime.nodeExecutable),environment.PATH].filter(Boolean).join(path.delimiter)};
 }
 
 function captureImageCaller(job,key,action,coordinated,callerEnv) {
@@ -66,7 +72,7 @@ async function readOfficialFile(file) {
 /** Existing durable grant is host authority. This store only persists authorized
  * evidence/original bytes; it is not another job database or a remote resolver.
  */
-export async function createHostImageArtifacts({api,key,stateDir,contract=contractModule,decode,coordinated,callerContext}={}) {
+export async function createHostImageArtifacts({api,key,stateDir,contract=contractModule,decode,coordinated,callerContext,decoderExecutable=process.env.CHAT_BRIDGE_IMAGE_DECODER}={}) {
   const [exporter,verifier,manifest]=await Promise.all([import('./exporter.js'),import('./verifier.js'),import('./manifest.js')]);
   const job=await api.inspect(key),targetRef=job.request.authorizedOutput.targetRef;
   const base=path.join(stateDir,'image-artifacts'),root=path.join(base,hash(targetRef));
@@ -108,9 +114,8 @@ export async function createHostImageArtifacts({api,key,stateDir,contract=contra
   }
   function decoder() {
     if(decode) return decode;
-    const executable=process.env.CHAT_BRIDGE_IMAGE_DECODER;
-    need(typeof executable==='string' && path.isAbsolute(executable),'IMAGE_DECODER_REQUIRED');
-    return verifier.createImageMagickDecoder({executable});
+    need(typeof decoderExecutable==='string' && path.isAbsolute(decoderExecutable),'IMAGE_DECODER_REQUIRED');
+    return verifier.createImageMagickDecoder({executable:decoderExecutable});
   }
   async function authorize(binding) {
     const authority=await api.authorizeIO(key),current=await api.inspect(key),attempt=current.attempts.at(-1);
@@ -216,7 +221,13 @@ export async function imageCli(action,payload={}, {coordinated,executor,liveActi
     const request=liveAction==='start'?normalizeExecutionRequest(payload.request):null;
     const key=request?imageJobKey(request,payload.grantId):payload.key;
     const job=request?await api.submit(request,{grantId:payload.grantId}):await api.inspect(key);
-    return {payload:{...payload,key,...(request?{request}:{} )},route:job.route,callerContext:captureImageCaller(job,key,liveAction,coordinated,callerEnv)};
+    const callerContext=captureImageCaller(job,key,liveAction,coordinated,callerEnv);
+    // Runtime configuration is captured after access/owner validation, outside
+    // the request payload. No caller-provided path or whole environment is used.
+    const decoderExecutable=callerEnv.CHAT_BRIDGE_IMAGE_DECODER||null;
+    need(decoderExecutable===null || typeof decoderExecutable==='string' && path.isAbsolute(decoderExecutable) && !decoderExecutable.includes('\0'),'IMAGE_DECODER_REQUIRED');
+    return {payload:{...payload,key,...(request?{request}:{} )},route:job.route,callerContext,
+      runtimeConfig:{nodeExecutable:process.execPath,decoderExecutable}};
   }
   if (action==='submit') return api.submit(normalizeExecutionRequest(payload.request),{grantId:payload.grantId});
   if (action==='cancel') return api.cancel(payload.key,payload.event);

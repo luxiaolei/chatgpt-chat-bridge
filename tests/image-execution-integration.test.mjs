@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
-import {readFile,writeFile,realpath} from 'node:fs/promises';
+import {readFile,writeFile,realpath,mkdir,symlink} from 'node:fs/promises';
 import path from 'node:path';
 import {createRuntime} from '../src/runtime.js';
 import {createEgoImageUi,inspectEgoImagePage} from '../src/capabilities/image/chatgpt-ego.ui.js';
@@ -62,25 +62,33 @@ test('prepare authenticates the persisted exact route without starting Ego',asyn
     await assert.rejects(imageCli('prepare',{key:{...key,callerRef:'invented'}},{coordinated:f.call,liveAction:'characterize'}),/IMAGE_ACCESS_DENIED/);
   }finally{await f.close();}
 });
-test('actual CLI prepare carries exact original owner into an env-less Ego stage and rejects remote operator claims',async()=>{
+test('actual CLI prepare carries owner and explicit runtime into an env-less stripped-PATH Ego stage',async()=>{
   const globals=['__CHAT_BRIDGE_IMAGE_MODULE_PATH__','__CHAT_BRIDGE_COORDINATOR_PATH__','__CHAT_BRIDGE_STORE_PATH__','__CHAT_BRIDGE_CONFIG_DIR__','__CHAT_BRIDGE_STATE_DIR__','__CHAT_BRIDGE_IMAGE_PREPARED__','__CHAT_BRIDGE_ARGS__'];
-  const names=['CODEX_THREAD_ID','CHAT_BRIDGE_FROM_ACCOUNT_ID','CHAT_BRIDGE_FROM_SPACE'];
+  const names=['CODEX_THREAD_ID','CHAT_BRIDGE_FROM_ACCOUNT_ID','CHAT_BRIDGE_FROM_SPACE','CHAT_BRIDGE_IMAGE_DECODER','PATH'];
   const prior=Object.fromEntries(globals.map(name=>[name,globalThis[name]])),priorEnv=Object.fromEntries(names.map(name=>[name,process.env[name]]));
   try {
     for(const mode of ['local-owner','remote-origin','revoked']) {
+      for(const name of names){if(priorEnv[name]===undefined)delete process.env[name];else process.env[name]=priorEnv[name];}
       const f=await fixture();try {
         const base=JSON.parse(f.sql("select payload from documents where kind='registry'")[0][0]),registry=structuredClone(base);
         const projectId='g-p-'+'1'.repeat(32),conversationId='11111111-1111-1111-1111-111111111111';
         Object.assign(registry.projects.P.bindings.a,{projectId,projectUrl:`https://chatgpt.com/g/${projectId}/project`});Object.assign(registry.chats.w,{conversationId,url:`https://chatgpt.com/g/${projectId}/c/${conversationId}`});
         const stored=spawnSync('python3',[path.resolve('src/state-store.py'),'put',f.config,f.state,'registry'],{env:f.env,encoding:'utf8',input:JSON.stringify({base,next:registry})});assert.equal(stored.status,0,stored.stderr);
         const r=f.request({route:{...f.request().route,projectId,conversationId}}),g=f.grant(r);for(const feature of ['generate','export'])g.capabilities.features[feature].mode='ASSISTED';
-        const {key}=f.setup(r,g),payload={request:r,grantId:g.grantId,key,operatorRef:f.owner,attemptId:'context-attempt',eventId:'context-begin',callerContext:{kind:'local-owner',owner:{threadId:f.env.CODEX_THREAD_ID}}};
-        const clientEnv=mode==='remote-origin'?{...f.env,CODEX_THREAD_ID:'',CHAT_BRIDGE_FROM_ACCOUNT_ID:f.accountId}:f.env;
+        const {key}=f.setup(r,g),payload={request:r,grantId:g.grantId,key,operatorRef:f.owner,attemptId:'context-attempt',eventId:'context-begin',callerContext:{kind:'local-owner',owner:{threadId:f.env.CODEX_THREAD_ID}},runtimeConfig:{nodeExecutable:'/invented/node',decoderExecutable:'/invented/decoder'}};
+        const decoderExecutable=MAGICK||path.join(f.root,'no-maintained-decoder');
+        const clientEnv={...f.env,CHAT_BRIDGE_IMAGE_DECODER:decoderExecutable,...(mode==='remote-origin'?{CODEX_THREAD_ID:'',CHAT_BRIDGE_FROM_ACCOUNT_ID:f.accountId}:{})};
         const result=spawnSync(process.execPath,[path.resolve('src/capabilities/image/chatgpt-ego.cli.js'),'prepare','start'],{env:clientEnv,encoding:'utf8',input:JSON.stringify(payload)});assert.equal(result.status,0,result.stderr);
         const prepared=JSON.parse(result.stdout);assert.equal(prepared.callerContext.kind,mode==='remote-origin'?'remote-origin':'local-owner');
+        assert.deepEqual(prepared.runtimeConfig,{nodeExecutable:process.execPath,decoderExecutable});
         Object.assign(globalThis,{__CHAT_BRIDGE_IMAGE_MODULE_PATH__:path.resolve('src/capabilities/image/chatgpt-ego.js'),__CHAT_BRIDGE_COORDINATOR_PATH__:path.resolve('src/coordinator.py'),__CHAT_BRIDGE_STORE_PATH__:path.resolve('src/state-store.py'),
           __CHAT_BRIDGE_CONFIG_DIR__:await realpath(f.config),__CHAT_BRIDGE_STATE_DIR__:await realpath(f.state),__CHAT_BRIDGE_IMAGE_PREPARED__:prepared,__CHAT_BRIDGE_ARGS__:['image','start']});
-        for(const name of names)delete process.env[name];
+        // Real Python -> Node contract subprocess, with Node absent from the host
+        // PATH as it is in Ego. This isolated path keeps that fact portable in CI.
+        const python=spawnSync('python3',['-c','import sys; print(sys.executable)'],{env:f.env,encoding:'utf8'});assert.equal(python.status,0,python.stderr);
+        const egoPath=path.join(f.root,'ego-path');await mkdir(egoPath);await symlink(python.stdout.trim(),path.join(egoPath,'python3'));
+        for(const name of names)delete process.env[name];process.env.PATH=egoPath;
+        assert.equal(spawnSync('node',['--version']).error?.code,'ENOENT');
         if(mode==='revoked')f.call('image-revoke',{issuerRef:f.owner,grantId:g.grantId});
         for(const name of ['control-routing','page-pool','liveness-policy','task-policy','web-policy','model-policy','session-policy'])await import(`../src/${name}.js`);
         let rounds=0;const observed={url:registry.chats.w.url,online:true,conversationMode:'normal',messagesComplete:true,inputReady:true,sendAvailable:true,generating:false,composerText:'',attachments:[],alerts:[],
@@ -93,9 +101,20 @@ test('actual CLI prepare carries exact original owner into an env-less Ego stage
           applyDispatchModel=async(_,chat,model,effort)=>({model,effort,observed:{raw:'Pro'}});return runNativeImage;
         `)(registry,page,()=>{rounds++;});
         // Uses the real main coordinated spawnSync; no fixture transport override.
-        if(mode==='local-owner'){const started=await run('start',prepared.payload);assert.equal(started.action,'MANUAL_SEND_REQUIRED');assert.equal(rounds,1);assert.equal(f.api.inspect(key).status,'SUBMISSION_UNKNOWN');}
+        if(mode==='local-owner'){
+          const started=await run('start',prepared.payload);assert.equal(started.action,'MANUAL_SEND_REQUIRED');assert.equal(rounds,1);assert.equal(f.api.inspect(key).status,'SUBMISSION_UNKNOWN');
+          const bytes=png(),sha256=createHash('sha256').update(bytes).digest('hex');await writeFile(started.originalPath,bytes,{mode:0o600});
+          observed.messages.push({id:'new-user',role:'user',text:started.prompt},{id:'new-assistant',role:'assistant',images:[],settled:null,nativeProvenanceVerified:false});
+          const assist={key,operatorRef:f.owner,path:started.originalPath,originalRef:started.originalRef,sha256,mimeType:'image/png',
+            officialSave:{confirmed:true,relationshipConfirmed:true,route:r.route,requestDigest:r.requestDigest,attemptId:started.attemptId,userMessageId:'new-user',parentUserId:'new-user',turnId:'new-assistant',promptHash:createHash('sha256').update(started.prompt.replace(/\s+/g,' ').trim()).digest('hex')}};
+          const next=spawnSync(process.execPath,[path.resolve('src/capabilities/image/chatgpt-ego.cli.js'),'prepare','assist-observe'],{env:clientEnv,encoding:'utf8',input:JSON.stringify(assist)});assert.equal(next.status,0,next.stderr);
+          globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__=JSON.parse(next.stdout);
+          if(MAGICK){const settled=await run('assist-observe',assist);assert.equal(settled.mode,'ASSISTED');assert.equal(settled.nativeReady,false);assert.equal(settled.status,'GENERATED');}
+          else {await assert.rejects(run('assist-observe',assist),/DECODE_UNAVAILABLE/);assert.equal(f.api.inspect(key).status,'SUBMISSION_UNKNOWN');}
+        }
         else {await assert.rejects(run('start',prepared.payload),mode==='remote-origin'?/IMAGE_OPERATOR_HOST_OWNER_REQUIRED/:/EXPIRED_OR_REVOKED/);assert.equal(rounds,0);assert.equal(f.api.inspect(key).attempts.length,0);}
         assert.equal(process.env.CODEX_THREAD_ID,undefined);assert.equal(process.env.CHAT_BRIDGE_FROM_ACCOUNT_ID,undefined);
+        assert.equal(process.env.CHAT_BRIDGE_IMAGE_DECODER,undefined);assert.equal(process.env.PATH,egoPath);
       }finally{await f.close();}
     }
   }finally{
@@ -293,11 +312,12 @@ test('real main factories execute ASSISTED reservation, exact-owner observation 
     await f.close();
   }
 });
-test('real final Send/upload gates reject authority, route, draft, baseline and attachment changes after awaited inspection',async()=>{
+test('real final Send/upload gates reject authority, route, draft, baseline and attachment changes after awaited inspection',async t=>{
   const injected=['__CHAT_BRIDGE_IMAGE_MODULE_PATH__','__CHAT_BRIDGE_STATE_DIR__'],prior=Object.fromEntries(injected.map(key=>[key,globalThis[key]]));
   const oldDecoder=process.env.CHAT_BRIDGE_IMAGE_DECODER;
   try {
-    for(const mode of ['clean','revocation','composer-change','route-change','baseline-change','attachment-change','upload-revocation']) {
+    for(const mode of ['clean','revocation','composer-change','route-change','baseline-change','attachment-change','decoder-missing','upload-revocation']) {
+      await t.test(mode,{skip:mode==='upload-revocation'&&!MAGICK},async()=>{
       const f=await fixture();try {
         const base=JSON.parse(f.sql("select payload from documents where kind='registry'")[0][0]),registry=structuredClone(base);
         const projectId='g-p-'+'1'.repeat(32),conversationId='11111111-1111-1111-1111-111111111111';
@@ -305,9 +325,10 @@ test('real final Send/upload gates reject authority, route, draft, baseline and 
         Object.assign(registry.chats.w,{conversationId,url:`https://chatgpt.com/g/${projectId}/c/${conversationId}`});
         const stored=spawnSync('python3',[path.resolve('src/state-store.py'),'put',f.config,f.state,'registry'],{env:f.env,encoding:'utf8',input:JSON.stringify({base,next:registry})});assert.equal(stored.status,0,stored.stderr);
         let r=f.request({route:{...f.request().route,projectId,conversationId}}),g=f.grant(r);
-        if(mode==='upload-revocation')g.capabilities.features.export.mode='ASSISTED';
+        const requiresSource=['upload-revocation','decoder-missing'].includes(mode);
+        if(requiresSource)g.capabilities.features.export.mode='ASSISTED';
         let {key,job}=f.setup(r,g);
-        if(mode==='upload-revocation') {
+        if(requiresSource) {
           const ready=f.generated(key,f.begin(key,job)),bytes=png(),sha256=createHash('sha256').update(bytes).digest('hex');
           const io=await createHostImageArtifacts({api:f.api,key,stateDir:await realpath(f.state),decode,coordinated:f.call}),inbox=await io.prepareInbox();
           await writeFile(inbox.originalPath,bytes,{mode:0o600});
@@ -317,7 +338,8 @@ test('real final Send/upload gates reject authority, route, draft, baseline and 
         }
         for(const name of ['control-routing','page-pool','liveness-policy','task-policy','web-policy','model-policy','session-policy'])await import(`../src/${name}.js`);
         globalThis.__CHAT_BRIDGE_IMAGE_MODULE_PATH__=path.resolve('src/capabilities/image/chatgpt-ego.js');globalThis.__CHAT_BRIDGE_STATE_DIR__=await realpath(f.state);
-        if(MAGICK)process.env.CHAT_BRIDGE_IMAGE_DECODER=MAGICK;
+        if(mode==='decoder-missing'||!MAGICK)delete process.env.CHAT_BRIDGE_IMAGE_DECODER;
+        else process.env.CHAT_BRIDGE_IMAGE_DECODER=MAGICK;
         const observed={url:registry.chats.w.url,online:true,conversationMode:'normal',messagesComplete:true,inputReady:true,sendAvailable:true,generating:false,composerText:'',attachments:[],alerts:[],
           messages:[{id:'old-user',role:'user',text:'fixture'},{id:'old-assistant',role:'assistant',parentUserId:null,images:[],settled:null,nativeProvenanceVerified:false,characterization:[]}]};
         let inspections=0,sends=0,uploads=0,pageUrl=observed.url;
@@ -342,12 +364,22 @@ test('real final Send/upload gates reject authority, route, draft, baseline and 
           return runNativeImage;
         `)(f,registry,page);
         const payload={request:r,grantId:g.grantId,key,attemptId:'gate-attempt',eventId:'gate-begin'};
-        if(mode==='upload-revocation')await assert.rejects(run('start',payload),MAGICK?/EXPIRED_OR_REVOKED/:/IMAGE_DECODER_REQUIRED/);
+        if(mode==='upload-revocation')await assert.rejects(run('start',payload),/EXPIRED_OR_REVOKED/);
+        else if(mode==='decoder-missing'){
+          const result=await run('start',payload);assert.equal(result.status,'FAILED_PRE_SEND');assert.equal(result.reason,'IMAGE_DECODER_REQUIRED');assert.equal(result.retryAllowed,false);
+        }
         else {const result=await run('start',payload);assert.equal(result.status,'SUBMISSION_UNKNOWN');}
-        assert.equal(sends,mode==='clean'?1:0,mode);assert.equal(uploads,0,mode);assert.equal(f.api.inspect(key).status,'SUBMISSION_UNKNOWN');
-        const replay=await run('start',{...payload,attemptId:'different',eventId:'different'});assert.equal(replay.action,'RECONCILE_ONLY');assert.equal(sends,mode==='clean'?1:0);
+        assert.equal(sends,mode==='clean'?1:0,mode);assert.equal(uploads,0,mode);
+        if(mode==='decoder-missing'){
+          const saved=f.api.inspect(key);assert.equal(saved.status,'FAILED_PRE_SEND');assert.equal(saved.attempts[0].status,'FAILED_PRE_SEND');
+          assert.equal(f.api.sessionOccupancy({accountId:f.accountId,conversationId},key).occupied,false);
+        }else{
+          assert.equal(f.api.inspect(key).status,'SUBMISSION_UNKNOWN');
+          const replay=await run('start',{...payload,attemptId:'different',eventId:'different'});assert.equal(replay.action,'RECONCILE_ONLY');assert.equal(sends,mode==='clean'?1:0);
+        }
         if(mode==='composer-change')assert.equal(observed.composerText,'current human draft');
       }finally{await f.close();}
+      });
     }
   }finally{
     for(const key of injected){if(prior[key]===undefined)delete globalThis[key];else globalThis[key]=prior[key];}

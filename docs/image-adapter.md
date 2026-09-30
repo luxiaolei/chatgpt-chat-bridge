@@ -86,6 +86,13 @@ The shared Node process environment is never changed. External request fields
 cannot create that context, and captured remote/tunnel origins cannot use the
 ASSISTED local-owner operator path.
 
+The same validated preparation captures the actual CLI Node executable and only
+the explicit `CHAT_BRIDGE_IMAGE_DECODER` path. Ego does not inherit either the
+CLI's PATH or its decoder setting. Scoped image coordinator children prepend
+that Node directory to Ego's PATH; the artifact factory receives the decoder
+path directly. Request payload paths cannot override these captured settings.
+Missing decoder configuration stays an explicit failure before byte acceptance.
+
 For a reviewed source-only canary, invoke this checkout's `bin/chat-bridge`
 directly and set `CHAT_BRIDGE_IMAGE_DECODER=/opt/homebrew/bin/magick` to the
 existing maintained executable. The CLI resolves its adjacent source modules;
