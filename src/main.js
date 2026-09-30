@@ -26,7 +26,8 @@ function coordinated(command, payload) {
   if(!COORDINATOR_PATH) throw new Error("coordinator.py is required; reinstall ChatBridge");
   const result=childProcess.spawnSync("python3",[COORDINATOR_PATH,command,CONFIG_DIR,STATE_DIR],{
     encoding:"utf8",input:JSON.stringify(payload),maxBuffer:4*1024*1024,
-    env:imageTransport?.imageCallerEnvironment(globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__,command,payload)
+    env:imageTransport?.imageCallerEnvironment(globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__,command,payload) ||
+      (globalThis.__CHAT_BRIDGE_NODE_EXECUTABLE__?{...process.env,PATH:[pathMod.dirname(globalThis.__CHAT_BRIDGE_NODE_EXECUTABLE__),process.env.PATH].filter(Boolean).join(pathMod.delimiter)}:undefined)
   });
   if(result.status!==0) throw new Error(`COORDINATOR_${command.toUpperCase()}: ${(result.stderr||result.error?.message||"unknown error").trim()}`);
   return JSON.parse(result.stdout);

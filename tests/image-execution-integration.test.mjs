@@ -206,6 +206,28 @@ test('live image CLI traverses existing account cooldown preflight before any Eg
   }finally{await f.close();}
 });
 
+test('ordinary commands check real image occupancy with no Node on Ego PATH',async()=>{
+  const f=await fixture(),names=['__CHAT_BRIDGE_NODE_EXECUTABLE__','__CHAT_BRIDGE_IMAGE_PREPARED__','__CHAT_BRIDGE_COORDINATOR_PATH__','__CHAT_BRIDGE_CONFIG_DIR__','__CHAT_BRIDGE_STATE_DIR__'];
+  const prior=Object.fromEntries(names.map(name=>[name,globalThis[name]])),oldPath=process.env.PATH;
+  try {
+    Object.assign(globalThis,{__CHAT_BRIDGE_NODE_EXECUTABLE__:process.execPath,__CHAT_BRIDGE_IMAGE_PREPARED__:undefined,__CHAT_BRIDGE_COORDINATOR_PATH__:path.resolve('src/coordinator.py'),__CHAT_BRIDGE_CONFIG_DIR__:f.config,__CHAT_BRIDGE_STATE_DIR__:f.state});
+    const python=spawnSync('python3',['-c','import sys; print(sys.executable)'],{env:f.env,encoding:'utf8'});assert.equal(python.status,0,python.stderr);
+    const egoPath=path.join(f.root,'ordinary-ego-path');await mkdir(egoPath);await symlink(python.stdout.trim(),path.join(egoPath,'python3'));
+    process.env.PATH=egoPath;assert.equal(spawnSync('node',['--version']).error?.code,'ENOENT');
+    for(const name of ['control-routing','page-pool','liveness-policy','task-policy','web-policy','model-policy','session-policy'])await import(`../src/${name}.js`);
+    const source=(await readFile(path.resolve('src/main.js'),'utf8')).split('const cmd=args[0] || "help";')[0],AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+    const occupancy=await new AsyncFunction(source+'return imageSessionOccupancy;')();
+    const registry={accounts:{a:{identity:'one'}}},chat={account:'a',id:'w'};
+    assert.equal(occupancy(registry,chat).occupied,false);
+    const {key,job}=f.setup();f.begin(key,job);
+    assert.equal(occupancy(registry,chat).occupied,true);
+  } finally {
+    for(const name of names){if(prior[name]===undefined)delete globalThis[name];else globalThis[name]=prior[name];}
+    if(oldPath===undefined)delete process.env.PATH;else process.env.PATH=oldPath;
+    await f.close();
+  }
+});
+
 test('generic shared send/retry/stop/recovery/detach honor the real SQLite image reservation',async()=>{
   const f=await fixture();try {
     const {key,job}=f.setup();f.begin(key,job);
