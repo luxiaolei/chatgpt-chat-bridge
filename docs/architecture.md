@@ -37,6 +37,13 @@ ChatGPT Project + conversations
 
 No desktop screen coordinates are required for the normal path.
 
+An explicit `queue submit --runtime codex` routes through the same durable queue
+to a Bridge-dedicated thread on an existing shared native app-server. Native
+bindings and turn receipts live in operations; they do not enter Web chat/page
+pools. Results and owner ACK retain the same contract. See
+[`native-codex-delivery.md`](native-codex-delivery.md) for startup, ownership,
+readback/cancellation and the boundary from ordinary desktop conversations.
+
 ## Registry and runtime state
 
 The bridge keeps **routing identity** and **operational state** separate.
@@ -129,6 +136,33 @@ IDLE_INCOMPLETE                     or BLOCKED
 The watchdog never marks a project task COMPLETE from UI state alone. `IDLE_COMPLETE` becomes `AWAITING_DURABLE_UPDATE`; the owning controller must reconcile GitHub Issue/PR/callback evidence. A Space in `user` or `agentDelegatedToUser` ownership is a hard automation boundary: watchdog does not claim it, persists `watchdogPausedForUserControl`, and later local preflight suppresses that task before browser startup. Explicit user-directed `send`/`ask`/`retry`/`recover`/`resend` clears the pause and allows work to continue through the normal managed-Agent-Space selection path. Mechanical recovery is conservative: a current visible native recovery control, then guarded `continue` for a real incomplete/error turn. Quiet UI alone never triggers Stop. Stop + guarded continue and original-task replay require explicit aggressive mode. Recovery checks the current task before acting and will not knowingly re-run a recorded result; this is not a global exactly-once guarantee for external side effects. Exhausted recovery becomes `BLOCKED` and routes an event through `replyTo → controller → escalationTo → rootController`.
 
 For continuous local operation, macOS launchd runs a fresh one-shot `chat-bridge watch --quiet` periodically. A fresh process reloads registry/runtime each scan, so newly created sessions and account/Space rebindings are visible without restarting a daemon.
+
+## GitHub Project management binding
+
+The word **Project** has two distinct meanings and they must not share identity:
+
+- a **ChatGPT Project** is a Chat/session location attached to an account/Profile and Ego Space;
+- a **GitHub Project v2** is an optional management/index board for source Issues/PRs.
+
+Each logical Bridge project may store optional `githubProject` metadata in the registry:
+
+```json
+{
+  "owner": "luxiaolei",
+  "number": 8,
+  "id": "PVT_...",
+  "url": "https://github.com/users/luxiaolei/projects/8",
+  "sourceQueries": ["repo:luxiaolei/chatgpt-chat-bridge is:open"],
+  "statusField": "Status",
+  "statusFromLabels": {"status:backlog": "Backlog"}
+}
+```
+
+The board is Project-first only as a **management read surface**. Source Issue/PR properties and evidence remain authoritative for task scope, dependency, review/CI and merge state; Bridge SQLite remains authoritative for dispatch/result/callback/ACK mechanics. A Project column cannot manufacture business/scientific acceptance.
+
+`src/github-project.py` is a host-local `gh` adapter invoked by `chat-bridge github-project ...`. Reads are fully paginated and fail closed on truncation/inaccessibility. Refresh is preview-only by default. Explicit `--apply` can add only source references discovered by configured open/repo-scoped searches, and can mirror only explicitly mapped nonterminal Issue-label statuses. Before each write it re-reads source and board identity/value to detect concurrent changes. It never changes source Issue/PR state or executes/replays a Bridge task.
+
+GitHub-native Auto-add/workflow configuration remains a board-setup responsibility because research, engineering and cross-repo programmes have different inclusion/status semantics. Binding a board does not claim that Auto-add is configured.
 
 ## Project sync
 

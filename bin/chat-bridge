@@ -90,12 +90,27 @@ fi
 if [[ "$CMD" == "queue" ]]; then
   COORDINATOR="${MAIN:h}/coordinator.py"
   [[ -f "$COORDINATOR" ]] || { echo "chat-bridge: coordinator missing: $COORDINATOR" >&2; exit 127; }
+  if [[ "$SUB" == "submit" ]]; then
+    for (( argumentIndex=3; argumentIndex <= $#; argumentIndex+=2 )); do
+      if [[ "${argv[argumentIndex]}" == "--luna-select" ]]; then
+        exec "${CHAT_BRIDGE_NODE_BIN:-/opt/homebrew/bin/node}" "${MAIN:h}/luna-routing.mjs" submit "$COORDINATOR" "$CONFIG_DIR" "$STATE_DIR" "${@:3}"
+      fi
+    done
+  fi
   exec python3 "$COORDINATOR" "$SUB" "$CONFIG_DIR" "$STATE_DIR" "${@:3}"
+fi
+if [[ "$CMD" == "route" && "$SUB" == "judge" ]]; then
+  exec "${CHAT_BRIDGE_NODE_BIN:-/opt/homebrew/bin/node}" "${MAIN:h}/luna-routing.mjs" judge "${@:3}"
 fi
 if [[ "$CMD" == "control" ]]; then
   COORDINATOR="${MAIN:h}/coordinator.py"
   [[ -f "$COORDINATOR" ]] || { echo "chat-bridge: coordinator missing: $COORDINATOR" >&2; exit 127; }
   exec python3 "$COORDINATOR" control "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
+fi
+if [[ "$CMD" == "github-project" ]]; then
+  GITHUB_PROJECT="${MAIN:h}/github-project.py"
+  [[ -f "$GITHUB_PROJECT" ]] || { echo "chat-bridge: GitHub Project adapter missing: $GITHUB_PROJECT" >&2; exit 127; }
+  exec python3 "$GITHUB_PROJECT" "$SUB" "$CONFIG_DIR" "$STATE_DIR" "${@:3}"
 fi
 
 LOCAL_QUERY="${MAIN:h}/local-query.py"
