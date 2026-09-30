@@ -294,6 +294,7 @@ PACE_SCOPE="$(python3 "$PREFLIGHT" scope "$CONFIG_DIR" "$STATE_DIR" "$@")"
 [[ -n "$PACE_SCOPE" ]] || { echo "chat-bridge: unable to resolve pacing account scope" >&2; exit 2; }
 LOCK_DIR="$STATE_DIR/ui-pacing-$PACE_SCOPE.lock"
 STAMP_FILE="$STATE_DIR/ui-pacing-$PACE_SCOPE.last"
+HEAVY_STAMP_FILE="$STATE_DIR/ui-pacing-$PACE_SCOPE.heavy.last"
 LEGACY_STAMP_FILE="$STATE_DIR/ui-pacing.last"
 if [[ ! -f "$STAMP_FILE" && -f "$LEGACY_STAMP_FILE" ]]; then
   cp "$LEGACY_STAMP_FILE" "$STAMP_FILE" 2>/dev/null || true
@@ -337,14 +338,18 @@ PY
   LOCK_HELD=1
   print -r -- "$$" > "$LOCK_DIR/pid"
 
-  INTERVAL="$UI_MIN_INTERVAL_SEC"
-  (( HEAVY_UI )) && INTERVAL="$UI_HEAVY_INTERVAL_SEC"
-  WAIT_SEC="$(python3 - "$STAMP_FILE" "$INTERVAL" <<'PY'
+  WAIT_SEC="$(python3 - "$STAMP_FILE" "$HEAVY_STAMP_FILE" "$UI_MIN_INTERVAL_SEC" "$UI_HEAVY_INTERVAL_SEC" "$HEAVY_UI" <<'PY'
 import pathlib,sys,time
-p=pathlib.Path(sys.argv[1]); interval=float(sys.argv[2])
+p=pathlib.Path(sys.argv[1]); heavy=pathlib.Path(sys.argv[2])
 try: last=float(p.read_text().strip())
 except Exception: last=0.0
-print(max(0.0,interval-(time.time()-last)))
+# Preserve the legacy interval once; subsequent reads cannot postpone sends.
+if not heavy.exists(): heavy.write_text(str(last)+"\n")
+try: last_heavy=float(heavy.read_text().strip())
+except Exception: last_heavy=last
+now=time.time(); wait=max(0.0,float(sys.argv[3])-(now-last))
+if int(sys.argv[5]): wait=max(wait,float(sys.argv[4])-(now-last_heavy))
+print(wait)
 PY
 )"
   if python3 - "$WAIT_SEC" "$MAX_INLINE_WAIT_SEC" <<'PY'
@@ -413,10 +418,12 @@ RC=$?
 set -e
 
 if (( TOUCH_UI )); then
-  python3 - "$STAMP_FILE" <<'PY'
+  python3 - "$STAMP_FILE" "$HEAVY_STAMP_FILE" "$HEAVY_UI" <<'PY'
 import pathlib,sys,time
 p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True)
-p.write_text(str(time.time())+"\n")
+stamp=str(time.time())+"\n"
+p.write_text(stamp)
+if int(sys.argv[3]): pathlib.Path(sys.argv[2]).write_text(stamp)
 PY
 fi
 exit "$RC"
