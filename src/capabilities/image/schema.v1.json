@@ -933,6 +933,344 @@
         "jobId",
         "scope"
       ]
+    },
+    "Result": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "chatbridge.image.v1"
+        },
+        "jobId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "requestDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "controllerTaskId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "controllerOperationId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "caller": {
+          "$ref": "#/$defs/Caller"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "route": {
+          "$ref": "#/$defs/Route"
+        },
+        "status": {
+          "$ref": "#/$defs/Status"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Output"
+          },
+          "maxItems": 16
+        },
+        "lateOutputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Output"
+          },
+          "maxItems": 48
+        },
+        "missingCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "capabilities": {
+          "$ref": "#/$defs/Capabilities"
+        },
+        "requestedModel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "requestedEffort": {
+          "enum": [
+            "Instant",
+            "Medium",
+            "High",
+            "Extra High",
+            "Pro"
+          ]
+        },
+        "modelSelection": {
+          "$ref": "#/$defs/ModelSelection"
+        },
+        "businessApproval": {
+          "const": "NOT_EVALUATED"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "jobId",
+        "requestDigest",
+        "controllerTaskId",
+        "controllerOperationId",
+        "caller",
+        "scope",
+        "route",
+        "status",
+        "revision",
+        "reason",
+        "outputs",
+        "lateOutputs",
+        "missingCount",
+        "warnings",
+        "capabilities",
+        "requestedModel",
+        "requestedEffort",
+        "modelSelection",
+        "businessApproval",
+        "updatedAt"
+      ]
+    },
+    "BeginAttemptEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eventId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "beginAttempt"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "baselineTurnIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "maxItems": 4096
+        },
+        "modelSelection": {
+          "$ref": "#/$defs/ModelSelection"
+        }
+      },
+      "required": [
+        "eventId",
+        "expectedRevision",
+        "type",
+        "attemptId",
+        "baselineTurnIds",
+        "modelSelection"
+      ]
+    },
+    "ObservationEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eventId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "enum": [
+            "observation",
+            "reconcile"
+          ]
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "route": {
+          "$ref": "#/$defs/Route"
+        },
+        "status": {
+          "enum": [
+            "SUBMISSION_UNKNOWN",
+            "GENERATING",
+            "GENERATED",
+            "PARTIAL",
+            "FAILED_PRE_SEND",
+            "FAILED",
+            "BLOCKED",
+            "EXPORT_UNAVAILABLE"
+          ]
+        },
+        "userMessageId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "turnId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidateOutputIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+          },
+          "maxItems": 16
+        },
+        "evidenceRef": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 512,
+          "pattern": "^(artifact|store|urn):[^\\s]+$"
+        },
+        "beforeSend": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "type",
+        "eventId",
+        "expectedRevision",
+        "attemptId",
+        "route",
+        "status",
+        "evidenceRef"
+      ]
+    },
+    "ExportEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eventId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "export"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "route": {
+          "$ref": "#/$defs/Route"
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Output"
+          },
+          "maxItems": 16
+        },
+        "evidenceRef": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 512,
+          "pattern": "^(artifact|store|urn):[^\\s]+$"
+        }
+      },
+      "required": [
+        "eventId",
+        "expectedRevision",
+        "type",
+        "attemptId",
+        "route",
+        "outputs",
+        "evidenceRef"
+      ]
+    },
+    "CancelEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "eventId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "type": {
+          "const": "cancel"
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 512
+        }
+      },
+      "required": [
+        "type",
+        "eventId",
+        "expectedRevision"
+      ]
+    },
+    "Event": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BeginAttemptEvent"
+        },
+        {
+          "$ref": "#/$defs/ObservationEvent"
+        },
+        {
+          "$ref": "#/$defs/ExportEvent"
+        },
+        {
+          "$ref": "#/$defs/CancelEvent"
+        }
+      ]
     }
   }
 }

@@ -14,7 +14,7 @@ test('image request cannot smuggle authority, local paths, paid API or controlle
 });
 test('edit/refine bind exact source revision and masks never detach from source',()=>{
  assert.throws(()=>normalizeImageRequest({...input(),operation:'edit'}),/SOURCE_REQUIRED/);
- const base={artifactRef:'artifact:t1:base',sha256:'b'.repeat(64),revisionId:'r1',outputId:null,jobId:null};
+ const base={artifactRef:'artifact:t1:base',sha256:'b'.repeat(64),revisionId:'r1',outputId:'parent-output',jobId:'parent-job'};
  const r={...input(),operation:'refine',conversationPolicy:'same-source',inputs:[{...base,role:'source'}],baseRevision:base};
  assert.equal(normalizeImageRequest(r).baseRevision.revisionId,'r1');
  assert.throws(()=>normalizeImageRequest({...r,baseRevision:{...base,revisionId:'r2'}}),/BASE_REVISION/);

@@ -1,81 +1,286 @@
 # Image capability v1 — contract and persistence
 
-This document owns the Bridge technical contract (#77), not HZ business approval.
-`src/capabilities/image/schema.v1.json` defines versioned shapes;
-`contract.js` validates and canonicalizes them using Node stdlib only.
-An ImageJob `jobId` is **not** a controller queue `taskId`. Jobs will reference the
-existing immutable dispatch operation and live in the same SQLite database, not
-in the reconstructable runtime cache. Existing send/ask, #58 vision input,
-local Codex ownership, callback/ACK, UNKNOWN, manual takeover and pacing remain
-unchanged. No scheduler, account pool, browser service or Python subsystem is added.
+This is the Bridge technical contract for #77, not a claim of live image support
+or HZ business approval. The implementation consists of a Node contract/reducer,
+a versioned schema and a narrow persistence hook in the existing coordinator.
+No scheduler, account pool, browser service or Python subsystem is added.
 
-## Frozen API (first handoff)
+## Identity and durable state
 
-`normalizeImageRequest(input)` fills documented defaults, validates the strict
-schema and computes `requestDigest` (SHA-256 of recursively key-sorted JSON without
-the digest field). Every request field, including caller/scope/route, prompt,
-input hashes, base revision, mask, budget, output destination and requested model,
-is covered. A supplied wrong digest fails. Same caller/job + same request replays;
-a changed request conflicts. Namespaces, job IDs and digests are not credentials.
+`schemaVersion` is `chatbridge.image.v1`.
+`src/capabilities/image/schema.v1.json` defines Request, Grant, Event, Result,
+Output, Capabilities and Receipt. `contract.js` implements the exact subset of
+schema keywords used in that file, semantic validation, canonical SHA-256 and
+pure state transitions using Node stdlib only.
 
-`createImageJobAPI({coordinated})` uses the existing coordinator transport:
+An image `jobId` is **not** its `controllerTaskId`. The job points to an existing,
+immutable controller dispatch `controllerOperationId` and its task; it does not
+create another dispatch, controller task, callback, owner or account assignment.
+Image attempt IDs, Chat user/assistant turn IDs and output IDs remain separate.
 
-| Method | Arguments | Meaning |
+The existing `bridge.sqlite3` gains three lazy tables: `image_grants`,
+`image_jobs` and `image_events`. Jobs use `(caller_ref, job_id)` as their unique
+key. Request digest, route, scope and controller operation cannot be rebound.
+The job and its event snapshot commit together under existing `BEGIN IMMEDIATE`
+and expected-revision compare-and-swap. Duplicate event IDs replay the saved
+snapshot; changed content conflicts. Concurrent updates to one revision cannot
+both commit. No image job is projected into the reconstructable runtime cache.
+
+`normalizeImageRequest(input)` fills inputs/base/mask/count/ratio/conversation
+policy defaults and hashes recursively key-sorted JSON without `requestDigest`.
+Every request field is covered, including caller, tenant/namespace/purpose,
+workgroup, exact account/Project/session/conversation, prompt, source hashes and
+revisions, mask, budget, output destination and requested model/effort. A supplied
+wrong digest fails. Same caller/job with the same request replays; another
+approved request with that identity conflicts. Cross-scope access is denied.
+
+## Authorization: separate host-owner grant, never a caller-supplied flag
+
+There is no `authorized: true`, namespace shortcut or bearer token in a request.
+The request's `authorizedOutput` describes the **requested** destination; it gains
+permission only when the controller separately approves the entire request.
+A `grantId` is a lookup key, not a credential. Arbitrary caller/job/namespace names
+cannot create a grant or expand its scope.
+
+The existing coordinator exposes the local management actions below. These are
+JSON stdin commands in the source checkout, not a new installed public CLI:
+
+```text
+python3 src/coordinator.py image-authorize CONFIG_DIR STATE_DIR
+  {"issuerRef":"<persisted controller owner>","grant":{
+    "grantId":"grant-1",
+    "controllerOperationId":"<existing dispatch operation UUID>",
+    "controllerTaskId":"<existing controller task>",
+    "request":<normalized exact ImageJob request>,
+    "sourceExternalizationAuthorized":false,
+    "expiresAt":"<ISO time no later than request budget deadline>",
+    "capabilities":<route-bound feature-specific evidence snapshot>
+  }}
+
+python3 src/coordinator.py image-revoke CONFIG_DIR STATE_DIR
+  {"issuerRef":"<persisted controller owner>","grantId":"grant-1"}
+```
+
+Grant creation/revocation reject tunnel-origin calls, even when the caller names
+an owner. A local Codex owner must match the persisted thread and host through
+existing `local_caller`; a non-Codex owner retains the existing host-local
+management boundary. Grants are immutable; revoked grants are not revived by
+replay. A newly approved capability snapshot can enable a BLOCKED job before an
+attempt, or a bounded retry after proven pre-send failure. An already-started
+attempt remains bound to its original grant; a different grant cannot silently
+renew it or adopt its late results.
+
+Worker access requires the saved grant's exact caller/job/scope and the existing
+account-origin or local-owner check. An unverified Space hint is rejected.
+These are guards within Bridge's **trusted host / verified account boundary**,
+not isolation from another process with the same OS-user credentials or another
+session controlling the same authorized account. A remote HZ gateway must
+independently authenticate actor/service principal, tenant, object rights and
+current receiving permissions; that gateway is outside #77 and is NOT_RUN here.
+Neither an old callback nor a hash is authority to receive/adopt an asset.
+
+Admission rechecks the existing registered account identity, binding, Project,
+session/conversation, requested model/effort, controller delivery `SENT`, absence
+of a controller result, management pause/drain, account cooldown and recorded
+user-control pause. The adapter must additionally use the existing live UI
+ownership/pacing gate around its side effect; database admission does not claim
+an Ego Space, override human control, migrate accounts or authorize a paid API.
+`allowPaidApi` is fixed to false in v1.
+
+References use portable `artifact:`, `store:` or `urn:` identifiers, not Mac
+paths, private session URLs or credentials. Imported source refs/hashes/revisions
+need explicit source externalization approval. Source refs carrying Bridge job
+and output IDs resolve to an exact VERIFIED parent in the same caller/scope.
+Refine requires that parent and the same route/conversation; export-only also
+binds the parent's route. An imported external image may be edited with explicit
+authorization, but v1 refine/export-only do not guess an unknown prior Chat turn.
+
+## Node API and adapter obligations
+
+The executor supplies the existing `coordinated(command, payload)` transport:
+
+```js
+import {
+  createImageJobAPI, normalizeImageRequest, imageJobKey
+} from './src/capabilities/image/contract.js';
+
+const image = createImageJobAPI({coordinated});
+const request = normalizeImageRequest(authorizedRequest);
+const key = imageJobKey(request, grantId);
+const job = image.submit(request, {grantId});
+```
+
+| Method | Arguments | Contract |
 | --- | --- | --- |
-| submit | request, `{grantId}` | Persist one authorized, immutable ImageJob |
-| inspect / result | `{grantId,callerRef,jobId,scope}` | Read state / technical result |
-| beginAttempt | key, event | Persist baseline before any possible UI send |
-| record | key, event | Record new-turn observation, never a browser send |
-| export | key, event | Record exporter's original-byte evidence, not perform I/O |
-| reconcile | key, event | Reconcile original route only; never resend UNKNOWN |
-| cancel | key, event | Cancel only before an attempt; otherwise request stop |
+| submit | request, `{grantId}` | Persist or replay the authorized immutable job |
+| inspect | `{grantId,callerRef,jobId,scope}` | Read job, attempts and original request |
+| result | key | Read technical projection; omit full prompt |
+| beginAttempt | key, event | Persist baseline and UNKNOWN before a possible send |
+| record | key, event | Persist adapter observation; never execute a send |
+| export | key, event | Persist exporter's byte evidence; no download or filesystem I/O |
+| reconcile | key, event | Observe the original route/attempt only; never resend |
+| cancel | key, event | Before attempt: cancel; after possible send: request stop only |
 
-Events carry `eventId` and `expectedRevision` for transactional idempotency/CAS.
-The persistence implementation is the next commit after this shape handoff;
-this first handoff alone is **not** a runnable end-to-end image implementation.
-The entry-point wiring/adapter belongs solely to #78 and export implementation
-solely to #79. No new CLI command is installed by this contract commit.
+These route to `image-submit`, `image-inspect`, `image-result` and `image-apply`.
+No installed runtime/CLI behavior changes in #77. Entry wiring and actual adapter
+are #78's unique write domain; original-byte exporter and consumer receipts are
+#79's. The controller installs only after independent review and integration.
 
-## Authorization and evidence boundary
+Every event has `eventId` and `expectedRevision`. Example events below use
+synthetic identifiers; a real adapter supplies observed evidence, not these
+placeholders. The adapter method supplies `type` automatically.
 
-An external request cannot set `authorized`, grant itself permission by choosing
-a namespace/caller/job, or submit a local filesystem path as a portable artifact.
-A **separate controller-issued grant**, bound to the persisted owner operation
-and entire normalized request digest, is required by the persistence boundary.
-Input externalization and output destination are explicitly granted, not inferred
-from a prior vision upload. Same-OS-user processes remain a trusted local boundary,
-as with existing Bridge. A remote HZ gateway must authenticate its principal and
-tenant before entering this local API; this module is not an Internet auth server.
+```js
+const reservation = image.beginAttempt(key, {
+  eventId: 'begin-1', expectedRevision: job.revision, attemptId: 'attempt-1',
+  baselineTurnIds: ['previous-user-id', 'previous-assistant-id'],
+  modelSelection: {model: 'Latest', effort: 'Pro', raw: 'Pro', verified: true}
+});
+```
+
+The first committed reservation returns `effectAdmission: "NEWLY_RESERVED"` for
+generate/edit/refine. **Only that response**, within existing live UI admission,
+permits the one intended send. Its durable job status is already
+`SUBMISSION_UNKNOWN`. A replayed begin event returns `RECONCILE_ONLY`, never
+another send permit. The permission is not saved in the job or returned by
+inspect. A lost response, interrupted process or unknown send is reconciled on
+the same route; a new event/attempt ID is not a retry loophole.
+
+Export-only returns `READ_ONLY_EXPORT` on a new reservation. It does **not** send
+a generation prompt. `sourceTurnId` comes from the persisted verified parent;
+the observation must bind that original turn and can omit `userMessageId`.
+
+For generation/edit/refine, observations must bind a new user message and a new
+assistant turn absent from the pre-send baseline. Turn identity is immutable:
+
+```js
+const observed = image.record(key, {
+  eventId: 'observed-1', expectedRevision: reservation.revision,
+  attemptId: 'attempt-1', route: request.route, status: 'GENERATED',
+  userMessageId: 'new-user-id', turnId: 'new-assistant-id',
+  candidateOutputIds: ['output-1'], evidenceRef: 'artifact:evidence:new-turn'
+});
+
+image.export(key, {
+  eventId: 'export-1', expectedRevision: observed.revision,
+  attemptId: 'attempt-1', route: request.route,
+  outputs: [verifiedOriginalOutput], evidenceRef: 'artifact:evidence:byte-checks'
+});
+```
+
+Old images, input references, thumbnails, placeholders and assistant text cannot
+be asserted as generation evidence by the adapter. This contract validates
+bindings and claimed evidence structure; it cannot independently inspect DOM
+or original bytes. #78/#79 must supply their real observations and verifier
+results. The tests here deliberately use labeled synthetic metadata fixtures.
+
+## States, limited cancellation and recovery
+
+`SUBMITTED` is admission, not remote delivery. An attempt begins as
+`SUBMISSION_UNKNOWN`; known new-turn observations can advance it to `GENERATING`,
+`GENERATED` or `PARTIAL`. Generated candidates are not yet exported originals.
+`FAILED_PRE_SEND` requires explicit before-send evidence with no known user or
+assistant turn; only this state allows another attempt within `maxAttempts`.
+Unknown delivery cannot be downgraded to safe-to-resend after known delivery.
+
+`PARTIAL` retains known candidates/originals and exact `missingCount`. An output
+set cannot silently remove previous candidates. `EXPORTED` means metadata for
+all requested originals has been persisted but verification is incomplete.
+`TECHNICALLY_VALIDATED` requires all requested outputs and all verifier checks.
+`EXPORT_UNAVAILABLE`, `BLOCKED`, and `FAILED` remain explicit; they are not
+successful text responses. No UI observation may directly claim the technical
+validation state.
+
+`cancel` before any possible send produces `CANCELLED`. After an attempt it
+produces `CANCEL_REQUESTED`; no remote cancellation receipt is fabricated. #78
+may request native Stop only under existing authorization/pacing, and cannot
+undo prior external effects. Expired/revoked/budget-late results, cancelled work
+and late observations after terminal failure are kept in `lateObservations` /
+`lateOutputs`, with `LATE_RESULT_NOT_ADOPTED`. They do not replace accepted
+outputs or become approved/published. Reads and evidence reconciliation remain
+available during pause; new attempts do not.
+
+## Capability observations and asset mapping
 
 `unknownImageCapabilities(route)` defaults every feature to UNKNOWN.
-`classifyImageCapabilities` accepts feature-specific native/assisted/unsupported
-observations with version, timestamp, exact route and evidence references;
-`imageParts` or input vision is not generation evidence. Capabilities include
-generate/edit/refine/export/multiReference/mask/deterministicComposite/batch.
-ASSISTED is explicit, not automatic success. Native region editing and deterministic
-composition are distinct; neither implies untouched pixels without evidence.
+`classifyImageCapabilities` accepts feature-specific NATIVE / ASSISTED /
+UNSUPPORTED observations with version, timestamp, exact route and evidence refs.
+Missing positive evidence stays UNKNOWN and execution fails closed. Input vision
+or `imageParts` is not evidence of generation. Requested model, subscription
+names and the moving label Latest imply neither an image model nor unlimited
+quota. New capability evidence requires a separately authorized snapshot, not
+an external caller's preferred mode.
 
-Outputs bind job/attempt/new turn/outputId, source hashes, parent/base revision,
-portable artifactRef, actual MIME/bytes/pixels/hash and independent verifier checks.
-Only all affirmative byte-verification checks permit technical VERIFIED.
-`validateImageReceipt` defines a consumer receipt; RECEIVED/REJECTED does not confer
-APPROVED/PUBLISHED. HZ Blueprint #107 / Runtime #134 own immutable asset/revision,
-rights, adoption and placement. They map from these fields and independently check
-current receiving permissions; a Mac path, old callback or byte hash is not access.
+Features are generate/edit/refine/export/multiReference/mask/
+deterministicComposite/batch. Native region and deterministic composition are
+distinct. Mask coordinates bind source-pixels, source hash and source revision;
+the actual mask/multi-reference/strict unchanged-pixel/batch capabilities remain
+UNKNOWN or UNSUPPORTED without evidence and are not implemented by this schema.
 
-## Model and delivery limits (2026-09-30)
+Each Output binds job/attempt/turn/outputId, portable artifactRef, SHA-256, actual
+MIME/byte length/decoded dimensions, ordered source hashes, parent output/base
+revision, capability version/time, warnings and independent verifier checks
+(magic, MIME, decode, hash, count). An output is immutable except for the initial
+UNVERIFIED-to-VERIFIED upgrade; a verified output cannot be overwritten. The
+exporter must resolve the authorized output target, validate bytes, enforce
+filesystem and transfer safety and supply this metadata; #77 does not perform
+those I/O operations or infer success from a filename.
+
+HZ Blueprint #107 / Runtime #134 map `jobId/attemptId/route/turnId/outputId`,
+`artifactRef/sha256` and source/base lineage into their immutable Asset/Revision
+records. `Receipt` is `chatbridge.image.receipt.v1` with receiptId, consumerRef,
+jobId, requestDigest, outputId, artifactRef, sha256, receivedAt,
+`RECEIVED|REJECTED` and reason. The artifact workstream owns receipt production
+and idempotent storage; this module exposes its strict shape, not HZ adoption.
+A consumer must validate current rights and received bytes independently.
+Bridge technical VERIFIED/EXPORTED/RECEIVED never writes APPROVED or PUBLISHED;
+`result()` explicitly returns `businessApproval: "NOT_EVALUATED"`.
+
+The ImageJob API never submits a controller queue result or ACK. At the end of a
+development task the worker separately updates GitHub and calls `queue result`.
+Only the persisted owning controller reviews that evidence and acknowledges it.
+
+## Verification and deployment boundary
+
+Node tests cover canonical request/authorization counterexamples, restart
+persistence, same-request replay/conflict, cross-scope/account guards, exact
+source/turn/output binding, UNKNOWN reconciliation, bounded pre-send retry,
+parallel revision conflicts, lost begin response, partials, cancellation, late
+quarantine, revoked grants, pause/drain/cooldown/manual takeover, and original-turn
+export-only. Fixtures use temporary SQLite stores, fake worker receipts and
+synthetic metadata; no live browser or paid image API is called.
+
+Run `node --check src/capabilities/image/contract.js`, coordinator syntax checks,
+and `npm run check && npm test`. Final fixed-head results are recorded in PR #84
+and #77 rather than presenting a moving branch as accepted evidence.
+
+NOT_RUN in this delivery: real generation or material upload, Chat original
+export canary, installed #78/#79 integration, independent code review, external
+HZ authentication gateway/consumer receipt integration, business adoption or
+publishing, installation/rollback and production use. No runtime installation,
+merge, source material externalization or paid API invocation is authorized by
+these offline test fixtures. Raw prompts, private input data and temporary
+session/resource URLs must not be copied to public GitHub evidence/logs.
+
+## Model and R0 provenance (2026-09-30)
 
 User request: Latest + Pro, not Extra High. Development task
 CBIMG-77-20260930-03 has persisted send receipt
 `a546be04-603f-42d8-be41-65bcd248d14d` with observed
 `{model:"Latest",effort:"Pro",raw:"Pro",verified:true}` on authorized default /
 Ru Wang, Chat Bridge Project `g-p-6abca54a9ea88191b5b4a9f64ee1d75c`.
-This is developer-chat selection, not proof of an image model, generation or quota.
-The historical hzcodex observation is not reused as this account's identity.
+This is developer-chat selection, not image generation/model/quota evidence.
+Historical hzcodex identity/model observations do not override this route.
 
-R0 is PR #83 at `9dc2e76d7713a45b952f0089f633947ff9049e0b` (two existing
-commits only). Historical local receive + owner ACK exists; active background
-Codex wake-up/native Codex dispatch/MCP Events are separate unimplemented gaps.
-The image PR is stacked on `codex/local-codex-roundtrip`. Controller alone reviews,
-merges, installs and ACKs. Generation, real material upload, original-export canary,
-installation/rollback, HZ adoption and publishing are **NOT_RUN** in this delivery.
+R0 is separate PR #83 at `9dc2e76d7713a45b952f0089f633947ff9049e0b`, containing
+only the original `3691b60` and `9dc2e76` commits above main
+`5c7a77bc1d1e76870657ec7fdd619a2494bb3d58`. Fresh baseline check + 211 tests and
+static/pacing passed; historical local receive + owner ACK receipts were reread,
+not rerun as a new canary. Active background Codex wake-up, native Codex target
+dispatch and MCP Events remain separate unimplemented gaps.
+
+The image PR #84 is stacked on `codex/local-codex-roundtrip`, with initial API
+handoff at `b73d5bf1d5a19436ca9a329e11a9a72f2a361b8b` followed by persistence
+and recovery guards. The controller alone decides review, merge, installation
+and acceptance. Other worktrees, main/runtime/CLI/install writers and HZ
+repositories are not modified by this workstream.

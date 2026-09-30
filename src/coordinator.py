@@ -2436,12 +2436,260 @@ def reattach_commit(db, payload):
         raise
 
 
+
+def image_contract(action, payload):
+    """Stateless Node schema/reducer; SQLite ownership stays in this coordinator."""
+    module = pathlib.Path(__file__).parent / "capabilities" / "image" / "contract.js"
+    try:
+        completed = subprocess.run(["node", str(module), action], input=json.dumps(payload),
+                                   text=True, capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError("IMAGE_CONTRACT_UNAVAILABLE") from error
+    if completed.returncode:
+        try:
+            detail = json.loads(completed.stderr).get("error", "IMAGE_CONTRACT_FAILED")
+        except ValueError:
+            detail = "IMAGE_CONTRACT_FAILED"
+        raise ValueError(detail)
+    return json.loads(completed.stdout)
+
+
+def image_tables(db):
+    # Same durable database/transaction machinery, no runtime-cache projection.
+    db.execute("""CREATE TABLE IF NOT EXISTS image_grants (
+        grant_id TEXT PRIMARY KEY, controller_operation_id TEXT NOT NULL,
+        payload TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS image_jobs (
+        caller_ref TEXT NOT NULL, job_id TEXT NOT NULL, controller_operation_id TEXT NOT NULL,
+        request_digest TEXT NOT NULL, revision INTEGER NOT NULL, status TEXT NOT NULL,
+        document TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY(caller_ref,job_id)
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS image_events (
+        caller_ref TEXT NOT NULL, job_id TEXT NOT NULL, event_id TEXT NOT NULL,
+        payload_hash TEXT NOT NULL, revision INTEGER NOT NULL, document TEXT NOT NULL,
+        recorded_at TEXT NOT NULL, PRIMARY KEY(caller_ref,job_id,event_id)
+    )""")
+    db.commit()
+
+
+def image_operation(db, grant):
+    row = db.execute("SELECT * FROM operations WHERE id=? AND kind='dispatch'",
+                     (grant["controllerOperationId"],)).fetchone()
+    if not row or row["task_id"] != grant["controllerTaskId"]:
+        raise ValueError("IMAGE_ACCESS_DENIED")
+    return row
+
+
+def image_owner(db, row, issuer):
+    # Account-origin hints do not authenticate an exact Web controller. Grants
+    # are host-owner management actions, never inferred from caller names.
+    if os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID") or os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+        raise ValueError("IMAGE_GRANT_HOST_OWNER_REQUIRED")
+    if issuer != row["caller_ref"]:
+        raise ValueError("IMAGE_GRANT_OWNER_REQUIRED")
+    if row["local_owner"]:
+        local_caller(issuer, json.loads(row["local_owner"]))
+    else:
+        authorize_control(db, issuer, row["project"], False, row["workgroup_id"])
+
+
+def image_route(db, row, request):
+    route = request["route"]
+    if (route["project"] != row["project"] or route["accountAlias"] != row["account_alias"]
+            or route["accountId"] != row["account_id"] or route["sessionRef"] != row["session_ref"]
+            or request["scope"]["workgroupId"] != row["workgroup_id"]):
+        raise ValueError("IMAGE_ROUTE_NOT_GRANTED")
+    reg = registry(db)
+    chat = (reg.get("chats") or {}).get(row["session_ref"]) or {}
+    project = (reg.get("projects") or {}).get(row["project"]) or {}
+    binding = (project.get("bindings") or {}).get(row["account_alias"]) or {}
+    identity = ((reg.get("accounts") or {}).get(row["account_alias"]) or {}).get("identity")
+    project_id = binding.get("projectId")
+    if not project_id:
+        match = re.search(r"/g/(g-p-[^/]+)/", str(binding.get("projectUrl") or ""))
+        project_id = match.group(1) if match else None
+    if (not identity or account_id(identity) != row["account_id"]
+            or chat.get("status", "active") != "active" or chat.get("project") != row["project"]
+            or chat.get("account") != row["account_alias"] or project_id != route["projectId"]
+            or (chat.get("conversationId") or chat.get("id")) != route["conversationId"]
+            or request["requestedModel"] != row["requested_model"]
+            or request["requestedEffort"] != row["requested_effort"]):
+        raise ValueError("IMAGE_ROUTE_NOT_GRANTED")
+    if project.get("archived") or not binding_execution_ready(project, binding):
+        raise ValueError("IMAGE_PROJECT_NOT_READY")
+
+
+def image_access(db, grant, payload):
+    """Lookup names confer no authority; use persisted grant, origin, owner and scope."""
+    row = image_operation(db, grant)
+    request = grant["request"]
+    if (payload.get("callerRef") != request["caller"]["ref"] or payload.get("jobId") != request["jobId"]
+            or payload.get("scope") != request["scope"]):
+        raise ValueError("IMAGE_ACCESS_DENIED")
+    origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+    if origin:
+        if origin != row["account_id"]:
+            raise ValueError("IMAGE_ACCESS_DENIED")
+    elif os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+        raise ValueError("IMAGE_ORIGIN_UNVERIFIED")
+    elif row["local_owner"]:
+        local_caller(row["caller_ref"], json.loads(row["local_owner"]))
+    # Host-local administrators retain the existing same-OS-user trust boundary.
+    return row
+
+
+def image_sources(db, request):
+    source_turn_id = None
+    for source in request["inputs"]:
+        if not source["jobId"]:
+            continue  # Imported external artifacts require an explicit source grant.
+        parent = db.execute("SELECT document FROM image_jobs WHERE caller_ref=? AND job_id=?",
+                            (request["caller"]["ref"],source["jobId"])).fetchone()
+        if not parent:
+            raise ValueError("IMAGE_PARENT_NOT_FOUND")
+        parent = json.loads(parent["document"])
+        if parent["scope"] != request["scope"]:
+            raise ValueError("IMAGE_SOURCE_SCOPE_MISMATCH")
+        output = next((o for o in parent["outputs"] if o["outputId"] == source["outputId"]), None)
+        if (not output or output["artifactRef"] != source["artifactRef"] or output["sha256"] != source["sha256"]
+                or output["validation"]["status"] != "VERIFIED"):
+            raise ValueError("IMAGE_SOURCE_NOT_VERIFIED")
+        if (request["conversationPolicy"] == "same-source" or request["operation"] == "export") and parent["route"] != request["route"]:
+            raise ValueError("IMAGE_SOURCE_CONVERSATION_MISMATCH")
+        if source["role"] == "source":
+            source_turn_id = output["turnId"]
+    return source_turn_id
+
+
+def image_admission(db, row, request):
+    image_route(db, row, request)
+    source_turn_id = image_sources(db, request)
+    if row["status"] != "SENT":
+        raise ValueError("IMAGE_CONTROLLER_DELIVERY_NOT_CONFIRMED")
+    if db.execute("SELECT 1 FROM task_results WHERE task_id=? LIMIT 1", (row["task_id"],)).fetchone():
+        raise ValueError("IMAGE_CONTROLLER_RESULT_RECORDED")
+    mode = management_mode(db, row["project"], row["workgroup_id"])
+    if mode["mode"] != "RUNNING":
+        raise ValueError("ADMISSION_" + mode["mode"])
+    if account_cooldown_active(db, registry(db), row["account_alias"]):
+        raise ValueError("WEB_COOLDOWN_ACTIVE")
+    task = (runtime(db).get("tasks") or {}).get(row["task_id"]) or {}
+    if task.get("watchdogPausedForUserControl"):
+        raise ValueError("IMAGE_USER_CONTROL_PAUSED")
+    return source_turn_id
+
+
+def image_api(db, command, payload):
+    image_tables(db)
+    begin_immediate(db)
+    try:
+        now = stamp()
+        if command == "image-authorize":
+            grant = image_contract("grant", {"grant": payload["grant"], "at": now})
+            operation = image_operation(db, grant)
+            image_owner(db, operation, payload.get("issuerRef"))
+            image_route(db, operation, grant["request"])
+            encoded = json.dumps(grant, sort_keys=True, ensure_ascii=False)
+            prior = db.execute("SELECT * FROM image_grants WHERE grant_id=?", (grant["grantId"],)).fetchone()
+            if prior and prior["payload"] != encoded:
+                raise ValueError("IMAGE_GRANT_CONFLICT")
+            if not prior:
+                db.execute("INSERT INTO image_grants(grant_id,controller_operation_id,payload,created_at) VALUES (?,?,?,?)",
+                           (grant["grantId"], grant["controllerOperationId"], encoded, now))
+            value = {"grantId": grant["grantId"], "requestDigest": grant["request"]["requestDigest"],
+                     "idempotent": bool(prior), "revoked": bool(prior and prior["revoked_at"])}
+        else:
+            saved = db.execute("SELECT * FROM image_grants WHERE grant_id=?", (payload.get("grantId"),)).fetchone()
+            if not saved:
+                raise ValueError("IMAGE_ACCESS_DENIED")
+            grant = json.loads(saved["payload"])
+            if command == "image-revoke":
+                image_owner(db, image_operation(db, grant), payload.get("issuerRef"))
+                db.execute("UPDATE image_grants SET revoked_at=COALESCE(revoked_at,?) WHERE grant_id=?", (now, grant["grantId"]))
+                value = {"grantId": grant["grantId"], "revoked": True}
+            else:
+                request = grant["request"]
+                if command == "image-submit":
+                    request = image_contract("normalize", {"request": payload["request"]})
+                    key = {"callerRef": request["caller"]["ref"], "jobId": request["jobId"], "scope": request["scope"]}
+                else:
+                    key = payload
+                operation = image_access(db, grant, key)
+                identity = (request["caller"]["ref"], request["jobId"])
+                prior = db.execute("SELECT * FROM image_jobs WHERE caller_ref=? AND job_id=?", identity).fetchone()
+                active = not saved["revoked_at"] and datetime.fromisoformat(grant["expiresAt"].replace("Z", "+00:00")) > datetime.now(timezone.utc)
+                if command == "image-submit":
+                    if request["requestDigest"] != grant["request"]["requestDigest"]:
+                        raise ValueError("IMAGE_REQUEST_NOT_GRANTED")
+                    if prior:
+                        old = json.loads(prior["document"])
+                        if (old["scope"] != request["scope"] or old["route"] != request["route"]
+                                or old["controllerOperationId"] != grant["controllerOperationId"]):
+                            raise ValueError("IMAGE_ACCESS_DENIED")
+                        if prior["request_digest"] != request["requestDigest"]:
+                            raise ValueError("IMAGE_IDEMPOTENCY_CONFLICT")
+                        value = old
+                    else:
+                        if not active:
+                            raise ValueError("IMAGE_GRANT_EXPIRED_OR_REVOKED")
+                        source_turn_id = image_admission(db, operation, request)
+                        value = image_contract("initial", {"grant": grant, "at": now})
+                        value["sourceTurnId"] = source_turn_id
+                        db.execute("""INSERT INTO image_jobs(caller_ref,job_id,controller_operation_id,request_digest,
+                            revision,status,document,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)""",
+                            (*identity, grant["controllerOperationId"], request["requestDigest"], 1, value["status"], json.dumps(value), now, now))
+                else:
+                    if not prior:
+                        raise ValueError("IMAGE_JOB_NOT_FOUND")
+                    record = json.loads(prior["document"])
+                    if (record["requestDigest"] != grant["request"]["requestDigest"]
+                            or record["controllerOperationId"] != grant["controllerOperationId"]):
+                        raise ValueError("IMAGE_ACCESS_DENIED")
+                    if command in {"image-inspect", "image-result"}:
+                        value = record if command == "image-inspect" else image_contract("result", {"record": record})
+                    elif command == "image-apply":
+                        event = payload["event"]
+                        event_id = event.get("eventId")
+                        digest = hashlib.sha256(json.dumps(event, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+                        previous = db.execute("SELECT * FROM image_events WHERE caller_ref=? AND job_id=? AND event_id=?", (*identity,event_id)).fetchone()
+                        if previous:
+                            if previous["payload_hash"] != digest:
+                                raise ValueError("IMAGE_EVENT_CONFLICT")
+                            value = json.loads(previous["document"])
+                            if event.get("type") == "beginAttempt":
+                                value["effectAdmission"] = "RECONCILE_ONLY"
+                        else:
+                            if event.get("type") == "beginAttempt":
+                                image_admission(db, operation, request)
+                            value = image_contract("apply", {"record": record, "event": event, "grant": grant, "at": now, "grantActive": active})
+                            encoded = json.dumps(value)
+                            changed = db.execute("""UPDATE image_jobs SET revision=?,status=?,document=?,updated_at=?
+                                WHERE caller_ref=? AND job_id=? AND revision=?""",
+                                (value["revision"],value["status"],encoded,now,*identity,event["expectedRevision"]))
+                            if changed.rowcount != 1:
+                                raise ValueError("IMAGE_REVISION_CONFLICT")
+                            db.execute("INSERT INTO image_events VALUES (?,?,?,?,?,?,?)", (*identity,event_id,digest,value["revision"],encoded,now))
+                            if event.get("type") == "beginAttempt":
+                                value["effectAdmission"] = "READ_ONLY_EXPORT" if request["operation"] == "export" else "NEWLY_RESERVED"
+                    else:
+                        raise ValueError("UNKNOWN_IMAGE_COMMAND")
+        db.commit()
+        return value
+    except Exception:
+        db.rollback()
+        raise
+
+
 def main():
     command, config_name, state_name, *args = sys.argv[1:]
     config, state = pathlib.Path(config_name), pathlib.Path(state_name)
     db = connection(config, state)
     try:
-        if command == "submit":
+        if command in {"image-authorize", "image-revoke", "image-submit", "image-inspect", "image-result", "image-apply"}:
+            value = image_api(db, command, json.load(sys.stdin))
+        elif command == "submit":
             if args:
                 names = {"--request-id": "requestId", "--caller-ref": "callerRef", "--project": "project",
                          "--role": "role", "--session-ref": "sessionRef", "--message": "message", "--account": "account",
