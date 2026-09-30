@@ -426,11 +426,12 @@ def integration_case(case, coordinator, runner, runner_path, fakes):
             db.close()
         return
 
-    # Force quick timeouts only through this imported test module; no production
-    # knob or shortened timeout is added to the installed command.
-    coordinator.bridge_timeout = lambda: .7
+    # Only timeout cases need a short budget; normal receipt cases must tolerate
+    # process startup under a concurrently running full suite.
+    fixture_timeout = .7 if 'timeout' in case else 5
+    coordinator.bridge_timeout = lambda: fixture_timeout
     coordinator.BRIDGE_TERM_GRACE_SEC = .2
-    coordinator.TASK_RECORD_TIMEOUT_SEC = .7
+    coordinator.TASK_RECORD_TIMEOUT_SEC = fixture_timeout
     if case == 'dispatch-unstructured-diagnostic':
         body = "import sys\nsys.stderr.write('x'*5000+'synthetic-stderr-tail');sys.exit(1)\n"
     elif case == 'dispatch-timeout-unknown':
@@ -470,7 +471,7 @@ def integration_case(case, coordinator, runner, runner_path, fakes):
             assert response['reason'] == 'TimeoutExpired'
             assert detail['phase'] == 'dispatch'
         elif case == 'dispatch-unstructured-diagnostic':
-            assert response['reason'] == 'WORKER_EXIT_1'
+            assert response['reason'] == 'WORKER_EXIT_1', response
             assert len(detail['stderrTail']) == 2048
         else:
             outcome = coordinator.reconcile_delivery(db, op['operationId'])
