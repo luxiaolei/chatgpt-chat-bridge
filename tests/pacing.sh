@@ -96,9 +96,10 @@ PY
 [[ "$(wc -l < "$LOG" | tr -d ' ')" == "2" ]]
 
 # Heavy command is deferred when only the normal 10s interval has elapsed.
-python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.last" <<'PY'
+python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.last" "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.heavy.last" <<'PY'
 import pathlib,sys,time
 pathlib.Path(sys.argv[1]).write_text(str(time.time()-11)+"\n")
+pathlib.Path(sys.argv[2]).write_text(str(time.time()-11)+"\n")
 PY
 set +e
 "$ROOT/bin/chat-bridge" new --project X --name Y --message Z >/dev/null 2>"$TMP/heavy.err"
@@ -191,6 +192,28 @@ assert data["reason"]=="UI_LOCK_BUSY", data
 PY
 
 # Hard safety floors remain enforced.
+# Watch reads must not keep resetting the heavy-operation interval.
+python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.last" "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.heavy.last" <<'PY'
+import pathlib,sys,time
+pathlib.Path(sys.argv[1]).write_text(str(time.time()-11)+"\n")
+pathlib.Path(sys.argv[2]).write_text(str(time.time()-31)+"\n")
+PY
+"$ROOT/bin/chat-bridge" new --project X --name Y --message Z >/dev/null
+[[ "$(wc -l < "$LOG" | tr -d ' ')" == "4" ]]
+HEAVY_STAMP="$(cat "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.heavy.last")"
+python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.last" <<'PY'
+import pathlib,sys,time
+pathlib.Path(sys.argv[1]).write_text(str(time.time()-11)+"\n")
+PY
+"$ROOT/bin/chat-bridge" projects >/dev/null
+[[ "$(cat "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.heavy.last")" == "$HEAVY_STAMP" ]]
+set +e
+"$ROOT/bin/chat-bridge" new --project X --name Y --message Z >/dev/null 2>"$TMP/repeated-heavy.err"
+RC=$?
+set -e
+[[ "$RC" == "75" ]]
+grep -q 'PACING_DEFERRED' "$TMP/repeated-heavy.err"
+
 if CHAT_BRIDGE_UI_MIN_INTERVAL_SEC=9 "$ROOT/bin/chat-bridge" help >/dev/null 2>&1; then
   echo "normal pacing below 10 seconds must be rejected" >&2
   exit 1
