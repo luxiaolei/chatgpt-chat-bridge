@@ -68,8 +68,8 @@ export async function connectNative(target) {
   } catch (error) {close(); throw error;}
 }
 
-export async function inspectNative(client, target) {
-  const {thread} = await client.rpc('thread/read',{threadId:target.threadId,includeTurns:false});
+export async function inspectNative(client, target, includeTurns = false) {
+  const {thread} = await client.rpc('thread/read',{threadId:target.threadId,includeTurns});
   if (thread?.id !== target.threadId || await realpath(thread.cwd) !== await realpath(target.cwd)) fail('NATIVE_THREAD_BINDING_MISMATCH');
   // Only explicitly dedicated native workers are admitted. The public protocol
   // cannot atomically reject a user turn/draft race on arbitrary desktop threads.
@@ -120,11 +120,12 @@ export async function dispatchNative(input, connect = connectNative) {
       const created = await client.rpc('thread/start',{cwd:target.cwd,model,config:{model_reasoning_effort:effort},ephemeral:false,allowProviderModelFallback:false});
       const bound = {...target,threadId:created.thread?.id};
       createdTarget = bound;
-      // Empty threads are deferred until an explicit metadata write persists them.
+      // Naming saves metadata; a loaded full read also materializes paginated history.
       const name = 'ChatBridge · Native worker';
       await client.rpc('thread/name/set',{threadId:bound.threadId,name});
-      const persisted = await inspectNative(client,bound);
+      const persisted = await inspectNative(client,bound,true);
       if (persisted.name !== name) fail('NATIVE_THREAD_NAME_NOT_CONFIRMED');
+      if (!Array.isArray(persisted.turns) || persisted.turns.length !== 0) fail('NATIVE_EMPTY_THREAD_NOT_CONFIRMED');
       return {ok:true,runtime:'codex',nativeTarget:bound,model,effort,name,
         modelSelection:{requestedModel:input.model||null,requestedEffort:input.effort||null,
           observedModel:created.model,observedEffort:created.reasoningEffort,executionObserved:false}};
