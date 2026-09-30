@@ -1,5 +1,5 @@
 /**
- * Single-image execution adapter. Ports are host-owned dependencies, NOT request
+ * Single-output execution adapter. Ports are host-owned dependencies, NOT request
  * fields or a second durable schema. No browser, scheduler or store is created.
  * The CLI/main entry supplies the existing route, admission and Ego UI gates.
  */
@@ -13,6 +13,8 @@ import {canonicalImageJSON, normalizeImageRequest, imageJobKey, imageCapabilityG
 
 export const IMAGE_ADAPTER_VERSION = 'chatgpt-ego/single-image-v1';
 export const IMAGE_INPUT_MAX_BYTES = 10 * 1024 * 1024;
+// Two manual inputs share the existing single-input byte envelope.
+export const IMAGE_INPUT_TOTAL_MAX_BYTES = IMAGE_INPUT_MAX_BYTES;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const REF = /^(artifact|store|urn):[^\s]+$/;
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -29,7 +31,9 @@ export function imageExecutionProbe(route = null) {
     nativeReady:false,mode:'UNKNOWN',reason:'IMAGE_NATIVE_CHARACTERIZATION_REQUIRED',
     capabilities:route ? unknownImageCapabilities(validateImageShape(clone(route),'Route')) : null,
     originalExport:{status:'EXPORT_UNAVAILABLE',mode:'ASSISTED',action:'USE_OFFICIAL_SAVE_AND_VERIFY_ORIGINAL'},
-    unsupported:['multiReference','mask','batch','temporaryConversation'],
+    assisted:{multiReference:{operation:'edit',inputRoles:['source','reference'],count:1,
+      maxInputBytes:IMAGE_INPUT_MAX_BYTES,maxTotalInputBytes:IMAGE_INPUT_TOTAL_MAX_BYTES}},
+    unsupported:['nativeMultiReference','mask','batch','temporaryConversation'],
     missing:['verified-native-image-provenance','official-original-download-characterization'],
     businessApproval:'NOT_EVALUATED'};
 }
@@ -39,10 +43,54 @@ export function normalizeExecutionRequest(input) {
   if (!['generate','edit','refine'].includes(request.operation)) fail('IMAGE_EXECUTION_OPERATION_UNSUPPORTED');
   if (request.count !== 1) fail('IMAGE_COUNT_UNSUPPORTED');
   if (request.mask) fail('IMAGE_MASK_UNSUPPORTED');
-  if (request.inputs.length > 1) fail('IMAGE_MULTI_REFERENCE_UNSUPPORTED');
+  if (request.inputs.length > 1) {
+    if (request.inputs.length !== 2 || request.operation !== 'edit') fail('IMAGE_MULTI_REFERENCE_UNSUPPORTED');
+    if (request.inputs[0].role !== 'source' || request.inputs[1].role !== 'reference') fail('IMAGE_INPUT_ORDER_UNSUPPORTED');
+    if (request.inputs[0].sha256 === request.inputs[1].sha256) fail('IMAGE_DUPLICATE_INPUT');
+  }
   if (request.operation === 'generate' && request.inputs.length) fail('IMAGE_REFERENCE_GENERATION_UNSUPPORTED');
   if (request.operation === 'refine' && (!request.baseRevision?.jobId || !request.baseRevision?.outputId)) fail('IMAGE_REFINE_PARENT_REQUIRED');
   return request;
+}
+
+export function imageExecutionGate(input,capabilities,at) {
+  const request=normalizeExecutionRequest(input),gate=imageCapabilityGate(request,capabilities,at);
+  if (!gate.allowed) return gate;
+  if (request.inputs.length===2 && capabilities.features.multiReference.mode!=='ASSISTED') {
+    return {allowed:false,reason:'IMAGE_MULTI_REFERENCE_NATIVE_UNSUPPORTED'};
+  }
+  return gate;
+}
+
+/** Two-input manual handoff uses host-owned ordinary source authority, never
+ * request or resolver metadata as a rights/size claim. Each resolver separately
+ * verifies the actual original record, bytes and revision under fresh authority.
+ */
+export async function resolveAssistedImageInputs(input,{api,key,resolveSource}={}) {
+  const request=normalizeExecutionRequest(input);
+  if (request.inputs.length!==2 || typeof api?.authorizeIO!=='function' || typeof resolveSource!=='function') fail('IMAGE_SOURCE_AUTHORITY_REQUIRED');
+  const admit=async()=>{
+    const authority=await api.authorizeIO(key);
+    if (authority?.allowed!==true || !Array.isArray(authority.sources) || authority.sources.length!==2) fail('IMAGE_SOURCE_AUTHORITY_REQUIRED');
+    let total=0;
+    for (let index=0;index<request.inputs.length;index++) {
+      const bound=authority.sources[index];
+      if (!same(bound?.source,request.inputs[index]) || bound.revision?.revisionId!==request.inputs[index].revisionId) fail('IMAGE_SOURCE_REVISION_MISMATCH');
+      const size=bound.revision?.output?.byteLength;
+      if (!Number.isSafeInteger(size) || size<1 || size>IMAGE_INPUT_MAX_BYTES) fail('IMAGE_FILE_TOO_LARGE');
+      total+=size;
+    }
+    if (total>IMAGE_INPUT_TOTAL_MAX_BYTES) fail('IMAGE_INPUT_TOTAL_TOO_LARGE');
+    return authority.sources;
+  };
+  const sources=await admit(),resolved=[];
+  for (const source of request.inputs) {
+    const item=await resolveSource(source,{key,scope:request.scope});
+    if (!item || !Object.keys(source).every(field=>item[field]===source[field])) fail('IMAGE_SOURCE_BINDING_MISMATCH');
+    resolved.push(item);
+  }
+  if (!same(sources,await admit())) fail('IMAGE_SOURCE_REVISION_MISMATCH');
+  return resolved;
 }
 
 export const imagePromptHash = text => sha(String(text).replace(/\s+/g,' ').trim());
@@ -51,7 +99,9 @@ export function imageExecutionPrompt(input, attemptId) {
   requireId(attemptId);
   const marker = sha(`${IMAGE_ADAPTER_VERSION}\n${request.requestDigest}\n${attemptId}`);
   const instruction = request.operation === 'generate' ? 'Generate one image.' :
-    request.operation === 'edit' ? 'Edit the single attached source image.' : 'Refine the single attached, source-version-bound image in this conversation.';
+    request.operation === 'edit' ? request.inputs.length===2 ?
+      'Edit attached image 1 (source) using attached image 2 (reference). Produce one image.' :
+      'Edit the single attached source image.' : 'Refine the single attached, source-version-bound image in this conversation.';
   return `${instruction} Requested aspect ratio: ${request.aspectRatio}.\n${request.prompt}\n[ChatBridge image attempt ${marker}]`;
 }
 
@@ -239,11 +289,12 @@ export function createImageExecutionAdapter({api,withUi,assertSessionAdmission,e
     if (!['SUBMITTED','FAILED_PRE_SEND','BLOCKED'].includes(job.status) || job.attempts.some(a=>a.status !== 'FAILED_PRE_SEND')) {
       return {ok:true,status:job.status,action:'RECONCILE_ONLY',retryAllowed:false};
     }
-    const gate = imageCapabilityGate(request,job.capabilities,atISO(now));
+    const gate = imageExecutionGate(request,job.capabilities,atISO(now));
     if (!gate.allowed) return blocked(gate.reason);
     const assisted=gate.mode==='ASSISTED';
     ready();requireId(attemptId);requireId(eventId);
     if (request.inputs.length && typeof resolveSource !== 'function') return blocked('IMAGE_SOURCE_RESOLUTION_REQUIRED');
+    const manualInputs=request.inputs.length===2?await resolveAssistedImageInputs(request,{api,key,resolveSource}):null;
     return withUi(request.route,async ui => {
       await assertSessionAdmission({key,request,job,phase:'before-reservation'});
       const first = await ui.inspect();
@@ -255,11 +306,13 @@ export function createImageExecutionAdapter({api,withUi,assertSessionAdmission,e
       if(assisted) {
         // Reservation is UNKNOWN until exact manual delivery/official-original
         // attestation. This branch never fills, uploads, clicks, retries or stops.
-        const manualInput=request.inputs.length?await resolveSource(request.inputs[0],{key,scope:request.scope}):null;
+        const freshInputs=manualInputs?await resolveAssistedImageInputs(request,{api,key,resolveSource}):null;
+        if (manualInputs && !same(manualInputs,freshInputs)) fail('IMAGE_SOURCE_BINDING_MISMATCH');
+        const manualInput=freshInputs?freshInputs[0]:request.inputs.length?await resolveSource(request.inputs[0],{key,scope:request.scope}):null;
         await assertSessionAdmission({key,request,job:reserved,phase:'before-send'});
         return {ok:true,status:reserved.status,revision:reserved.revision,mode:'ASSISTED',action:'MANUAL_SEND_REQUIRED',
           attemptId,requestDigest:request.requestDigest,key,route:request.route,modelSelection:baseline.modelSelection,
-          prompt:imageExecutionPrompt(request,attemptId),manualInput,retryAllowed:false,remoteGeneration:'UNKNOWN'};
+          prompt:imageExecutionPrompt(request,attemptId),manualInput,...(freshInputs?{manualInputs:freshInputs}:{}),retryAllowed:false,remoteGeneration:'UNKNOWN'};
       }
       let staged = null,sendAttempted = false;
       try {

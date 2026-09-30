@@ -8,7 +8,7 @@ import {constants} from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as contractModule from './contract.js';
 import {createImageJobAPI,imageJobKey,canonicalImageJSON} from './contract.js';
-import {normalizeExecutionRequest,imageExecutionProbe} from './chatgpt-ego.js';
+import {normalizeExecutionRequest,imageExecutionProbe,imageExecutionGate} from './chatgpt-ego.js';
 
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const need=(condition,code)=>{if(!condition) {const error=new Error(code);error.code=code;throw error;}};
@@ -299,6 +299,10 @@ export async function imageCli(action,payload={}, {coordinated,executor,liveActi
     const key=request?imageJobKey(request,payload.grantId):payload.key;
     const job=request?await api.submit(request,{grantId:payload.grantId}):await api.inspect(key);
     const callerContext=captureImageCaller(job,key,liveAction,coordinated,callerEnv);
+    if(request?.inputs.length===2) {
+      const gate=imageExecutionGate(request,job.capabilities);
+      if(!gate.allowed)return {ok:false,status:'BLOCKED',reason:gate.reason,retryAllowed:false};
+    }
     if(payload.recovery) {
       need(['characterize','assist-observe'].includes(liveAction) && callerContext.kind==='local-owner','IMAGE_RECOVERY_EFFECT_FORBIDDEN');
       await api.authorizeRecovery(key,payload.recovery,'observe');
