@@ -78,7 +78,7 @@ export async function inspectNative(client, target) {
 }
 
 export async function dispatchNative(input, connect = connectNative) {
-  let client, attempted = false;
+  let client, createdTarget, attempted = false;
   try {
     if (![undefined,'send','create','inspect','read','cancel'].includes(input.action)) fail('NATIVE_ACTION_UNSUPPORTED');
     const target = input.nativeTarget;
@@ -119,8 +119,15 @@ export async function dispatchNative(input, connect = connectNative) {
       attempted = true;
       const created = await client.rpc('thread/start',{cwd:target.cwd,model,config:{model_reasoning_effort:effort},ephemeral:false,allowProviderModelFallback:false});
       const bound = {...target,threadId:created.thread?.id};
-      await inspectNative(client,bound);
-      return {ok:true,runtime:'codex',nativeTarget:bound,model,effort};
+      createdTarget = bound;
+      // Empty threads are deferred until an explicit metadata write persists them.
+      const name = 'ChatBridge · Native worker';
+      await client.rpc('thread/name/set',{threadId:bound.threadId,name});
+      const persisted = await inspectNative(client,bound);
+      if (persisted.name !== name) fail('NATIVE_THREAD_NAME_NOT_CONFIRMED');
+      return {ok:true,runtime:'codex',nativeTarget:bound,model,effort,name,
+        modelSelection:{requestedModel:input.model||null,requestedEffort:input.effort||null,
+          observedModel:created.model,observedEffort:created.reasoningEffort,executionObserved:false}};
     }
     if (input.action === 'inspect') return {ok:true,nativeTarget:target,model,effort,status:thread.status.type,server:client.server};
     if (thread.status.type === 'notLoaded') {
@@ -143,11 +150,12 @@ export async function dispatchNative(input, connect = connectNative) {
     return {ok:true,delivered:true,runtime:'codex',nativeTarget:target,turnId:turn.id,clientUserMessageId:input.operationId,
       modelSelection:{requestedModel:input.model||null,requestedEffort:input.effort||null,model,effort,source:'validated-catalog-and-turn-request',executionObserved:false}};
   } catch(error) {
-    return {ok:false,code:error.message,deliveryStage:attempted?'SEND_ATTEMPTED':'PRE_SEND'};
+    return {ok:false,code:error.message,deliveryStage:attempted?'SEND_ATTEMPTED':'PRE_SEND',...(createdTarget?{nativeTarget:createdTarget}:{})};
   } finally {client?.close();}
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(await realpath(process.argv[1])).href) {
+const entryPath = process.argv[1] && await realpath(process.argv[1]).catch(()=>null);
+if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
   const receipt = await dispatchNative(JSON.parse(process.argv[2]));
   console.log(JSON.stringify(receipt)); process.exitCode = receipt.ok ? 0 : 2;
 }

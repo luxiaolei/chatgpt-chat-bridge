@@ -9,6 +9,33 @@ import {dispatchNative} from '../src/native-codex.mjs';
 
 const workerThread='22222222-2222-4222-8222-222222222222';
 
+test('native create persists its empty thread by naming before close and preserves a failed creation target',async()=>{
+  const target={host:hostname(),cwd:process.cwd(),socket:'/unused'};
+  for(const rejected of [false,true]) {
+    const calls=[];let name;
+    const thread={id:workerThread,cwd:target.cwd,originator:'chat_bridge_native'};
+    const client={close(){calls.push('close');},async rpc(method,p){
+      calls.push(method);
+      if(method==='model/list')return {data:[{model:'gpt-6-astra',supportedReasoningEfforts:[{reasoningEffort:'xhigh'}]}]};
+      if(method==='thread/start')return {thread,model:p.model,reasoningEffort:p.config.model_reasoning_effort};
+      if(method==='thread/name/set'){assert.equal(p.threadId,workerThread);if(rejected)throw Error('NAME_REJECTED');name=p.name;return {};}
+      if(method==='thread/read')return {thread:{...thread,name}};
+      throw Error(method);
+    }};
+    const receipt=await dispatchNative({action:'create',nativeTarget:target,model:'gpt-6-astra',effort:'xhigh'},async()=>client);
+    assert.equal(receipt.nativeTarget.threadId,workerThread);
+    assert.deepEqual(calls,['model/list','thread/start','thread/name/set',...(!rejected?['thread/read']:[]),'close']);
+    if(rejected){assert.equal(receipt.ok,false);assert.equal(receipt.code,'NAME_REJECTED');assert.equal(receipt.deliveryStage,'SEND_ATTEMPTED');}
+    else {assert.equal(receipt.ok,true);assert.equal(receipt.name,'ChatBridge · Native worker');assert.deepEqual(receipt.modelSelection,{requestedModel:'gpt-6-astra',requestedEffort:'xhigh',observedModel:'gpt-6-astra',observedEffort:'xhigh',executionObserved:false});}
+  }
+});
+
+test('stdin module import does not run the native CLI entrypoint',()=>{
+  const moduleUrl=new URL('../src/native-codex.mjs',import.meta.url).href;
+  const result=spawnSync(process.execPath,['--input-type=module','-'],{input:`await import(${JSON.stringify(moduleUrl)});console.log('IMPORTED');`,encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);assert.equal(result.stdout,'IMPORTED\n');
+});
+
 test('native adapter validates target, catalog and busy state before start; unknown send is not retried',async()=>{
   const target={host:hostname(),threadId:workerThread,cwd:process.cwd(),socket:'/unused'};
   for(const scenario of ['good','busy','foreign','model','effort','cwd','unknown']) {

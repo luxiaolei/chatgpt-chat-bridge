@@ -37,9 +37,13 @@ The tunnel closes with the adapter; the shared app-server and worker survive.
 
 ## Create and dispatch
 
-Create returns the verified host/thread/cwd/socket binding. It sends no inference
-turn. Preserve the receipt, especially if a response is lost; a missing response
-does not authorize blind duplicate creation.
+Create names the thread `ChatBridge · Native worker` using `thread/name/set`
+on the creating connection, then verifies its name and binding. This metadata
+write persists an otherwise deferred empty thread without starting inference.
+The receipt's observed model/effort describe thread settings;
+`modelSelection.executionObserved=false` does not claim an executed turn.
+Preserve the receipt, including a known target returned on a later failure;
+a missing response does not authorize blind duplicate creation.
 
 ```sh
 chat-bridge queue native-create --native-host xlmini \
