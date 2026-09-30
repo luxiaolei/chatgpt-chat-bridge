@@ -6,9 +6,11 @@ import json
 import os
 import pathlib
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 sys.dont_write_bytecode = True
@@ -319,6 +321,44 @@ def temporary_queue(coordinator, fakes, *, existing=True, worker_body):
 
 
 def integration_case(case, coordinator, runner, runner_path, fakes):
+    if case == 'cancelled-claim-lock':
+        marker = fakes.directory/'must-not-spawn'
+        db, op, config, state = temporary_queue(coordinator, fakes,
+            worker_body=f"open({str(marker)!r},'w').write('started')\n")
+        original, injected, releaser = coordinator.begin_immediate, False, None
+        def contend(handle):
+            nonlocal injected, releaser
+            if not injected and sys._getframe(1).f_code.co_name == 'claim':
+                injected = True
+                blocker = sqlite3.connect(state/'bridge.sqlite3', check_same_thread=False)
+                blocker.execute('BEGIN IMMEDIATE')
+                def interrupt_and_release():
+                    time.sleep(.1)
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    time.sleep(.1)
+                    blocker.commit()
+                    blocker.close()
+                releaser = threading.Thread(target=interrupt_and_release)
+                releaser.start()
+            original(handle)
+        try:
+            coordinator.begin_immediate = contend
+            try:
+                with coordinator.bridge_cancellation():
+                    coordinator.work_one(db)
+            except SystemExit as error:
+                assert error.code == 128 + signal.SIGTERM
+            else:
+                raise AssertionError('cancellation was not delivered')
+            assert injected and not marker.exists()
+            row = db.execute('SELECT status,reason,attempts FROM operations WHERE id=?', (op['operationId'],)).fetchone()
+            assert tuple(row) == ('QUEUED', None, 0), tuple(row)
+        finally:
+            coordinator.begin_immediate = original
+            if releaser:
+                releaser.join(timeout=2)
+            db.close()
+        return
     if case == 'timeout-budget-compatibility':
         for value, expected in [(None, 240), ('', 240), ('30', 90), ('30.5', 90.5), ('600', 660)]:
             if value is None:
@@ -462,7 +502,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='bridge-owned-process-test-') as directory:
         fakes = Fakes(directory)
         try:
-            if args.case.startswith(('dispatch-', 'evidence-', 'task-record-', 'structured-', 'private-', 'timeout-budget-', 'stale-claim-')):
+            if args.case.startswith(('dispatch-', 'evidence-', 'task-record-', 'structured-', 'private-', 'timeout-budget-', 'stale-claim-', 'cancelled-')):
                 integration_case(args.case, coordinator, runner, args.runner, fakes)
             else:
                 process_case(args.case, coordinator, runner, args.runner, fakes)

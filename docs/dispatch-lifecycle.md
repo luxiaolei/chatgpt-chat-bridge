@@ -49,6 +49,9 @@ bounded `communicate` waits, finish only their owned groups, and retain UNKNOWN
 for an interrupted dispatch. The service stops admitting claims and waits for
 those workers before restoring signal handlers and exiting. Repeated signals
 cannot interrupt cleanup. No process registry or new supervisor is needed.
+If cancellation arrived while a claim waited for SQLite's writer lock, the
+uncommitted claim rolls back and stays QUEUED with no attempt consumed. A claim
+already committed before cancellation remains conservatively UNKNOWN.
 
 Only groups created by these helpers are signaled. There is no PID enumeration,
 process-name matching, global process killer, browser Stop operation or shutdown
