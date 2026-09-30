@@ -2488,6 +2488,12 @@ async function runNativeImage(action,payload) {
       if(users.length!==1 || users[0].id!==proof.userMessageId || proof.parentUserId!==users[0].id || proof.promptHash!==promptHash) throw new Error("IMAGE_USER_TURN_UNVERIFIED");
       const tail=snapshot.messages.slice(snapshot.messages.indexOf(users[0])+1),assistants=tail.filter(message=>message.role==="assistant" && !baseline.has(message.id));
       if(tail.some(message=>message.role==="user") || assistants.length!==1 || assistants[0].id!==proof.turnId || attempt.turnId && attempt.turnId!==proof.turnId) throw new Error("IMAGE_ASSISTANT_TURN_AMBIGUOUS");
+      let sourceBinding=null;
+      if(current.request.inputs.length) {
+        const source=current.request.inputs[0],resolved=await io.resolveSource(source);
+        if(proof.input?.confirmed!==true || contract.canonicalImageJSON(proof.input.source)!==contract.canonicalImageJSON(source) || proof.input.sourceTurnId!==resolved.turnId) throw new Error("IMAGE_ASSISTED_INPUT_ATTESTATION_REQUIRED");
+        sourceBinding={source,sourceTurnId:resolved.turnId,inputConfirmed:true,proof:"authorized-owner-upload-attestation"};
+      }
       const verified=await io.verifyAssistedOriginal(payload);
       const outputId="image-"+crypto.createHash("sha256").update(contract.canonicalImageJSON({requestDigest:current.requestDigest,attemptId:attempt.attemptId,turnId:proof.turnId,originalSha256:verified.sha256})).digest("hex");
       const evidenceRef=await io.saveEvidence({adapterVersion:execution.IMAGE_ADAPTER_VERSION,route,observedAt:new Date().toISOString(),
@@ -2495,6 +2501,7 @@ async function runNativeImage(action,payload) {
         requestDigest:current.requestDigest,attemptId:attempt.attemptId,promptHash,userMessageId:users[0].id,turnId:proof.turnId,
         parentUserId:proof.parentUserId,relationshipConfirmed:true,nativeParentProof:false,nativeAssetProof:false,
         outputId,originalRef:payload.originalRef,sha256:verified.sha256,width:verified.width,height:verified.height,
+        sourceBinding,
         sourceHashes:current.request.inputs.map(input=>input.sha256),sourceTurnId:current.sourceTurnId,
         parentOutputId:current.request.baseRevision?.outputId||null,baseRevisionId:current.request.baseRevision?.revisionId||null});
       await api.authorizeIO(key);

@@ -104,6 +104,15 @@ test('single shot commits UNKNOWN and baseline before fill/click, returns separa
   assert.equal(result.handoff.requestDigest,x.r.requestDigest);assert.equal(result.handoff.candidateOutputIds.length,1);
   assert.equal(result.outputs,undefined);assert.ok(x.evidence.size>0);
 });
+test('reconcile retains a settled candidate after export failure despite a later generating snapshot',async()=>{
+  const x=scenario();await x.adapter().start(x.r,x.options);
+  const job=x.job();job.status='EXPORT_UNAVAILABLE';job.attempts[0].status='EXPORT_UNAVAILABLE';x.setJob(job);
+  const live=generated(x.r,x.options.attemptId);live.generating=true;live.messages.at(-1).settled=false;
+  x.state.snapshotPatch=live;
+  const count=x.evidence.size,result=await x.adapter().reconcile(x.key);
+  assert.equal(result.status,'EXPORT_UNAVAILABLE');assert.equal(result.observationReason,'IMAGE_KNOWN_GENERATION_RETAINED');
+  assert.equal(x.evidence.size,count);assert.deepEqual(x.job().attempts[0].candidateOutputIds,job.attempts[0].candidateOutputIds);assert.equal(x.state.sends,1);
+});
 test('absence of durable session port cannot be replaced by an in-process lock or allowed flag',async()=>{
   const x=scenario();delete x.ports.assertSessionAdmission;
   await assert.rejects(x.adapter().start(x.r,x.options),/INTEGRATION_REQUIRED/);

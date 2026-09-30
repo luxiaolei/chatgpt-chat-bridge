@@ -130,6 +130,13 @@ source lineage; it does not represent the declaration as native parent/asset
 proof. The actual bytes must differ from source inputs. A then records the known
 settled candidate and releases its unresolved-generation exclusion.
 
+For edit/refine, `officialSave.input` must contain `{confirmed:true,source,
+sourceTurnId}`. `source` is the exact granted input object and `sourceTurnId`
+comes from the returned `manualInput`. The authorized owner thereby declares
+which original was actually uploaded; the adapter independently re-resolves and
+fully verifies its current bytes and binding. This remains ASSISTED input
+evidence, not native upload provenance.
+
 `import-original` accepts only that private attempt-bound inbox/ref and the
 current original owner. It rechecks exact candidate/attempt/turn/hash/MIME and
 export capability, then runs C's exporter and A's export transition. Missing

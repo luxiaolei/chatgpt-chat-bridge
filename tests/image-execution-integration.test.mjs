@@ -224,6 +224,27 @@ test('real main factories execute ASSISTED reservation, exact-owner observation 
     assert.equal(f.api.sessionOccupancy({accountId:f.accountId,conversationId},key).occupied,false);
     const exported=await imageCli('import-original',settled.importPayload,{coordinated:f.call,stateDir:await realpath(f.state),decode});
     assert.equal(exported.status,'TECHNICALLY_VALIDATED');assert.equal(exported.deliveryStatus,'NOT_RECEIVED');assert.ok(inspections>0);
+    const output=f.api.inspect(key).outputs[0],baseRevision={artifactRef:output.artifactRef,sha256:output.sha256,
+      revisionId:'manual-v1',jobId:r.jobId,outputId:output.outputId};
+    const edit=f.request({jobId:'manual-edit',operation:'edit',route:r.route,inputs:[{...baseRevision,role:'source'}],baseRevision});
+    const editGrant=f.grant(edit,'manual-edit-grant');for(const feature of ['edit','export'])editGrant.capabilities.features[feature].mode='ASSISTED';
+    const editKey=f.setup(edit,editGrant).key;
+    const editStart=await run('start',{request:edit,grantId:editGrant.grantId,key:editKey,operatorRef:f.owner,attemptId:'manual-edit-attempt',eventId:'manual-edit-begin'});
+    assert.equal(editStart.manualInput.sha256,sha256);assert.equal(editStart.manualInput.turnId,'new-assistant');
+    observed.messages.push({id:'edit-user',role:'user',text:editStart.prompt},{id:'edit-assistant',role:'assistant',parentUserId:null,images:[],settled:null,nativeProvenanceVerified:false,characterization:[]});
+    const edited=png({rgba:[99,66,33,255]}),editHash=createHash('sha256').update(edited).digest('hex');await writeFile(editStart.originalPath,edited,{mode:0o600});
+    const editProof={...proof,requestDigest:edit.requestDigest,attemptId:editStart.attemptId,userMessageId:'edit-user',parentUserId:'edit-user',turnId:'edit-assistant',
+      promptHash:createHash('sha256').update(editStart.prompt.replace(/\s+/g,' ').trim()).digest('hex')};
+    const editAssist={key:editKey,operatorRef:f.owner,path:editStart.originalPath,originalRef:editStart.originalRef,sha256:editHash,mimeType:'image/png',officialSave:editProof};
+    await assert.rejects(run('assist-observe',editAssist),/IMAGE_ASSISTED_INPUT_ATTESTATION_REQUIRED/);
+    assert.equal(f.api.sessionOccupancy({accountId:f.accountId,conversationId},editKey).reservedByJob,true);
+    editProof.input={confirmed:true,source:{...edit.inputs[0],sha256:'a'.repeat(64)},sourceTurnId:'new-assistant'};
+    await assert.rejects(run('assist-observe',editAssist),/IMAGE_ASSISTED_INPUT_ATTESTATION_REQUIRED/);
+    editProof.input.source=edit.inputs[0];
+    const editedSettlement=await run('assist-observe',editAssist);assert.equal(editedSettlement.mode,'ASSISTED');
+    const editExport=await imageCli('import-original',editedSettlement.importPayload,{coordinated:f.call,stateDir:await realpath(f.state),decode});
+    assert.equal(editExport.status,'TECHNICALLY_VALIDATED');assert.equal(editExport.deliveryStatus,'NOT_RECEIVED');
+    assert.equal(f.api.inspect(editKey).outputs[0].parentOutputId,output.outputId);
   } finally {
     for(const key of injected) {if(prior[key]===undefined)delete globalThis[key];else globalThis[key]=prior[key];}
     if(oldDecoder===undefined)delete process.env.CHAT_BRIDGE_IMAGE_DECODER;else process.env.CHAT_BRIDGE_IMAGE_DECODER=oldDecoder;
