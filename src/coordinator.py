@@ -95,7 +95,10 @@ def _management_mode(db, project, workgroup=None):
     by_scope = {row["scope"]: row for row in rows}
     for scope, group_id in scopes:
         row = by_scope.get(scope)
-        if row and priority.get(row["mode"], 0) > priority.get(selected["mode"], 0):
+        if row and (priority.get(row["mode"], 0) > priority.get(selected["mode"], 0)
+                    or (row["mode"] == selected["mode"] == "RUNNING"
+                        and (selected["scope"] is None or scope == "project:" + project
+                             or (workgroup and group_id == workgroup)))):
             selected = {"mode": row["mode"], "epoch": row["epoch"], "reason": row["reason"],
                         "scope": row["scope"], "workgroupId": group_id, "updatedAt": row["updated_at"]}
     return selected
@@ -1387,7 +1390,7 @@ def current_controller_ref(db, reg, project, role, workgroup=None):
 
 def execution_summary(rt, tasks, control_mode, pending_business, pending_callbacks, pending_management,
                       pre_send_retrying, failed_pre_send, unknown_ops, awaiting_ack, capacity_waiting,
-                      blocked, failed):
+                      blocked, failed, historical_failed_pre_send=0):
     """Expose one honest run state while keeping historical counters separate."""
     now = datetime.now(timezone.utc)
     generating = 0
@@ -1414,12 +1417,12 @@ def execution_summary(rt, tasks, control_mode, pending_business, pending_callbac
             stale_running += 1
     if control_mode in {"PAUSED", "DRAINING"}:
         state, label, color = ("PAUSED", "已暂停" if control_mode == "PAUSED" else "排空中", "amber")
+    elif generating:
+        state, label, color = "GENERATING", "最近观察到生成", "green"
     elif pre_send_retrying or failed_pre_send:
         state, label, color = "PRE_SEND_REVIEW", "发送前故障待处理", "red"
     elif unknown_ops:
         state, label, color = "DELIVERY_UNKNOWN", "投递结果待核对", "red"
-    elif generating:
-        state, label, color = "GENERATING", "最近观察到生成", "green"
     elif pending_business or pending_callbacks or pending_management:
         state, label, color = "QUEUED", "队列中等待执行", "blue"
     elif capacity_waiting:
@@ -1431,7 +1434,7 @@ def execution_summary(rt, tasks, control_mode, pending_business, pending_callbac
     elif blocked or failed:
         state, label, color = "NEEDS_REVIEW", "有任务需要复核", "red"
     else:
-        state, label, color = "IDLE", "当前无可执行任务", "gray"
+        state, label, color = "IDLE", "当前没有已派发任务", "gray"
     return {
         "state": state, "label": label, "color": color,
         "recentlyObservedGenerating": generating,
@@ -1439,6 +1442,7 @@ def execution_summary(rt, tasks, control_mode, pending_business, pending_callbac
         "queued": pending_business + pending_callbacks + pending_management,
         "preSendRetrying": pre_send_retrying,
         "failedPreSend": failed_pre_send,
+        "historicalFailedPreSend": historical_failed_pre_send,
         "deliveryUnknown": unknown_ops,
         "awaitingControllerAck": awaiting_ack,
         "capacityWaiting": capacity_waiting,
@@ -1474,7 +1478,7 @@ def control_status(db, project=None, workgroup=None):
             "callbackWaitingRoute": sum(1 for row in result_rows if row["callback_status"] == "WAITING_ROUTE"),
             "callbackUnknown": sum(1 for row in result_rows if row["callback_status"]=="DELIVERY_UNKNOWN"),
             "awaitingControllerAck": sum(1 for row in result_rows
-                                         if row["callback_status"]=="DELIVERED" and not row["acceptance_status"]),
+                                         if not row["acceptance_status"]),
             "accepted": sum(1 for row in result_rows if row["acceptance_status"]=="ACCEPTED"),
             "rejectedOrBlocked": sum(1 for row in result_rows if row["acceptance_status"] in {"REJECTED","BLOCKED"}),
         }
@@ -1491,7 +1495,14 @@ def control_status(db, project=None, workgroup=None):
                                    if kind=="callback" and status in {"QUEUED","DISPATCHING"})
         unknown_ops = sum(n for (kind,status),n in operation_counts.items()
                           if status in {"DELIVERY_UNKNOWN", "SUPERSEDED"})
-        failed_pre_send = sum(n for (kind,status),n in operation_counts.items() if status == "FAILED_PRE_SEND")
+        total_failed_pre_send = sum(n for (kind,status),n in operation_counts.items() if status == "FAILED_PRE_SEND")
+        # An owner ACK settles notification delivery; retain its transport failure in the raw ledger.
+        failed_pre_send = db.execute("""SELECT count(*) FROM operations o
+            WHERE o.project=? AND o.status='FAILED_PRE_SEND'
+              AND NOT EXISTS (SELECT 1 FROM task_results tr
+                  WHERE tr.callback_operation_id=o.id AND tr.acceptance_status IS NOT NULL)
+              AND NOT EXISTS (SELECT 1 FROM management_deliveries d
+                  WHERE d.operation_id=o.id AND d.status='ACKNOWLEDGED')""", (name,)).fetchone()[0]
         pre_send_retrying = db.execute(
             "SELECT count(*) FROM operations WHERE project=? AND status='QUEUED' AND reason LIKE 'PRE_SEND_RETRY_%'", (name,)
         ).fetchone()[0]
@@ -1541,7 +1552,7 @@ def control_status(db, project=None, workgroup=None):
                 "tasks": {"total": len(scoped), "byStatus": statuses},
                 "results": {
                     "recorded": len(scoped_results),
-                    "awaitingControllerAck": sum(1 for row in scoped_results if row["callback_status"] == "DELIVERED" and not row["acceptance_status"]),
+                    "awaitingControllerAck": sum(1 for row in scoped_results if not row["acceptance_status"]),
                     "callbackPending": sum(1 for row in scoped_results if row["callback_status"] in {None, "QUEUED", "DISPATCHING", "WAITING_ROUTE"}),
                     "callbackUnknown": sum(1 for row in scoped_results if row["callback_status"] == "DELIVERY_UNKNOWN"),
                     "accepted": sum(1 for row in scoped_results if row["acceptance_status"] == "ACCEPTED"),
@@ -1569,7 +1580,8 @@ def control_status(db, project=None, workgroup=None):
         controller = current_controller_ref(db, reg, name, root_role)
         execution = execution_summary(rt, tasks, control["mode"], pending_business_ops, pending_callback_ops,
                                       pending_management, pre_send_retrying, failed_pre_send, unknown_ops,
-                                      results["awaitingControllerAck"], capacity_waiting, blocked, failed)
+                                      results["awaitingControllerAck"], capacity_waiting, blocked, failed,
+                                      total_failed_pre_send - failed_pre_send)
         projects.append({
             "project": name,
             "businessState": cfg.get("businessState") or ("ARCHIVED" if cfg.get("archived") else "UNSPECIFIED"),
