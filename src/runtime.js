@@ -104,9 +104,9 @@ function createToolResultStream({requestId, turnId, toolCallId, toolName, schema
   });
 }
 
-function run(binary, args, {env, timeoutMs = DEFAULT_TIMEOUT_MS} = {}) {
+function run(binary, args, {env, timeoutMs = DEFAULT_TIMEOUT_MS, input = null} = {}) {
   return new Promise((resolve) => {
-    const child = spawn(binary, args, {env, stdio: ["ignore", "pipe", "pipe"]});
+    const child = spawn(binary, args, {env, stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"]});
     let stdout = "", stderr = "", settled = false;
     const finish = (response) => { if (!settled) { settled = true; clearTimeout(timer); resolve(response); } };
     child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -135,6 +135,11 @@ function run(binary, args, {env, timeoutMs = DEFAULT_TIMEOUT_MS} = {}) {
           ...(cause == null ? {} : {cause}),
         }));
     });
+    if (input !== null) {
+      // Prompt-bearing JSON goes through stdin, not process arguments or files.
+      child.stdin.on("error", () => {}); // close/error handlers retain command outcome
+      child.stdin.end(input);
+    }
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
       const sending = ["send", "ask", "stream"].includes(args[0]);
@@ -311,9 +316,19 @@ export function createRuntime({bin = new URL("../bin/chat-bridge", import.meta.u
     } catch (error) { return errorResponse("INVALID_INPUT", error.message); }
   }
 
+  async function imageCommand(action, payload = {}) {
+    if (!["probe", "validate", "submit", "inspect", "result", "cancel", "start", "reconcile", "characterize", "import-original", "download-original", "assist-observe"].includes(action)) return errorResponse("IMAGE_COMMAND_UNSUPPORTED", "unsupported image action");
+    try {
+      const input = JSON.stringify(payload);
+      if (Buffer.byteLength(input) > 2_000_000) return errorResponse("IMAGE_PAYLOAD_TOO_LARGE", "image request exceeds local transport limit");
+      return await run(bin, ["image", action], {env: {...env}, timeoutMs, input});
+    } catch { return errorResponse("IMAGE_INVALID_INPUT", "image payload must be serializable JSON"); }
+  }
+
   return Object.freeze({
     capabilities: Object.freeze({resolveRoute: true, send: true, read: true, status: true, stop: true, ask: true, attach: true, stream: true, imageParts: true, toolResults: false, multimodal: true}),
     probe,
+    image: Object.freeze(Object.fromEntries(["probe", "validate", "submit", "inspect", "result", "cancel", "start", "reconcile", "characterize", "import-original", "download-original", "assist-observe"].map(action => [action, payload => imageCommand(action, payload)]))),
     resolveRoute,
     send: (input) => session("send", input),
     read: (input) => session("read", input),

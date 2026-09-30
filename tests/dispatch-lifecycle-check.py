@@ -462,7 +462,9 @@ def integration_case(case, coordinator, runner, runner_path, fakes):
     # Only timeout cases need a short budget; normal receipt cases must tolerate
     # process startup under a concurrently running full suite.
     fixture_timeout = .7 if 'timeout' in case else 5
-    coordinator.bridge_timeout = lambda: fixture_timeout
+    # task-record-timeout targets the later record call, not its normal new-chat
+    # prerequisite. Keep that prerequisite's startup budget independent.
+    coordinator.bridge_timeout = lambda: 5 if case == 'task-record-timeout' else fixture_timeout
     coordinator.BRIDGE_TERM_GRACE_SEC = .2
     coordinator.TASK_RECORD_TIMEOUT_SEC = fixture_timeout
     if case == 'dispatch-unstructured-diagnostic':
@@ -496,7 +498,7 @@ def integration_case(case, coordinator, runner, runner_path, fakes):
         assert 'worker' not in response and 'stderrTail' not in json.dumps(response)
         assert 'PRIVATE_SYNTHETIC_ARGV' not in json.dumps(response)
         if case.startswith('task-record'):
-            assert response['reason'] == 'TASK_RECORD_NOT_CONFIRMED'
+            assert response['reason'] == 'TASK_RECORD_NOT_CONFIRMED', response
             assert response['sessionRef'] == 'new-chat'
             assert detail['phase'] == 'task-record'
             assert detail['stderrTail'].endswith('record synthetic tail')

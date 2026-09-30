@@ -17,14 +17,14 @@ test("terminal RESULT_RECORDED task detaches only safe inactive agent page after
   const runtime={tasks:{t1:{taskId:"t1",project:"P",account:"a",sessionId:"worker",status:"RESULT_RECORDED",updatedAt:"2020-01-01T00:00:00Z"}}};
   const page={close:async()=>{closed++}};
   const task={spaceId:7,page:label=>{assert.equal(label,"p1");return page},tabs:async()=>[{label:"p1",active:false,openedBy:"agent"}]};
-  const detach=await new AsyncFunction("process","loadRuntime","activeTaskStatus","openBoundTask","state","saveRegistry",
+  const detach=await new AsyncFunction("process","loadRuntime","activeTaskStatus","openBoundTask","state","saveRegistry","imageSessionOccupancy",
     code+";return detachTerminalTaskPages;")(
       {env:{CHAT_BRIDGE_TERMINAL_TAB_GRACE_SEC:"30"}},
       async()=>runtime,
       status=>!["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"].includes(String(status).toUpperCase()),
       async()=>({task,binding:{spaceName:"managed",spaceId:7}}),
       async()=>({generating:false,composerText:""}),
-      async()=>{saved++}
+      async()=>{saved++},()=>({occupied:false})
     );
   const out=await detach(reg,"P","a");
   assert.equal(out.length,1);assert.equal(closed,1);assert.equal(saved,1);
@@ -42,11 +42,11 @@ test("settled BLOCKED task detaches a safe inactive agent page after grace", asy
   const runtime={tasks:{t1:{taskId:"t1",project:"P",account:"a",sessionId:"worker",status:"BLOCKED",updatedAt:"2020-01-01T00:00:00Z"}}};
   const page={close:async()=>{closed++}};
   const task={spaceId:7,page:()=>page,tabs:async()=>[{label:"p1",active:false,openedBy:"agent"}]};
-  const detach=await new AsyncFunction("process","loadRuntime","activeTaskStatus","openBoundTask","state","saveRegistry",
+  const detach=await new AsyncFunction("process","loadRuntime","activeTaskStatus","openBoundTask","state","saveRegistry","imageSessionOccupancy",
     code+";return detachTerminalTaskPages;")(
       {env:{CHAT_BRIDGE_TERMINAL_TAB_GRACE_SEC:"30"}},async()=>runtime,
       status=>!["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"].includes(String(status).toUpperCase()),
-      async()=>({task,binding:{spaceName:"managed",spaceId:7}}),async()=>({generating:false,composerText:""}),async()=>{saved++}
+      async()=>({task,binding:{spaceName:"managed",spaceId:7}}),async()=>({generating:false,composerText:""}),async()=>{saved++},()=>({occupied:false})
     );
   const out=await detach(reg,"P","a");
   assert.equal(out.length,1);assert.equal(closed,1);assert.equal(saved,1);
@@ -70,11 +70,11 @@ test("terminal detach preserves active tab, user/unmanaged page, draft and gener
     const runtime={tasks:{t1:{taskId:"t1",project:"P",account:"a",sessionId:"worker",status:"RESULT_RECORDED",updatedAt:"2020-01-01T00:00:00Z"}}};
     const page={close:async()=>{closed++}};
     const task={spaceId:7,page:()=>page,tabs:async()=>[scenario.tab]};
-    const detach=await new AsyncFunction("process","loadRuntime","activeTaskStatus","openBoundTask","state","saveRegistry",
+    const detach=await new AsyncFunction("process","loadRuntime","activeTaskStatus","openBoundTask","state","saveRegistry","imageSessionOccupancy",
       code+";return detachTerminalTaskPages;")(
         {env:{CHAT_BRIDGE_TERMINAL_TAB_GRACE_SEC:"30"}},async()=>runtime,
         status=>!["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"].includes(String(status).toUpperCase()),
-        async()=>({task,binding:{spaceName:"managed",spaceId:7}}),async()=>scenario.snap,async()=>{}
+        async()=>({task,binding:{spaceName:"managed",spaceId:7}}),async()=>scenario.snap,async()=>{},()=>({occupied:false})
       );
     assert.deepEqual(await detach(reg,"P","a"),[]);assert.equal(closed,0);assert.equal(chat.page,"p1");
   }
