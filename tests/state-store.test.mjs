@@ -121,3 +121,55 @@ test("SQLite remains authoritative and get repairs a stale JSON projection", asy
     assert.deepEqual(JSON.parse(await readFile(path.join(state,"runtime.json"),"utf8")),authoritative);
   } finally { await rm(root,{recursive:true,force:true}); }
 });
+
+
+test('runtime project updatedAt merges monotonically while project business fields still conflict', async () => {
+  const root = await mkdtemp(path.join(tmpdir(), 'bridge-store-runtime-heartbeat-'));
+  const config = path.join(root, 'config'), state = path.join(root, 'state');
+  await mkdir(config); await mkdir(state);
+  await writeFile(path.join(config, 'registry.json'), JSON.stringify({ accounts: {}, chats: {} }));
+  await writeFile(path.join(state, 'runtime.json'), JSON.stringify({
+    projects: { P: { updatedAt: '2026-09-30T07:00:00.000Z', execution: 'IDLE' } },
+    tasks: {}, sessions: {}
+  }));
+  const call = (command, kind, payload) => spawnSync('python3', [script, command, config, state, kind],
+    { input: payload === undefined ? undefined : JSON.stringify(payload), encoding: 'utf8' });
+  try {
+    const base = JSON.parse(call('get', 'runtime').stdout);
+    const first = structuredClone(base);
+    first.projects.P.updatedAt = '2026-09-30T07:00:02.000Z';
+    first.tasks.a = { status: 'RUNNING' };
+    assert.equal(call('put', 'runtime', { base, next: first }).status, 0);
+
+    const staleLater = structuredClone(base);
+    staleLater.projects.P.updatedAt = '2026-09-30T07:00:03.000Z';
+    staleLater.tasks.b = { status: 'RUNNING' };
+    const mergedLater = call('put', 'runtime', { base, next: staleLater });
+    assert.equal(mergedLater.status, 0, mergedLater.stderr);
+    let current = JSON.parse(mergedLater.stdout);
+    assert.equal(current.projects.P.updatedAt, '2026-09-30T07:00:03.000Z');
+    assert.deepEqual(Object.keys(current.tasks).sort(), ['a', 'b']);
+
+    const staleOlderBase = structuredClone(current);
+    const newer = structuredClone(current);
+    newer.projects.P.updatedAt = '2026-09-30T07:00:05.000Z';
+    assert.equal(call('put', 'runtime', { base: staleOlderBase, next: newer }).status, 0);
+    const olderWriter = structuredClone(staleOlderBase);
+    olderWriter.projects.P.updatedAt = '2026-09-30T07:00:04.000Z';
+    olderWriter.tasks.c = { status: 'QUEUED' };
+    const mergedOlder = call('put', 'runtime', { base: staleOlderBase, next: olderWriter });
+    assert.equal(mergedOlder.status, 0, mergedOlder.stderr);
+    current = JSON.parse(mergedOlder.stdout);
+    assert.equal(current.projects.P.updatedAt, '2026-09-30T07:00:05.000Z');
+    assert.equal(current.tasks.c.status, 'QUEUED');
+
+    const businessBase = structuredClone(current);
+    const businessA = structuredClone(current), businessB = structuredClone(current);
+    businessA.projects.P.execution = 'RUNNING';
+    businessB.projects.P.execution = 'DRAINING';
+    assert.equal(call('put', 'runtime', { base: businessBase, next: businessA }).status, 0);
+    const conflict = call('put', 'runtime', { base: businessBase, next: businessB });
+    assert.equal(conflict.status, 3);
+    assert.match(conflict.stderr, /STATE_CONFLICT: projects\/P\/execution/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Transactional Bridge state; JSON files are compatibility projections."""
 import json
+from datetime import datetime
 import os
 import pathlib
 import sqlite3
@@ -43,11 +44,36 @@ def value_at(document, path):
     return value
 
 
-def apply(document, base, next_value):
+def merge_runtime_volatile(kind, path, current, new):
+    """Merge only reconstructable monotonic runtime metadata.
+
+    Project updatedAt is a heartbeat/cache timestamp, not business state. Two
+    legitimate writers may touch it while independently updating tasks or
+    capacity. Keep the later valid ISO timestamp. Every other path retains
+    strict compare-and-swap conflict semantics.
+    """
+    if kind != "runtime" or len(path) != 3 or path[0] != "projects" or path[2] != "updatedAt":
+        return MISSING
+    if not isinstance(current, str) or not isinstance(new, str):
+        return MISSING
+    try:
+        current_time = datetime.fromisoformat(current.replace("Z", "+00:00"))
+        new_time = datetime.fromisoformat(new.replace("Z", "+00:00"))
+    except ValueError:
+        return MISSING
+    if current_time.tzinfo is None or new_time.tzinfo is None:
+        return MISSING
+    return new if new_time >= current_time else current
+
+
+def apply(document, base, next_value, kind=None):
     for path, old, new in differences(base, next_value):
         current = value_at(document, path)
         if current != old and current != new:
-            raise ValueError("STATE_CONFLICT: " + "/".join(map(str, path)))
+            merged = merge_runtime_volatile(kind, path, current, new)
+            if merged is MISSING:
+                raise ValueError("STATE_CONFLICT: " + "/".join(map(str, path)))
+            new = merged
         parent = document
         for key in path[:-1]:
             parent = parent.setdefault(key, {})
@@ -184,7 +210,7 @@ def main():
         else:
             begin_immediate(db)
             current = json.loads(db.execute("SELECT payload FROM documents WHERE kind=?", (kind,)).fetchone()[0])
-            current = apply(current, payload["base"], payload["next"])
+            current = apply(current, payload["base"], payload["next"], kind=kind)
             db.execute("UPDATE documents SET payload=? WHERE kind=?", (json.dumps(current, ensure_ascii=False), kind))
             db.commit()
             # Project only after the authoritative transaction commits. If a crash occurs
