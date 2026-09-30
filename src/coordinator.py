@@ -7,11 +7,14 @@ import re
 import pathlib
 import sqlite3
 import subprocess
+import signal
 import sys
 import time
+import threading
 import uuid
 import fcntl
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 
@@ -2025,11 +2028,150 @@ def rotation_ack(db, payload, config, state):
             "resumeOperationIds":[values[0] for values in resume_ops]}
 
 
+BRIDGE_TERM_GRACE_SEC = 7  # Covers ego-runner's 2s TERM + 2s drain + 2s reap.
+TASK_RECORD_TIMEOUT_SEC = 30
+_bridge_interrupted = None
+_bridge_cancellation_active = False
+
+
+@contextmanager
+def bridge_cancellation():
+    """Latch main-thread signals until every worker has captured/reaped its child."""
+    global _bridge_interrupted, _bridge_cancellation_active
+    if threading.current_thread() is not threading.main_thread() or _bridge_cancellation_active:
+        yield
+        return
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    _bridge_interrupted = None
+    _bridge_cancellation_active = True
+
+    def interrupt(signum, _frame):
+        global _bridge_interrupted
+        _bridge_interrupted = _bridge_interrupted or signum
+
+    try:
+        for sig in previous:
+            signal.signal(sig, interrupt)
+        yield
+    finally:
+        interrupted = _bridge_interrupted
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        _bridge_interrupted = None
+        _bridge_cancellation_active = False
+        if interrupted is not None:
+            raise SystemExit(128 + interrupted)
+
+
+def bridge_timeout():
+    # Match bin/chat-bridge's default, empty-value fallback and legal range.
+    try:
+        seconds = float(os.environ.get("CHAT_BRIDGE_EGO_CLIENT_TIMEOUT_SEC") or "180")
+    except ValueError:
+        raise ValueError("CHAT_BRIDGE_EGO_CLIENT_TIMEOUT_SEC must be between 30 and 600") from None
+    if not 30 <= seconds <= 600:  # Also rejects NaN and infinity.
+        raise ValueError("CHAT_BRIDGE_EGO_CLIENT_TIMEOUT_SEC must be between 30 and 600")
+    return seconds + 60  # Wrapper startup/pacing allowance, not a generation retry.
+
+
+def interrupted_claim_timeout():
+    # A new-session dispatch can also perform task registration before finish().
+    # Both child teardowns and a DB/finish allowance must fit inside the lease.
+    return max(300, bridge_timeout() + TASK_RECORD_TIMEOUT_SEC
+               + 2 * (BRIDGE_TERM_GRACE_SEC + 4) + 60)
+
+
+def stop_bridge(process):
+    """Reap only the process group created by run_bridge, not arbitrary children."""
+    deadline = time.monotonic() + BRIDGE_TERM_GRACE_SEC
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        stdout, stderr = process.communicate(timeout=BRIDGE_TERM_GRACE_SEC)
+    except subprocess.TimeoutExpired as pending:
+        stdout, stderr = pending.output, pending.stderr
+    # EOF or an exited/reaped leader says nothing about DEVNULL descendants.
+    # Do not KILL early either: an owned runner may be cleaning its separate group.
+    while True:
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            # A probe can be inconclusive during teardown. It is NOT proof of
+            # an empty group: retain the grace and the final KILL attempt.
+            pass
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            break
+        time.sleep(min(.05, remaining))
+    try:
+        return process.communicate(timeout=2)
+    except subprocess.TimeoutExpired as pending:
+        for stream in (process.stdout, process.stderr):
+            if stream:
+                stream.close()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        return pending.output or stdout, pending.stderr or stderr
+
+
+def run_bridge(args, timeout=None):
+    timeout = bridge_timeout() if timeout is None else timeout
+    with bridge_cancellation():
+        if _bridge_interrupted is not None:
+            raise InterruptedError("BRIDGE_CANCELLED")
+        process, timed_out = None, False
+        try:
+            # Signals only latch here, including between real spawn and assignment.
+            process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True, errors="replace", start_new_session=True)
+            deadline = time.monotonic() + timeout
+            while _bridge_interrupted is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    process.communicate(timeout=min(.2, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass  # Worker threads observe cancellation without installing signals.
+        finally:
+            if process is not None:
+                # Repeated signals stay latched throughout cleanup, including normal EOF.
+                stdout, stderr = stop_bridge(process)
+        if _bridge_interrupted is not None:
+            raise InterruptedError("BRIDGE_CANCELLED")
+        if timed_out:
+            # Never stringify the original argv, which contains the prompt. Cleanup
+            # can obtain a successful receipt, but cannot upgrade timeout to success.
+            raise subprocess.TimeoutExpired("chat-bridge", timeout, output=stdout, stderr=stderr) from None
+        return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+
+def worker_diagnostic(returncode, stderr, phase):
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    # Private SQLite diagnostics only; public operation/queue responses omit result.
+    return {"worker": {"phase": phase, "exitCode": returncode, "stderrTail": (stderr or "")[-2048:]}}
+
+
 def claim(db):
+    if _bridge_interrupted is not None:
+        return None
     begin_immediate(db)
     try:
         db.execute("UPDATE operations SET status='DELIVERY_UNKNOWN',reason='WORKER_INTERRUPTED',updated_at=? WHERE status='DISPATCHING' AND claimed_at<?",
-                   (stamp(), time.time() - 300))
+                   (stamp(), time.time() - interrupted_claim_timeout()))
         row = db.execute("""SELECT * FROM operations AS candidate WHERE status='QUEUED' AND not_before<=?
             AND NOT EXISTS (SELECT 1 FROM operations AS active WHERE active.status='DISPATCHING' AND active.account_id=candidate.account_id)
             ORDER BY CASE candidate.kind WHEN 'management' THEN 0 WHEN 'callback' THEN 1 WHEN 'rotation' THEN 2 ELSE 3 END,
@@ -2184,16 +2326,20 @@ def reconcile_delivery(db, operation_id):
                 "reason": reason, "evidence": superseded}
     expected = hashlib.sha256(" ".join(row["message"].split()).encode()).hexdigest()
     evidence, reason = None, "NO_SESSION_REFERENCE"
+    diagnostic = None
     if row["session_ref"]:
         bridge = os.environ.get("CHAT_BRIDGE_BIN") or str(pathlib.Path.home() / ".local/bin/chat-bridge")
         command = [bridge, "evidence", row["session_ref"], "--project", row["project"],
                    "--account", row["account_alias"], "--expected-hash", expected]
         try:
-            completed = subprocess.run(command, capture_output=True, text=True, timeout=120)
+            completed = run_bridge(command)
             evidence = parse_worker_receipt(completed) if completed.returncode == 0 else None
             reason = "MESSAGE_NOT_PROVEN" if evidence else "CHAT_READ_UNAVAILABLE"
-        except (OSError, subprocess.TimeoutExpired):
+            if not evidence:
+                diagnostic = worker_diagnostic(completed.returncode, completed.stderr, "evidence")
+        except (OSError, subprocess.TimeoutExpired) as error:
             reason = "CHAT_READ_UNAVAILABLE"
+            diagnostic = worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "evidence")
     reg = registry(db)
     binding = ((reg.get("projects") or {}).get(row["project"]) or {}).get("bindings", {}).get(row["account_alias"]) or {}
     expected_project = (re.search(r"g-p-[0-9a-f]{32}", binding.get("projectId") or binding.get("projectUrl") or "") or [None])[0]
@@ -2229,6 +2375,11 @@ def reconcile_delivery(db, operation_id):
         db.execute("INSERT INTO reconciliation_attempts VALUES (?,?,?,?,?,?)",
                    (str(uuid.uuid4()),operation_id,outcome,reason,
                     json.dumps(evidence,ensure_ascii=False) if evidence else None,now))
+        if diagnostic:
+            private = json.loads(row["result"]) if row["result"] else {}
+            private = private if isinstance(private, dict) else {}
+            private["reconcileWorker"] = diagnostic["worker"]
+            db.execute("UPDATE operations SET result=? WHERE id=?", (json.dumps(private), operation_id))
         if proven:
             db.execute("UPDATE operations SET status='SENT',reason='RECONCILED_FROM_CHAT_EVIDENCE',result=?,updated_at=? WHERE id=?",
                        (json.dumps({"reconciliation":evidence},ensure_ascii=False),now,operation_id))
@@ -2297,9 +2448,10 @@ def work_one(db):
         if row["kind"] == "rotation":
             args += ["--background"]
     try:
-        completed = subprocess.run(args, capture_output=True, text=True, timeout=120)
+        completed = run_bridge(args)
     except (OSError, subprocess.TimeoutExpired) as error:
-        return finish(db, row, "DELIVERY_UNKNOWN", type(error).__name__)
+        return finish(db, row, "DELIVERY_UNKNOWN", type(error).__name__,
+                      result=worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "dispatch"))
     receipt = parse_worker_receipt(completed)
     if completed.returncode == 75:
         detail = receipt or {}
@@ -2321,9 +2473,11 @@ def work_one(db):
             return finish(db, row, "FAILED_PRE_SEND", "PRE_SEND_" + str(receipt.get("code") or "ERROR")[:200], pre_send_failure=True)
         if receipt and receipt.get("deliveryStage") == "SEND_ATTEMPTED":
             return finish(db, row, "DELIVERY_UNKNOWN", "SEND_ATTEMPTED_" + str(receipt.get("code") or "ERROR")[:200])
-        return finish(db, row, "DELIVERY_UNKNOWN", "WORKER_EXIT_" + str(completed.returncode))
+        return finish(db, row, "DELIVERY_UNKNOWN", "WORKER_EXIT_" + str(completed.returncode),
+                      result=worker_diagnostic(completed.returncode, completed.stderr, "dispatch"))
     if receipt is None:
-        return finish(db, row, "DELIVERY_UNKNOWN", "WORKER_RECEIPT_UNREADABLE")
+        return finish(db, row, "DELIVERY_UNKNOWN", "WORKER_RECEIPT_UNREADABLE",
+                      result=worker_diagnostic(completed.returncode, completed.stderr, "dispatch"))
     if row["kind"] == "stop":
         if receipt.get("ok") is False:
             return finish(db,row,"DELIVERY_UNKNOWN","STOP_NOT_CONFIRMED")
@@ -2352,9 +2506,14 @@ def work_one(db):
                                ("dispatchedAt", "--dispatched-at")):
             if receipt.get(source) is not None:
                 record_args += [option, str(receipt[source])]
-        recorded = subprocess.run(record_args, capture_output=True, text=True, timeout=30)
+        try:
+            recorded = run_bridge(record_args, timeout=TASK_RECORD_TIMEOUT_SEC)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            return finish(db, row, "DELIVERY_UNKNOWN", "TASK_RECORD_NOT_CONFIRMED", session_ref=target,
+                          result=worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "task-record"))
         if recorded.returncode:
-            return finish(db, row, "DELIVERY_UNKNOWN", "TASK_RECORD_NOT_CONFIRMED", session_ref=target)
+            return finish(db, row, "DELIVERY_UNKNOWN", "TASK_RECORD_NOT_CONFIRMED", session_ref=target,
+                          result=worker_diagnostic(recorded.returncode, recorded.stderr, "task-record"))
     if row["kind"] == "dispatch":
         clear_capacity_wait(db, row["task_id"])
     result_payload = {"delivered": True, "modelSelection": receipt.get("modelSelection")}
@@ -2363,7 +2522,7 @@ def work_one(db):
 
 def serve(config, state):
     lock_path = state / "coordinator.lock"
-    with open(lock_path, "a+") as lock:
+    with bridge_cancellation(), open(lock_path, "a+") as lock:
         os.chmod(lock_path, 0o600)
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -2378,7 +2537,7 @@ def serve(config, state):
                     return work_one(worker_db)
                 finally:
                     worker_db.close()
-            while True:
+            while _bridge_interrupted is None:
                 for future in tuple(pending):
                     if future.done():
                         try:
@@ -2656,7 +2815,8 @@ def main():
         elif command == "reconcile":
             if len(args)!=2 or args[0]!="--operation":
                 raise ValueError("reconcile requires --operation ID")
-            value = reconcile_delivery(db,args[1])
+            with bridge_cancellation():
+                value = reconcile_delivery(db,args[1])
         elif command == "retry":
             if len(args)!=2 or args[0]!="--operation":
                 raise ValueError("retry requires --operation ID")
@@ -2683,10 +2843,11 @@ def main():
             db.commit()
             value = response(db.execute("SELECT * FROM operations WHERE id=?", (args[0],)).fetchone())
         elif command == "work-one":
-            value = work_one(db)
+            with bridge_cancellation():
+                value = work_one(db)
         elif command == "recover":
             db.execute("UPDATE operations SET status='DELIVERY_UNKNOWN',reason='WORKER_INTERRUPTED',updated_at=? WHERE status='DISPATCHING' AND claimed_at<?",
-                       (stamp(), time.time() - 300))
+                       (stamp(), time.time() - interrupted_claim_timeout()))
             db.commit()
             value = {"recoveredUnknown": db.total_changes}
         elif command == "list":
