@@ -38,8 +38,12 @@ The tunnel closes with the adapter; the shared app-server and worker survive.
 ## Create and dispatch
 
 Create names the thread `ChatBridge · Native worker` using `thread/name/set`
-on the creating connection, then verifies its name and binding. This metadata
-write persists an otherwise deferred empty thread without starting inference.
+on the creating connection, then reads with `includeTurns:true` to materialize
+its history and verify the name, binding and zero turns without inference.
+Naming alone saves paginated metadata but can leave no resumable rollout.
+The earlier name-only probe also used a full read; attributing its persistence
+to naming alone missed that difference from the implementation. The full read
+is now an explicit creation-only persistence barrier; ordinary reads are unchanged.
 The receipt's observed model/effort describe thread settings;
 `modelSelection.executionObserved=false` does not claim an executed turn.
 Preserve the receipt, including a known target returned on a later failure;

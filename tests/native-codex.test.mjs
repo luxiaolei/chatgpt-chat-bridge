@@ -9,23 +9,27 @@ import {dispatchNative} from '../src/native-codex.mjs';
 
 const workerThread='22222222-2222-4222-8222-222222222222';
 
-test('native create persists its empty thread by naming before close and preserves a failed creation target',async()=>{
+test('native create names and materializes empty history before close and preserves a failed creation target',async()=>{
   const target={host:hostname(),cwd:process.cwd(),socket:'/unused'};
-  for(const rejected of [false,true]) {
+  for(const failure of [null,'NAME_REJECTED','BARRIER_REJECTED','NATIVE_EMPTY_THREAD_NOT_CONFIRMED']) {
     const calls=[];let name;
     const thread={id:workerThread,cwd:target.cwd,originator:'chat_bridge_native'};
     const client={close(){calls.push('close');},async rpc(method,p){
       calls.push(method);
       if(method==='model/list')return {data:[{model:'gpt-6-astra',supportedReasoningEfforts:[{reasoningEffort:'xhigh'}]}]};
       if(method==='thread/start')return {thread,model:p.model,reasoningEffort:p.config.model_reasoning_effort};
-      if(method==='thread/name/set'){assert.equal(p.threadId,workerThread);if(rejected)throw Error('NAME_REJECTED');name=p.name;return {};}
-      if(method==='thread/read')return {thread:{...thread,name}};
+      if(method==='thread/name/set'){assert.equal(p.threadId,workerThread);if(failure==='NAME_REJECTED')throw Error(failure);name=p.name;return {};}
+      if(method==='thread/read'){
+        assert.equal(p.includeTurns,true);
+        if(failure==='BARRIER_REJECTED')throw Error(failure);
+        return {thread:{...thread,name,turns:failure==='NATIVE_EMPTY_THREAD_NOT_CONFIRMED'?[{id:'unexpected'}]:[]}};
+      }
       throw Error(method);
     }};
     const receipt=await dispatchNative({action:'create',nativeTarget:target,model:'gpt-6-astra',effort:'xhigh'},async()=>client);
     assert.equal(receipt.nativeTarget.threadId,workerThread);
-    assert.deepEqual(calls,['model/list','thread/start','thread/name/set',...(!rejected?['thread/read']:[]),'close']);
-    if(rejected){assert.equal(receipt.ok,false);assert.equal(receipt.code,'NAME_REJECTED');assert.equal(receipt.deliveryStage,'SEND_ATTEMPTED');}
+    assert.deepEqual(calls,['model/list','thread/start','thread/name/set',...(failure!=='NAME_REJECTED'?['thread/read']:[]),'close']);
+    if(failure){assert.equal(receipt.ok,false);assert.equal(receipt.code,failure);assert.equal(receipt.deliveryStage,'SEND_ATTEMPTED');}
     else {assert.equal(receipt.ok,true);assert.equal(receipt.name,'ChatBridge · Native worker');assert.deepEqual(receipt.modelSelection,{requestedModel:'gpt-6-astra',requestedEffort:'xhigh',observedModel:'gpt-6-astra',observedEffort:'xhigh',executionObserved:false});}
   }
 });
@@ -42,7 +46,7 @@ test('native adapter validates target, catalog and busy state before start; unkn
     const calls=[];
     const client={close(){},async rpc(method,p){
       calls.push(method);
-      if(method==='thread/read')return {thread:{id:workerThread,cwd:scenario==='cwd'?'/tmp':process.cwd(),originator:scenario==='foreign'?'codex_desktop':'chat_bridge_native',status:{type:scenario==='busy'?'active':'idle'},canAcceptDirectInput:true,model:'gpt-6-astra',reasoningEffort:'xhigh'}};
+      if(method==='thread/read'){assert.equal(p.includeTurns,false);return {thread:{id:workerThread,cwd:scenario==='cwd'?'/tmp':process.cwd(),originator:scenario==='foreign'?'codex_desktop':'chat_bridge_native',status:{type:scenario==='busy'?'active':'idle'},canAcceptDirectInput:true,model:'gpt-6-astra',reasoningEffort:'xhigh'}};}
       if(method==='model/list')return {data:[{model:'gpt-6-astra',supportedReasoningEfforts:[{reasoningEffort:'xhigh'}]}]};
       if(method==='turn/start') {assert.equal(p.clientUserMessageId,'op');if(scenario==='unknown')throw Error('LOST_RESPONSE');return {turn:{id:'turn'}};}
       throw Error(method);
