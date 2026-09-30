@@ -17,6 +17,37 @@ After any Chat Bridge upgrade, controller/setup Chats must re-read the installed
 
 For local repository work in this deployment, discover an authorized Computer plugin whose display name starts with `ChatGPT Computer`, then verify its actual target host/capabilities before use. The account-specific suffix is not stable identity. Git/GitHub writes default to the configured execution host's local `git`/`gh`; do not infer GitHub identity from the ChatGPT account and do not switch to Remote Desktop Commander unless the user explicitly requests it.
 
+## GitHub Project management binding
+
+A ChatBridge logical Project can optionally bind to a **GitHub Projects v2** board. This is management metadata and is intentionally separate from the ChatGPT Project/account/Space binding below.
+
+Local-only commands (they do not open ChatGPT Web):
+
+```bash
+chat-bridge github-project bind --project "PROJECT" --owner OWNER --number 8
+chat-bridge github-project show --project "PROJECT"
+chat-bridge github-project inspect --project "PROJECT"
+chat-bridge github-project refresh --project "PROJECT"          # preview only
+chat-bridge github-project refresh --project "PROJECT" --apply  # explicit, configured safe writes only
+chat-bridge github-project unbind --project "PROJECT"
+```
+
+`bind` verifies the board through the host-local `gh` identity and stores only owner/number/id/url plus explicit sync policy in the Bridge registry. It does not create a board, configure GitHub Auto-add, move Chats, dispatch tasks or change source Issues/PRs.
+
+Optional refresh policy is configured at bind time, for example:
+
+```bash
+chat-bridge github-project bind --project "HZ OS" --owner luxiaolei --number 4 \
+  --source-query 'repo:luxiaolei/huazhuo-blueprint is:open' \
+  --source-query 'repo:luxiaolei/huazhuo-runtime is:open' \
+  --map-status 'status:backlog=Backlog' \
+  --map-status 'status:ready=Ready'
+```
+
+Every source query must explicitly contain `repo:` and `is:open`. `refresh` reads all board pages and verifies search completeness; an incomplete/inaccessible read is an explicit error, never an empty project. `--apply` may only add configured open source references and mirror explicitly configured **nonterminal** Issue-label statuses after source/version and Project-field read-back checks. It refuses terminal/acceptance-like mappings such as Done/Closed/Accepted/Deployed. It never edits/closes source Issues, merges PRs, retries UNKNOWN delivery, dispatches workers, acknowledges results or switches a runtime release.
+
+If a logical project has no GitHub Project binding, existing routing and Issue-first controller behavior are unchanged. See `docs/github-projects.md`.
+
 ## Project discovery
 
 Refresh the actual ChatGPT Project before routing:

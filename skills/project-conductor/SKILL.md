@@ -22,17 +22,34 @@ After Chat Bridge is installed or upgraded, a root controller, domain controller
 
 Do not rely on remembered pre-upgrade routing, Space, account, or model behavior. Treat the installed Skills as the current control contract.
 
+## GitHub Project-first management rule
+
+A ChatBridge logical Project may optionally bind to one **GitHub Projects v2** board. This is distinct from the ChatGPT Project/account/Space binding used for Chat routing.
+
+When a GitHub Project binding exists:
+
+1. start/refresh by running `chat-bridge github-project inspect --project "PROJECT"` (or the project-specific approved `refresh` command);
+2. use that board to select the relevant workstream, priority and management status;
+3. then open the selected source Issue/PR, parent/dependency, review/CI and fixed evidence before dispatching or accepting work;
+4. if the Project read is incomplete, inaccessible or conflicting, do **not** interpret the absence of rows as "no work"; fall back only to the source Issue/PR paths you can verify and surface the Project read problem;
+5. Project Status is a management projection. It never substitutes for worker `RESULT_RECORDED`, controller ACK, PR merge, deployment, business acceptance, or a scientific conclusion.
+
+When no GitHub Project binding exists, preserve the legacy Issue-first workflow unchanged. Do not require a migration merely to keep an existing project working.
+
+The host-local adapter is deliberately conservative. `github-project refresh` is preview-only unless `--apply` is explicit; additions require configured open-source queries; Project Status mirroring requires an explicit source-label mapping and terminal/acceptance-like values are refused. Board Auto-add configuration is a separate per-board setup concern and must not be inferred from a logical binding.
+
 ## Core responsibilities
 
 ### 1. Project control
 
-Use GitHub Issues and Pull Requests as the durable control plane.
+Use GitHub Projects (when bound) plus source Issues and Pull Requests as the durable management/control plane.
 
 - Every meaningful workstream should have an Issue, PR, or both.
-- Keep acceptance criteria, decisions, blockers, ownership, and completion evidence in GitHub.
+- Keep acceptance criteria, decisions, blockers, ownership, and completion evidence on the source GitHub object; the Project aggregates and filters those objects.
 - Chat messages are transient coordination signals; GitHub is the project record.
-- Review PR state and Issue state before dispatching follow-up work.
-- Close or advance work only when the durable GitHub record supports it.
+- Review Project state, then source PR/Issue state and evidence before dispatching follow-up work.
+- Close or advance work only when the source durable record and the owning controller's acceptance contract support it.
+- Do not copy all live task history into one umbrella Issue merely to make a dashboard; retain an umbrella/controller Issue only when the project actually uses one for charter, decisions or compatibility.
 
 ### 2. Message routing
 
@@ -212,19 +229,16 @@ Avoid uncontrolled Chat-to-Chat loops. Only the conductor should normally fan ou
 
 ## GitHub workflow
 
-Prefer:
-- one umbrella Issue for project-level plan/status,
-- child Issues for independent workstreams,
-- PRs for code/doc changes,
-- PR reviews for acceptance,
+For a Project-first project, prefer:
+- the bound GitHub Project for cross-workstream portfolio/status views;
+- source Issues for independent workstreams, charters, decisions and acceptance criteria;
+- PRs for code/doc changes;
+- PR reviews for implementation acceptance;
 - a Discussion for broad design/background conversation when useful.
 
-The conductor should keep the umbrella Issue updated with:
-- current phase,
-- active sessions and owners,
-- blocking Issues/PRs,
-- completed milestones,
-- next dispatch batch.
+An existing umbrella/controller Issue may remain the charter or historical handoff point, but it no longer has to duplicate every live status row already represented by the Project. Projects without a GitHub Project binding keep the legacy umbrella-Issue pattern.
+
+The conductor should keep source objects current enough that the Project can be trusted as an index. Active session identity, callback ownership, UNKNOWN delivery and controller acceptance remain Bridge/runtime records plus durable Issue/PR evidence; do not encode them only as a board column.
 
 ## Local work routing
 
