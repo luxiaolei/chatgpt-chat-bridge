@@ -185,6 +185,49 @@ raise SystemExit(r.main())
         assert process.returncode == 128 + signal.SIGTERM
         for path in (leader_file, leaf_file):
             wait_stopped(wait_file(path))
+    elif case in {'coordinator-term', 'outer-spawn-assignment-int', 'serve-term'}:
+        leader, leaf_file, leader_file = fakes.tree(closed=True)
+        body = f'''import importlib.util,os,pathlib,signal,sys,time
+s=importlib.util.spec_from_file_location('coordinator',{str(ROOT/'src/coordinator.py')!r})
+c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
+'''
+        db = None
+        if case == 'outer-spawn-assignment-int':
+            body += f'''original=c.subprocess.Popen
+def inject(*args,**kwargs):
+ p=original(*args,**kwargs)
+ deadline=time.monotonic()+3
+ while not pathlib.Path({str(leaf_file)!r}).exists() and time.monotonic()<deadline: time.sleep(.01)
+ os.kill(os.getpid(),signal.SIGINT)
+ return p
+c.subprocess.Popen=inject
+'''
+        if case == 'serve-term':
+            db, op, config, state = temporary_queue(coordinator, fakes,
+                worker_body=f'import os,sys\nos.execv(sys.executable,[sys.executable,{str(leader)!r}])\n')
+            body += f'c.serve(pathlib.Path({str(config)!r}),pathlib.Path({str(state)!r}))\n'
+        else:
+            body += f'c.run_bridge([sys.executable,{str(leader)!r}],timeout=30)\n'
+        supervisor = fakes.script(case + '-supervisor', body)
+        process = fakes.popen([sys.executable, str(supervisor)],
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            leaf_pid, leader_pid = wait_file(leaf_file), wait_file(leader_file)
+            if case != 'outer-spawn-assignment-int':
+                os.kill(process.pid, signal.SIGTERM)
+                time.sleep(.1)
+                os.kill(process.pid, signal.SIGINT)  # Must not interrupt bounded cleanup.
+            stdout, stderr = process.communicate(timeout=12)
+            expected = signal.SIGINT if case == 'outer-spawn-assignment-int' else signal.SIGTERM
+            assert process.returncode == 128 + expected, stderr.decode(errors='replace')
+            wait_stopped(leader_pid)
+            wait_stopped(leaf_pid)
+            if db is not None:
+                row = db.execute('SELECT status,reason,attempts FROM operations WHERE id=?', (op['operationId'],)).fetchone()
+                assert tuple(row) == ('DELIVERY_UNKNOWN', 'InterruptedError', 1), tuple(row)
+        finally:
+            if db is not None:
+                db.close()
     elif case == 'group-probe-denied':
         original = os.killpg
         probes = 0

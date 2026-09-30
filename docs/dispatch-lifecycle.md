@@ -43,6 +43,13 @@ handlers are restored. Normal completion, timeout and signal-driven exit share
 that cleanup. The outer TERM grace is seven seconds, exceeding the runner's
 maximum two-second TERM grace, two-second drain and two-second reap budgets.
 
+The coordinator also latches TERM/INT in the main thread, including the outer
+spawn/assignment window. Its existing worker threads check cancellation during
+bounded `communicate` waits, finish only their owned groups, and retain UNKNOWN
+for an interrupted dispatch. The service stops admitting claims and waits for
+those workers before restoring signal handlers and exiting. Repeated signals
+cannot interrupt cleanup. No process registry or new supervisor is needed.
+
 Only groups created by these helpers are signaled. There is no PID enumeration,
 process-name matching, global process killer, browser Stop operation or shutdown
 of Ego Lite/TaskSpaces/renderers. A helper does not claim arbitrary descendants
@@ -111,7 +118,8 @@ no live Bridge operation, process or browser is exercised.
 Coverage includes closed-pipe TERM-ignoring descendants, early/reaped leaders,
 normal EOF with residual children, timeout followed by leader exit zero,
 separately owned nested client groups, spawn/assignment signals, unrelated
-process survival, normal receipts, inconclusive probes, timeout range/lease
+process survival, repeated coordinator cancellation, real thread-pool shutdown,
+normal receipts, inconclusive probes, timeout range/lease
 compatibility, bounded private stderr and argv privacy, all three wrapper call
 sites, and unchanged UNKNOWN/retry rules.
 
@@ -134,3 +142,8 @@ Development dispatch `CBIMG-DISPATCH-FIX-20260930-01` was observed as SENT with
 receipt. This is the developer Chat's selection, not an image-model assertion.
 The worker records this repair in GitHub and submits its own queue result;
 only the persisted local Codex owner may ACK final acceptance.
+
+The frontend result at `dac2ae2` was rejected after independent review reproduced
+outer TERM and spawn/assignment INT leaks. The user then authorized local Codex
+continuation; the root owns these cancellation corrections and their review.
+That local revision does not impersonate a new frontend queue result.

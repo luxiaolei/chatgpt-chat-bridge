@@ -7,6 +7,7 @@ const cases = [
   'outer-closed-pipes', 'outer-exited-leader', 'outer-normal-residual', 'outer-timeout-zero-exit',
   'runner-closed-pipes', 'runner-timeout', 'nested-client-group',
   'spawn-assignment-signal', 'normal-and-unrelated', 'group-probe-denied', 'runner-shell-teardown',
+  'coordinator-term', 'outer-spawn-assignment-int', 'serve-term',
   'timeout-budget-compatibility', 'private-diagnostic-bound', 'stale-claim-budget',
   'dispatch-unstructured-diagnostic', 'dispatch-timeout-unknown',
   'evidence-timeout-unknown', 'task-record-timeout', 'task-record-unstructured',

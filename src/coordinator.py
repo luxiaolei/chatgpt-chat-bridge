@@ -10,9 +10,11 @@ import subprocess
 import signal
 import sys
 import time
+import threading
 import uuid
 import fcntl
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 
@@ -2028,6 +2030,37 @@ def rotation_ack(db, payload, config, state):
 
 BRIDGE_TERM_GRACE_SEC = 7  # Covers ego-runner's 2s TERM + 2s drain + 2s reap.
 TASK_RECORD_TIMEOUT_SEC = 30
+_bridge_interrupted = None
+_bridge_cancellation_active = False
+
+
+@contextmanager
+def bridge_cancellation():
+    """Latch main-thread signals until every worker has captured/reaped its child."""
+    global _bridge_interrupted, _bridge_cancellation_active
+    if threading.current_thread() is not threading.main_thread() or _bridge_cancellation_active:
+        yield
+        return
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    _bridge_interrupted = None
+    _bridge_cancellation_active = True
+
+    def interrupt(signum, _frame):
+        global _bridge_interrupted
+        _bridge_interrupted = _bridge_interrupted or signum
+
+    try:
+        for sig in previous:
+            signal.signal(sig, interrupt)
+        yield
+    finally:
+        interrupted = _bridge_interrupted
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        _bridge_interrupted = None
+        _bridge_cancellation_active = False
+        if interrupted is not None:
+            raise SystemExit(128 + interrupted)
 
 
 def bridge_timeout():
@@ -2093,20 +2126,36 @@ def stop_bridge(process):
 
 def run_bridge(args, timeout=None):
     timeout = bridge_timeout() if timeout is None else timeout
-    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, errors="replace", start_new_session=True)
-    try:
-        process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        stdout, stderr = stop_bridge(process)
-        # Never stringify the original exception: its argv contains the prompt.
-        # Cancellation may make a leader exit 0; the original timeout stays UNKNOWN.
-        raise subprocess.TimeoutExpired("chat-bridge", timeout, output=stdout, stderr=stderr) from None
-    except BaseException:
-        stop_bridge(process)
-        raise
-    stdout, stderr = stop_bridge(process)  # Normal EOF can also leave owned children.
-    return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+    with bridge_cancellation():
+        if _bridge_interrupted is not None:
+            raise InterruptedError("BRIDGE_CANCELLED")
+        process, timed_out = None, False
+        try:
+            # Signals only latch here, including between real spawn and assignment.
+            process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True, errors="replace", start_new_session=True)
+            deadline = time.monotonic() + timeout
+            while _bridge_interrupted is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                try:
+                    process.communicate(timeout=min(.2, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass  # Worker threads observe cancellation without installing signals.
+        finally:
+            if process is not None:
+                # Repeated signals stay latched throughout cleanup, including normal EOF.
+                stdout, stderr = stop_bridge(process)
+        if _bridge_interrupted is not None:
+            raise InterruptedError("BRIDGE_CANCELLED")
+        if timed_out:
+            # Never stringify the original argv, which contains the prompt. Cleanup
+            # can obtain a successful receipt, but cannot upgrade timeout to success.
+            raise subprocess.TimeoutExpired("chat-bridge", timeout, output=stdout, stderr=stderr) from None
+        return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
 def worker_diagnostic(returncode, stderr, phase):
@@ -2117,6 +2166,8 @@ def worker_diagnostic(returncode, stderr, phase):
 
 
 def claim(db):
+    if _bridge_interrupted is not None:
+        return None
     begin_immediate(db)
     try:
         db.execute("UPDATE operations SET status='DELIVERY_UNKNOWN',reason='WORKER_INTERRUPTED',updated_at=? WHERE status='DISPATCHING' AND claimed_at<?",
@@ -2471,7 +2522,7 @@ def work_one(db):
 
 def serve(config, state):
     lock_path = state / "coordinator.lock"
-    with open(lock_path, "a+") as lock:
+    with bridge_cancellation(), open(lock_path, "a+") as lock:
         os.chmod(lock_path, 0o600)
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -2486,7 +2537,7 @@ def serve(config, state):
                     return work_one(worker_db)
                 finally:
                     worker_db.close()
-            while True:
+            while _bridge_interrupted is None:
                 for future in tuple(pending):
                     if future.done():
                         try:
@@ -2764,7 +2815,8 @@ def main():
         elif command == "reconcile":
             if len(args)!=2 or args[0]!="--operation":
                 raise ValueError("reconcile requires --operation ID")
-            value = reconcile_delivery(db,args[1])
+            with bridge_cancellation():
+                value = reconcile_delivery(db,args[1])
         elif command == "retry":
             if len(args)!=2 or args[0]!="--operation":
                 raise ValueError("retry requires --operation ID")
@@ -2791,7 +2843,8 @@ def main():
             db.commit()
             value = response(db.execute("SELECT * FROM operations WHERE id=?", (args[0],)).fetchone())
         elif command == "work-one":
-            value = work_one(db)
+            with bridge_cancellation():
+                value = work_one(db)
         elif command == "recover":
             db.execute("UPDATE operations SET status='DELIVERY_UNKNOWN',reason='WORKER_INTERRUPTED',updated_at=? WHERE status='DISPATCHING' AND claimed_at<?",
                        (stamp(), time.time() - interrupted_claim_timeout()))
