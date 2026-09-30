@@ -65,8 +65,42 @@ provenance; a resumed thread may execute commands from another directory.
   binding. Both old probe sessions are retired. A new canary session attempt with
   `GPT-6 Luna` stopped at `PRE_SEND / Unavailable model selection`.
 - The observed Web model menu contains `Latest`, `GPT-5.6 Sol`, `GPT-5.5`; it does
-  not offer Luna or Astra. No fallback or task message was sent. Awaiting the
-  user's decision on using `Latest + Extra High` for this one live canary.
-- Prepared a random local challenge whose contents are absent from the Worker
-  prompt. Live acceptance must verify the Worker's file, challenge hash and nonce,
-  saved result, exact original owner and ACK. This part is still pending.
+  not offer Luna or Astra. The user explicitly approved `Latest + Extra High`
+  for this one live canary. UI selection was verified before dispatch; the
+  underlying model version is not inferred from Latest.
+
+## Live acceptance — passed, 2026-09-30
+
+The canary used an ordinary Chat in `LiteLLM Web Probe`, not cloud Work. The Chat
+connected through `ChatGPT Computer - HZCodex` to host `xlmini`, read the local
+challenge and repository instructions, wrote the bounded evidence file, and
+itself ran the installed `queue result` command. The controller did not create
+the Worker's evidence or submit its result on its behalf.
+
+| Receipt | Observed value |
+| --- | --- |
+| Code under test | `3691b60c0598eeb464489f43c8970c97b9dbd6d7` |
+| Task | `CB-LOCAL-20260930-01` |
+| Dispatch operation | `ea42967d-d4ee-4ac1-9fd5-0938d4257111` |
+| Worker Chat | `6abc7583-3060-83ee-b346-55eba4564587` |
+| Original local thread | `01a0efdf-e8de-7870-a3ef-88f0b4d99ba4` |
+| Requested / verified UI selection | `Latest / Extra High` |
+| Dispatch | `SENT`, one attempt, 2026-09-30 02:36:33 UTC |
+| Worker evidence timestamp | 2026-09-30 02:38:37 UTC |
+| Result event | `result:CB-LOCAL-20260930-01:1` |
+| Before owner ACK | `WAITING_LOCAL`, no acceptance |
+| After verification and ACK | `RECEIVED_LOCAL`, `ACCEPTED`, task `COMPLETE` |
+
+The controller independently checked the challenge nonce, byte-level SHA-256,
+host, repository path, Git remote, code HEAD, timestamp and original owner. The
+challenge contents were absent from the dispatched prompt. Its SHA-256 was
+`4157075e592123bc08d7fa1810e91abf2e762d3c4c79a10f6185a34fc37598fe`.
+
+Local receipts are retained at
+`~/.local/state/chat-bridge/canaries/CB-LOCAL-20260930-01/`: `dispatch-receipt.json`,
+`evidence.json`, `received.json`, `verification.json`, `ack.json`,
+`accepted-result.json`, and `accepted-dispatch.json`.
+
+This accepts the scoped first-version round trip for the tested account/host.
+It does not establish background App wake-up, MCP Events push, autonomous Luna
+routing, native Codex target dispatch or reliability across every account/model.
