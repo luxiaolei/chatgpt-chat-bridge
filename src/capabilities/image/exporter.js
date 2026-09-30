@@ -48,13 +48,34 @@ export async function createControlledImageStore({root, targetRef, io = fs, maxF
     assertArtifact(typeof name === 'string' && /^[a-z][a-z0-9-]{0,150}\.(json|bin|png|jpg|webp)$/.test(name), 'STORE_UNSAFE');
     return join(root,name);
   }
+  async function checkLinks(name, handle, s) {
+    if (s.nlink === 1) return;
+    assertArtifact(s.nlink === 2, 'STORE_UNSAFE');
+    const prefix = `.image-tmp-${name}-`;
+    let ownAlias = false;
+    // ponytail: scan only the two-link publication window; partition roots if directory size matters.
+    for (const entry of await io.readdir(root)) {
+      if (!entry.startsWith(prefix) || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(entry.slice(prefix.length))) continue;
+      let alias;
+      try { alias = await io.lstat(join(root,entry)); }
+      catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      if (alias.isFile() && !(alias.mode & 0o077) && alias.uid === s.uid && alias.ino === s.ino && alias.dev === s.dev) {
+        ownAlias = true; break;
+      }
+    }
+    // The publishing writer may have unlinked its alias during the scan. Never unlink it here.
+    const current = await handle.stat();
+    assertArtifact(current.nlink === 1 || (current.nlink === 2 && ownAlias), 'STORE_UNSAFE');
+  }
   async function read(name) {
     const path = filePath(name); await guard(); let handle;
     try { handle = await io.open(path,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK); }
     catch (error) { if (error.code === 'ENOENT') return null; throw artifactError(error.code === 'ELOOP' ? 'STORE_UNSAFE' : safeArtifactCode(error)); }
     try {
       const before = await handle.stat();
-      assertArtifact(before.isFile() && before.nlink === 1 && !(before.mode & 0o077) && before.size <= maxFileBytes, 'STORE_UNSAFE');
+      assertArtifact(before.isFile() && !(before.mode & 0o077) && before.size <= maxFileBytes &&
+        (typeof process.getuid !== 'function' || before.uid === process.getuid()), 'STORE_UNSAFE');
+      await checkLinks(name,handle,before);
       const chunks = []; let length = 0;
       for (;;) {
         const chunk = Buffer.alloc(Math.min(65536,maxFileBytes-length+1));
@@ -64,6 +85,7 @@ export async function createControlledImageStore({root, targetRef, io = fs, maxF
         chunks.push(chunk.subarray(0,bytesRead));
       }
       const after = await handle.stat(), named = await io.lstat(path);
+      await checkLinks(name,handle,after);
       assertArtifact(after.size === length && before.size === after.size && before.mtimeMs === after.mtimeMs &&
         named.ino === before.ino && named.dev === before.dev && !named.isSymbolicLink(), 'STORE_CHANGED');
       await guard();
@@ -77,7 +99,7 @@ export async function createControlledImageStore({root, targetRef, io = fs, maxF
     await guard();
     const existing = await read(name);
     if (existing) { assertArtifact(existing.equals(bytes), 'STORE_CONFLICT'); return {reused:true}; }
-    const temporaryPath = join(root,`.image-tmp-${randomUUID()}`);
+    const temporaryPath = join(root,`.image-tmp-${name}-${randomUUID()}`);
     let handle, created = false;
     try {
       handle = await io.open(temporaryPath,constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|constants.O_NOFOLLOW,0o600);
@@ -156,7 +178,7 @@ export function createImageExporter({contract, store, authorize, readOriginal, d
     assertArtifact(new Set(outputs.map(o=>o.outputId)).size === outputs.length, 'DUPLICATE_OUTPUT_ID');
     const binding = {action:'export',callerRef:request.caller.ref,scope:request.scope,jobId:request.jobId,
       requestDigest:request.requestDigest,targetRef:store.targetRef,route:request.route,attemptId,turnId,outputs,capabilities};
-    await authorizeArtifactBinding(authorize,binding,clock(),authorizationContext);
+    await authorizeArtifactBinding(authorize,binding,clock,authorizationContext);
     const capability = capabilities.features.export;
     const observed = Date.parse(capabilities.observedAt), now = Date.parse(clock());
     const available = typeof readOriginal === 'function' && ['NATIVE','ASSISTED'].includes(capability.mode) &&
@@ -174,7 +196,7 @@ export function createImageExporter({contract, store, authorize, readOriginal, d
         continue;
       }
       try {
-        await authorizeArtifactBinding(authorize,binding,clock(),authorizationContext);
+        await authorizeArtifactBinding(authorize,binding,clock,authorizationContext);
         const originalBinding = {requestDigest:request.requestDigest,jobId:request.jobId,attemptId,turnId,
           outputId:output.outputId,originalRef:output.originalRef,expectedSha256:output.expectedSha256,
           expectedWidth:output.expectedWidth,expectedHeight:output.expectedHeight};
@@ -212,7 +234,7 @@ export function createImageExporter({contract, store, authorize, readOriginal, d
           else {
             // The durable intent precedes bytes. After a crash, existing bytes can be verified
             // without re-fetching; missing bytes must match this immutable hash on recovery.
-            await authorizeArtifactBinding(authorize,binding,clock(),authorizationContext);
+            await authorizeArtifactBinding(authorize,binding,clock,authorizationContext);
             try { await store.putImmutable(recordName,Buffer.from(canonicalArtifactJSON(next))); record = next; }
             catch (error) {
               if (error.code !== 'STORE_CONFLICT') throw error;
@@ -220,11 +242,11 @@ export function createImageExporter({contract, store, authorize, readOriginal, d
               assertArtifact(recordEquivalent(record,next), 'STORE_CONFLICT');
             }
           }
-          await authorizeArtifactBinding(authorize,binding,clock(),authorizationContext);
+          await authorizeArtifactBinding(authorize,binding,clock,authorizationContext);
           await store.putImmutable(bytesName,bytes);
         }
         assertArtifact(verified.sha256 === record.verified.sha256 && verified.pixelSha256 === record.verified.pixelSha256, 'STORE_CORRUPT');
-        await authorizeArtifactBinding(authorize,binding,clock(),authorizationContext);
+        await authorizeArtifactBinding(authorize,binding,clock,authorizationContext);
         // A's VERIFIED Output is immutable. Preserve original byte-check evidence;
         // the manifest timestamp records this run's fresh hash/decode/count checks.
         verified.validation.checkedAt = record.verified.validation.checkedAt;
@@ -236,7 +258,7 @@ export function createImageExporter({contract, store, authorize, readOriginal, d
     // Each snapshot is immutable; PARTIAL history is retained rather than overwritten by a retry.
     let manifestPersisted = false;
     try {
-      await authorizeArtifactBinding(authorize,binding,clock(),authorizationContext);
+      await authorizeArtifactBinding(authorize,binding,clock,authorizationContext);
       await store.putImmutable(`manifest-${shared.manifestDigest}.json`,Buffer.from(canonicalArtifactJSON(shared)));
       manifestPersisted = true;
     } catch (error) {

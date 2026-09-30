@@ -22,10 +22,11 @@ export function assertImageId(id) {
   assertArtifact(typeof id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id), 'INVALID_IMAGE_ID');
   return id;
 }
-export async function authorizeArtifactBinding(authorize, binding, at, context) {
-  assertArtifact(typeof authorize === 'function', 'AUTHORIZATION_DENIED');
+export async function authorizeArtifactBinding(authorize, binding, clock, context) {
+  assertArtifact(typeof authorize === 'function' && typeof clock === 'function', 'AUTHORIZATION_DENIED');
   const bound = immutableArtifactValue(binding);
   const proof = await authorize(bound, context);
+  const at = clock();
   assertArtifact(proof?.allowed === true && proof.bindingDigest === sha256(canonicalArtifactJSON(bound)), 'AUTHORIZATION_DENIED');
   assertArtifact(typeof proof.expiresAt === 'string' && Number.isFinite(Date.parse(at)) &&
     Number.isFinite(Date.parse(proof.expiresAt)) && Date.parse(proof.expiresAt) > Date.parse(at), 'AUTHORIZATION_EXPIRED');
@@ -108,7 +109,7 @@ export function createImageConsumerReceiver({contract, store, authorize, resolve
     assertOpaqueRef(output.artifactRef);
     const binding = {action:'receive', jobId, requestDigest, outputId:output.outputId, consumerRef,
       artifactRef:output.artifactRef, sha256:output.sha256, destinationRef:store.targetRef};
-    await authorizeArtifactBinding(authorize, binding, clock(), authorizationContext);
+    await authorizeArtifactBinding(authorize, binding, clock, authorizationContext);
     // Exclude hash/ref from this key: a changed same-output delivery conflicts instead of re-importing.
     const key = sha256(canonicalArtifactJSON({jobId,requestDigest,outputId:output.outputId,consumerRef}));
     const receiptName = `receipt-${key}.json`, bytesName = `received-${key}.bin`;
@@ -132,9 +133,10 @@ export function createImageConsumerReceiver({contract, store, authorize, resolve
     const verified = await verifyImageBytes(bytes, {mimeType:output.mimeType, expectedSha256:output.sha256,
       expectedWidth:output.width, expectedHeight:output.height, decode, checkedAt:clock()});
     assertArtifact(verified.byteLength === output.byteLength && verified.width === output.width && verified.height === output.height, 'HASH_MISMATCH');
-    // Recheck current permission after I/O and before durable receiving effects or replay return.
-    await authorizeArtifactBinding(authorize, binding, clock(), authorizationContext);
+    // Recheck both before durable byte effects and after that awaited I/O before a receipt.
+    await authorizeArtifactBinding(authorize, binding, clock, authorizationContext);
     await store.putImmutable(bytesName,bytes);
+    await authorizeArtifactBinding(authorize, binding, clock, authorizationContext);
     if (receipt) return {receipt, reused:true};
     receipt = contract.validateImageReceipt({schemaVersion:'chatbridge.image.receipt.v1', receiptId:`receipt-${key}`,
       consumerRef, jobId, requestDigest, outputId:output.outputId, artifactRef:output.artifactRef,
