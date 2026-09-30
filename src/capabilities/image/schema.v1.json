@@ -1034,6 +1034,13 @@
         "updatedAt": {
           "type": "string",
           "format": "date-time"
+        },
+        "outputRevisions": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/OutputRevision"
+          }
         }
       },
       "required": [
@@ -1303,6 +1310,191 @@
       },
       "required": [
         "session"
+      ]
+    },
+    "RevisionOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "outputId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "jobId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "attemptId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "turnId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "artifactRef": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 512,
+          "pattern": "^(artifact|store|urn):[^\\s]+$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "mimeType": {
+          "enum": [
+            "image/png",
+            "image/jpeg",
+            "image/webp"
+          ]
+        },
+        "byteLength": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000000
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "sourceHashes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "maxItems": 8
+        },
+        "parentOutputId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseRevisionId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "capabilityVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "capabilityObservedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "maxItems": 32
+        }
+      },
+      "required": [
+        "outputId",
+        "jobId",
+        "attemptId",
+        "turnId",
+        "artifactRef",
+        "sha256",
+        "mimeType",
+        "byteLength",
+        "width",
+        "height",
+        "sourceHashes",
+        "parentOutputId",
+        "baseRevisionId",
+        "capabilityVersion",
+        "capabilityObservedAt",
+        "warnings"
+      ]
+    },
+    "OutputRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": "chatbridge.image.revision.v1"
+        },
+        "revisionId": {
+          "type": "string",
+          "pattern": "^cbimg-r1:[a-f0-9]{64}$"
+        },
+        "requestDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "operation": {
+          "enum": [
+            "generate",
+            "edit",
+            "refine",
+            "export"
+          ]
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BaseRevision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Source"
+          },
+          "maxItems": 8
+        },
+        "mask": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Mask"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output": {
+          "$ref": "#/$defs/RevisionOutput"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "revisionId",
+        "requestDigest",
+        "operation",
+        "parent",
+        "inputs",
+        "mask",
+        "output"
       ]
     }
   }

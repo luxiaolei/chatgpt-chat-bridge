@@ -266,7 +266,10 @@ export function createImageExporter({contract, store, authorize, readOriginal, d
         errors:[...errors,{outputId:null,code:safeArtifactCode(error)}],checkedAt:clock(),validateOutput:contract.validateImageOutput});
       shared = publicImageManifest(manifest);
     }
-    return {status:manifest.status,manifest,publicManifest:shared,manifestPersisted,
+    // Separate versioned revision descriptors leave v1 immutable originals/manifests unchanged.
+    const outputRevisions=typeof contract.imageOutputRevision === 'function'
+      ? manifest.outputs.filter(o=>o.validation.status === 'VERIFIED').map(o=>contract.imageOutputRevision(request,o)) : [];
+    return {status:manifest.status,manifest,publicManifest:shared,manifestPersisted,outputRevisions,
       manifestRef:manifestPersisted ? `artifact:cbimg-manifest:${sha256(store.targetRef)}:${shared.manifestDigest}` : null};
   }});
 }

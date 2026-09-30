@@ -2706,9 +2706,10 @@ def image_access(db, grant, payload):
 
 def image_sources(db, request):
     source_turn_id = None
+    sources = []
     for source in request["inputs"]:
         if not source["jobId"]:
-            continue  # Imported external artifacts require an explicit source grant.
+            raise ValueError("IMAGE_EXTERNAL_SOURCE_REVISION_UNSUPPORTED")
         parent = db.execute("SELECT document FROM image_jobs WHERE caller_ref=? AND job_id=?",
                             (request["caller"]["ref"],source["jobId"])).fetchone()
         if not parent:
@@ -2720,16 +2721,20 @@ def image_sources(db, request):
         if (not output or output["artifactRef"] != source["artifactRef"] or output["sha256"] != source["sha256"]
                 or output["validation"]["status"] != "VERIFIED"):
             raise ValueError("IMAGE_SOURCE_NOT_VERIFIED")
+        revision = image_contract("output-revision", {"request": parent["request"], "output": output})
+        if source["revisionId"] != revision["revisionId"]:
+            raise ValueError("IMAGE_SOURCE_REVISION_MISMATCH")
+        sources.append({"source": source, "revision": revision})
         if (request["conversationPolicy"] == "same-source" or request["operation"] == "export") and parent["route"] != request["route"]:
             raise ValueError("IMAGE_SOURCE_CONVERSATION_MISMATCH")
         if source["role"] == "source":
             source_turn_id = output["turnId"]
-    return source_turn_id
+    return {"sourceTurnId": source_turn_id, "sources": sources}
 
 
 def image_admission(db, row, request):
     image_route(db, row, request)
-    source_turn_id = image_sources(db, request)
+    sources = image_sources(db, request)
     if row["status"] != "SENT":
         raise ValueError("IMAGE_CONTROLLER_DELIVERY_NOT_CONFIRMED")
     if db.execute("SELECT 1 FROM task_results WHERE task_id=? LIMIT 1", (row["task_id"],)).fetchone():
@@ -2742,7 +2747,7 @@ def image_admission(db, row, request):
     task = (runtime(db).get("tasks") or {}).get(row["task_id"]) or {}
     if task.get("watchdogPausedForUserControl"):
         raise ValueError("IMAGE_USER_CONTROL_PAUSED")
-    return source_turn_id
+    return sources
 
 
 def image_session_reservations(db, session):
@@ -2817,11 +2822,11 @@ def image_local_read(config, state, command, payload):
                     if attempt_expires <= instant:
                         raise ValueError("IMAGE_ATTEMPT_DEADLINE")
                     expires = min(expires, attempt_expires)
-                image_admission(db, operation, grant["request"])
+                sources = image_admission(db, operation, grant["request"])
                 gate = image_contract("gate", {"request": grant["request"], "capabilities": grant["capabilities"], "at": now})
                 if not gate["allowed"]:
                     raise ValueError(gate["reason"])
-                return {"allowed": True, "expiresAt": expires.isoformat()}
+                return {"allowed": True, "expiresAt": expires.isoformat(), "sources": sources["sources"]}
         rows = image_session_reservations(db, session)
         owned = False
         if key and len(rows) == 1 and (rows[0]["caller_ref"],rows[0]["job_id"]) == (key["callerRef"],key["jobId"]):
@@ -2886,9 +2891,9 @@ def image_api(db, command, payload):
                     else:
                         if not active:
                             raise ValueError("IMAGE_GRANT_EXPIRED_OR_REVOKED")
-                        source_turn_id = image_admission(db, operation, request)
+                        sources = image_admission(db, operation, request)
                         value = image_contract("initial", {"grant": grant, "at": now})
-                        value["sourceTurnId"] = source_turn_id
+                        value["sourceTurnId"] = sources["sourceTurnId"]
                         db.execute("""INSERT INTO image_jobs(caller_ref,job_id,controller_operation_id,request_digest,
                             revision,status,document,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)""",
                             (*identity, grant["controllerOperationId"], request["requestDigest"], 1, value["status"], json.dumps(value), now, now))

@@ -190,6 +190,17 @@ test('official assisted original exports produce exact contract fields but no re
   assert.deepEqual(r.manifest.outputs[0].validation.checks,{magic:true,mime:true,decode:true,hash:true,count:true});
   assert.equal(s.calls.get('out-1'),1);assert.ok(!JSON.stringify(r).includes(s.root));
 });
+test('versioned revision descriptors preserve existing v1 original records and manifest bytes',async t=>{
+  const contract=await import('../src/capabilities/image/contract.js');
+  const s=await setup(t,{contract:{...contract,imageOutputRevision:undefined}});
+  const before=await s.exporter.exportOriginals(s.options);assert.deepEqual(before.outputRevisions,[]);
+  const names=await fs.readdir(s.root),snapshots=await Promise.all(names.map(n=>fs.readFile(join(s.root,n))));
+  const after=await createImageExporter({...s.config,contract}).exportOriginals(s.options);
+  assert.deepEqual(after.manifest,before.manifest);assert.deepEqual(after.publicManifest,before.publicManifest);
+  assert.deepEqual(after.outputRevisions,[contract.imageOutputRevision(s.req,after.manifest.outputs[0])]);
+  assert.deepEqual(await fs.readdir(s.root),names);assert.equal(s.calls.get('out-1'),1);
+  for(const [i,name] of names.entries())assert.deepEqual(await fs.readFile(join(s.root,name)),snapshots[i]);
+});
 test('new exporter instance resumes successful original without re-fetch',async t=>{
   const s=await setup(t);const first=await s.exporter.exportOriginals(s.options);
   const second=await createImageExporter(s.config).exportOriginals(s.options);

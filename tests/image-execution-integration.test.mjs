@@ -138,7 +138,7 @@ test('assisted official Save bytes pass C decode/manifest and A export; same hos
     assert.equal(exported.manifest.deliveryStatus,'NOT_RECEIVED');assert.deepEqual(exported.manifest.exportModes,['ASSISTED']);
     const output=f.api.inspect(setup.key).outputs[0];assert.equal(output.sha256,sha256);assert.equal(output.width,2);
     assert.equal(f.sql('select count(*) from task_results')[0][0],0);
-    const source={artifactRef:output.artifactRef,sha256,revisionId:'fixture-v1',jobId:r.jobId,outputId:output.outputId};
+    const source={artifactRef:output.artifactRef,sha256,revisionId:exported.outputRevisions[0].revisionId,jobId:r.jobId,outputId:output.outputId};
     const edit=f.request({jobId:'edit-1',operation:'edit',inputs:[{...source,role:'source'}],baseRevision:source});
     const editSetup=f.setup(edit,f.grant(edit,'grant-edit'));
     const editIO=await createHostImageArtifacts({api:f.api,key:editSetup.key,stateDir:await realpath(f.state),decode});
@@ -463,7 +463,7 @@ test('real main factories execute ASSISTED reservation, exact-owner observation 
     const exported=await imageCli('import-original',settled.importPayload,{coordinated:f.call,stateDir:await realpath(f.state),decode});
     assert.equal(exported.status,'TECHNICALLY_VALIDATED');assert.equal(exported.deliveryStatus,'NOT_RECEIVED');assert.ok(inspections>0);
     const output=f.api.inspect(key).outputs[0],baseRevision={artifactRef:output.artifactRef,sha256:output.sha256,
-      revisionId:'manual-v1',jobId:r.jobId,outputId:output.outputId};
+      revisionId:exported.outputRevisions[0].revisionId,jobId:r.jobId,outputId:output.outputId};
     const edit=f.request({jobId:'manual-edit',operation:'edit',route:r.route,inputs:[{...baseRevision,role:'source'}],baseRevision});
     const editGrant=f.grant(edit,'manual-edit-grant');for(const feature of ['edit','export'])editGrant.capabilities.features[feature].mode='ASSISTED';
     const editKey=f.setup(edit,editGrant).key;
@@ -510,7 +510,7 @@ test('real final Send/upload gates reject authority, route, draft, baseline and 
           const io=await createHostImageArtifacts({api:f.api,key,stateDir:await realpath(f.state),decode,coordinated:f.call}),inbox=await io.prepareInbox();
           await writeFile(inbox.originalPath,bytes,{mode:0o600});
           await io.importOfficialOriginal({...inbox,path:inbox.originalPath,operatorRef:f.owner,sha256,outputId:'output-1',mimeType:'image/png',officialSave:{confirmed:true,requestDigest:r.requestDigest,attemptId:ready.attempts[0].attemptId,turnId:'new-assistant',outputId:'output-1',originalRef:inbox.originalRef,route:r.route}});
-          const output=f.api.inspect(key).outputs[0],baseRevision={artifactRef:output.artifactRef,sha256:output.sha256,revisionId:'gate-v1',jobId:r.jobId,outputId:output.outputId};
+          const output=f.api.inspect(key).outputs[0],baseRevision={artifactRef:output.artifactRef,sha256:output.sha256,revisionId:f.api.result(key).outputRevisions[0].revisionId,jobId:r.jobId,outputId:output.outputId};
           r=f.request({jobId:'gate-edit',operation:'edit',route:r.route,inputs:[{...baseRevision,role:'source'}],baseRevision});g=f.grant(r,'gate-edit-grant');({key}=f.setup(r,g));
         }
         for(const name of ['control-routing','page-pool','liveness-policy','task-policy','web-policy','model-policy','session-policy'])await import(`../src/${name}.js`);
