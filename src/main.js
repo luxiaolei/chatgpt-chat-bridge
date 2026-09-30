@@ -1296,8 +1296,16 @@ async function openModelMenu(page) {
     return {count:1};
   });
   if(marked.count!==1) throw new Error("Model/effort button "+(marked.count?"ambiguous":"not found"));
-  try { await page.click('[data-chat-bridge-model-button="1"]'); }
-  catch { throw new Error("Model/effort button disappeared before menu open"); }
+  const opened=await page.evaluate(() => {
+    const items=[...document.querySelectorAll('[data-chat-bridge-model-button="1"]')];
+    if(items.length!==1) return false;
+    const button=items[0], style=getComputedStyle(button);
+    if(!button.isConnected || !button.getClientRects().length || style.visibility==="hidden" || style.display==="none" ||
+      button.closest('[inert], [data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]')) return false;
+    button.click();
+    return true;
+  });
+  if(!opened) throw new Error("Model/effort button disappeared before menu open");
   await page.waitForFunction(()=>[...document.querySelectorAll('[role="menuitemradio"]')].some(e=>{
     const style=getComputedStyle(e);
     return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none";
