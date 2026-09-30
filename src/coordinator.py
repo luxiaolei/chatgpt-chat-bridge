@@ -2585,14 +2585,17 @@ def image_session_reservations(db, session):
     if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='image_jobs'").fetchone():
         return []
     # ponytail: scan saved jobs; index real session identity if job volume makes this hot.
-    # Failure/cancel/deadline is not remote settlement. GENERATED/PARTIAL are positive
-    # native completion observations; an export-only job never sends a generation.
+    # Failure/cancel/deadline is not remote settlement. Only GENERATED/PARTIAL can
+    # populate turn-bound candidate IDs; those survive later export/read failures.
+    # An export-only job never sends a generation.
     return db.execute("""SELECT caller_ref,job_id,document FROM image_jobs
         WHERE json_extract(document,'$.route.accountId')=?
           AND json_extract(document,'$.route.conversationId')=?
           AND json_extract(document,'$.request.operation')!='export'
           AND EXISTS (SELECT 1 FROM json_each(image_jobs.document,'$.attempts')
-            WHERE json_extract(value,'$.status') NOT IN ('FAILED_PRE_SEND','GENERATED','PARTIAL'))""",
+            WHERE json_extract(value,'$.status')!='FAILED_PRE_SEND'
+              AND (json_extract(value,'$.turnId') IS NULL
+                   OR coalesce(json_array_length(value,'$.candidateOutputIds'),0)=0))""",
         (session["accountId"],session["conversationId"])).fetchall()
 
 

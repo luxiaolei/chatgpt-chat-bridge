@@ -161,6 +161,12 @@ hint fails closed. A supplied key must pass existing grant access and exact
 real-session binding. `reservedByJob` is true only when that saved grant/job is
 the **sole** unresolved reservation; conflicting legacy rows make it false.
 This is occupancy evidence, not current grant or I/O authorization.
+Positive completion remains settled even if later original export or reading
+fails. The query uses retained turn-bound candidate IDs, which only validated
+GENERATED/PARTIAL observations can populate; a merely generating turn has none.
+The reducer uses that same retained fact to reject later GENERATING regression
+and permit original-export recovery, keeping authorization, lineage and late
+result quarantine checks intact.
 
 `authorizeIO(key)` calls `image-io-admission` with the exact Key. It uses the
 same query-only read path and requires the persisted job's current grant,

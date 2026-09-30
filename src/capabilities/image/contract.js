@@ -242,8 +242,9 @@ export function applyImageEvent(record, event, grant, {at = new Date().toISOStri
     const timedOut=Date.parse(at)-Date.parse(attempt.startedAt) > request.budget.maxDurationMs;
     const late=expired || timedOut || Boolean(job.cancelRequestedAt) || attempt !== job.attempts.at(-1)
       || ['FAILED','CANCELLED','BLOCKED'].includes(job.status);
+    const completionObserved=Boolean(attempt.turnId) && attempt.candidateOutputIds.length > 0;
     if (event.type === 'export') {
-      if (!['GENERATED','PARTIAL'].includes(attempt.status) || !attempt.turnId) fail('IMAGE_NEW_TURN_REQUIRED');
+      if (!completionObserved) fail('IMAGE_NEW_TURN_REQUIRED');
       const gate=imageCapabilityGate({...request,operation:'export',inputs:[],mask:null,count:1},grant.capabilities,at);
       if (!gate.allowed) fail(gate.reason);
       if (!Array.isArray(event.outputs) || !event.outputs.length || event.outputs.length > request.count) fail('IMAGE_EXPORT_OUTPUTS');
@@ -266,7 +267,7 @@ export function applyImageEvent(record, event, grant, {at = new Date().toISOStri
     } else {
       if (!['SUBMISSION_UNKNOWN','GENERATING','GENERATED','PARTIAL','FAILED_PRE_SEND','FAILED','BLOCKED','EXPORT_UNAVAILABLE'].includes(event.status)) fail('IMAGE_OBSERVATION_STATUS');
       if (event.status === 'SUBMISSION_UNKNOWN' && attempt.status !== 'SUBMISSION_UNKNOWN') fail('IMAGE_KNOWN_DELIVERY_NOT_UNKNOWN');
-      if (['GENERATED','PARTIAL'].includes(attempt.status) && event.status === 'GENERATING') fail('IMAGE_GENERATION_ALREADY_OBSERVED');
+      if (completionObserved && event.status === 'GENERATING') fail('IMAGE_GENERATION_ALREADY_OBSERVED');
       if (event.status === 'FAILED_PRE_SEND') {
         if (event.beforeSend !== true || attempt.userMessageId || attempt.turnId || !['SUBMISSION_UNKNOWN','FAILED_PRE_SEND'].includes(attempt.status)) fail('IMAGE_NOT_SUBMITTED_PROOF_REQUIRED');
       } else if (['GENERATING','GENERATED','PARTIAL'].includes(event.status)) {
