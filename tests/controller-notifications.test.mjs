@@ -15,18 +15,18 @@ function fixture() {
   return {calls:[],events:[],reg:{defaultAccount:'new',accounts:{new:{identity:'new-login'},owner:{identity:'owner-login'}},
     projects:{P:{activeAccount:'new',rootController:'00-g',lifecycle:{autoReconcile:true,minGapSec:0},
       bindings:{new:{projectUrl:'https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef/project'},owner:{projectUrl:'https://chatgpt.com/g/g-p-fedcba9876543210fedcba9876543210/project'}}}},
-    chats:{root:{id:'root',project:'P',account:'owner',role:'00-g',status:'active'}}},
+    chats:{root:{id:'root',project:'P',account:'owner',role:'00-g',status:'active',url:'https://chatgpt.com/c/11111111-1111-4111-8111-111111111111'}}},
     runtime:{tasks:{T:{...progress}},projects:{P:{}},sessions:{}}};
 }
 async function harness(f) {
   return new AsyncFunction('f',source+`
     const reg=f.reg;
-    loadRuntime=async()=>structuredClone(f.runtime);
-    saveRuntime=async value=>{f.runtime=structuredClone(value);};
+    loadRuntime=async()=>{if((f.loads=(f.loads||0)+1)===f.loadFailAt)throw new Error('STATE_READ_DEFERRED');return structuredClone(f.runtime);};
+    saveRuntime=async value=>{if((f.saves=(f.saves||0)+1)===f.saveFailAt || f.saveAlwaysFail)throw new Error('STATE_STORE_DEFERRED');f.runtime=structuredClone(value);};
     assertWebAvailable=async account=>{f.calls.push(['cooldown',account]);};
     ensurePage=async(_reg,chat,options)=>{f.calls.push(['page',chat.id,options]);if(f.pause){const e=new Error('user control');e.code='SPACE_IN_USER_CONTROL';throw e;}return {page:{}};};
     observeSession=async()=>({inputReady:true,generating:false,sessionState:'IDLE_COMPLETE',...f.observed});
-    sendMessage=async(_page,message)=>{f.calls.push(['send',message]);if(f.deliveryError){const e=new Error('DELIVERY_UNCONFIRMED');e.code='DELIVERY_UNCONFIRMED';e.deliveryStage='SEND_ATTEMPTED';throw e;}return {delivered:true};};
+    sendMessage=async(_page,message)=>{f.calls.push(['send',message]);f.markerAtSend=structuredClone(f.runtime.projects.P.pendingReconcileEvent);if(f.deliveryError||f.preSendError){const e=new Error('DELIVERY_UNCONFIRMED');e.code='DELIVERY_UNCONFIRMED';e.deliveryStage=f.preSendError?'PRE_SEND':'SEND_ATTEMPTED';throw e;}return {delivered:true};};
     emitTaskEvent=async(task,type,data)=>f.emit?f.emit(task,type,data):(f.events.push({taskId:task.taskId,type,data}),{cursor:'event-'+f.events.length});
     coordinated=(command,payload)=>{f.calls.push([command,payload]);return f.coordinate?f.coordinate(command,payload):{status:'QUEUED',operationId:'op'};};
     detachTerminalTaskPages=async()=>[];
@@ -150,6 +150,40 @@ test('unconfirmed lifecycle delivery retains its event and never retries on a la
   f.deliveryError=false;
   assert.equal((await api.maybeNotifyProjectReconcile(f.reg,'P')).state,'DELIVERY_UNCONFIRMED');
   assert.equal(sent(f).length,1);
+});
+
+test('lifecycle reserves its attempted event before Send and state failures cannot duplicate it',async()=>{
+  for(const mode of ['reservation-save','receipt-save','receipt-read']) {
+    const f=fixture();f.loads=0;f.saves=0;
+    if(mode==='reservation-save') f.saveFailAt=1;
+    if(mode==='receipt-save') f.saveFailAt=2;
+    if(mode==='receipt-read') f.loadFailAt=2;
+    const api=await harness(f),first=await api.maybeNotifyProjectReconcile(f.reg,'P');
+    if(mode==='reservation-save') {assert.equal(first.state,'NOT_SENT');assert.equal(sent(f).length,0);}
+    else {
+      assert.equal(first.state,'DELIVERY_UNCONFIRMED',mode);
+      assert.equal(f.markerAtSend.deliveryStage,'SEND_ATTEMPTED');
+      assert.equal(f.markerAtSend.attemptedOwnerSessionRef,'root');
+      assert.equal(f.markerAtSend.attemptedTargetUrl,f.reg.chats.root.url);
+      assert.equal(f.markerAtSend.eventKey,first.eventKey);
+    }
+    const second=await api.maybeNotifyProjectReconcile(f.reg,'P');
+    assert.equal(second.state,mode==='reservation-save'?'SENT':'DELIVERY_UNCONFIRMED',mode);
+    assert.equal(sent(f).length,1,mode);
+  }
+  const f=fixture();f.saveAlwaysFail=true;
+  const failure=await (await harness(f)).maybeNotifyProjectReconcile(f.reg,'P');
+  assert.match(failure.error,/STATE_STORE_DEFERRED/);assert.equal(failure.deliveryStage,'PRE_SEND');
+  assert.equal(sent(f).length,0);
+});
+
+test('only an explicit pre-send failure releases the lifecycle attempt reservation',async()=>{
+  const f=fixture();f.preSendError=true;
+  const api=await harness(f);
+  assert.equal((await api.maybeNotifyProjectReconcile(f.reg,'P')).state,'NOT_SENT');
+  assert.notEqual(f.runtime.projects.P.pendingReconcileEvent.deliveryStage,'SEND_ATTEMPTED');
+  f.preSendError=false;
+  assert.equal((await api.maybeNotifyProjectReconcile(f.reg,'P')).state,'SENT');
 });
 
 test('unconfirmed watchdog continuation blocks the existing task instead of recovering it again',async()=>{

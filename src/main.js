@@ -1118,8 +1118,9 @@ async function observeSession(chat,page,task=null) {
 }
 
 function deliveryObserved(before, after, message=before?.expectedMessage) {
-  if(!before || !after?.lastUserId || !normalizedEvidenceText(message) ||
-    normalizedEvidenceText(after.lastUser)!==normalizedEvidenceText(message) ||
+  const expected=String(message||"").replace(/\s+/g," ").trim();
+  if(!before || !after?.lastUserId || !expected ||
+    String(after.lastUser||"").replace(/\s+/g," ").trim()!==expected ||
     after.lastUserId===before.lastUserId || (before.userMessageIds||[]).includes(after.lastUserId)) return false;
   const target=before.targetUrl||before.url;
   if(sameConversationUrl(after.url,target)) return true;
@@ -1138,7 +1139,7 @@ async function waitForDelivery(page, before, timeout=3000) {
   while(Date.now()<deadline) {
     await page.waitForTimeout(150);
     latest=await state(page);
-    if(normalizedEvidenceText(latest.lastUser)!==normalizedEvidenceText(before.expectedMessage)) {
+    if(!deliveryObserved(before,latest)) {
       await expandEvidenceMessages(page,true);
       latest=await state(page);
     }
@@ -1181,25 +1182,25 @@ async function triggerSend(page) {
 }
 
 async function sendMessage(page, msg, targetUrl=null) {
-  await assertImagePageFree(page);
-  await detectWebRateLimit(page,"send-before");
-  const before=await state(page,"ids");
-  assertComposerSafe(before);
-  if(targetUrl && !sameConversationUrl(before.url,targetUrl) &&
-    !(projectHomeId(before.url) && projectHomeId(before.url)===projectHomeId(targetUrl))) {
-    const error=new Error("DELIVERY_TARGET_MISMATCH");error.code=error.message;throw error;
-  }
-  before.expectedMessage=msg; before.targetUrl=targetUrl||before.url;
-  try { await page.fill(COMPOSER_SELECTOR,msg); }
-  catch {
-    await activateComposer(page);
-    await page.keyboard.press("ControlOrMeta+A");
-    await page.keyboard.press("Backspace");
-    await page.keyboard.insertText(msg);
-  }
-  await page.waitForTimeout(80);
   const attempts=[];
   try {
+    await assertImagePageFree(page);
+    await detectWebRateLimit(page,"send-before");
+    const before=await state(page,"ids");
+    assertComposerSafe(before);
+    if(targetUrl && !sameConversationUrl(before.url,targetUrl) &&
+      !(projectHomeId(before.url) && projectHomeId(before.url)===projectHomeId(targetUrl))) {
+      const error=new Error("DELIVERY_TARGET_MISMATCH");error.code=error.message;throw error;
+    }
+    before.expectedMessage=msg; before.targetUrl=targetUrl||before.url;
+    try { await page.fill(COMPOSER_SELECTOR,msg); }
+    catch {
+      await activateComposer(page);
+      await page.keyboard.press("ControlOrMeta+A");
+      await page.keyboard.press("Backspace");
+      await page.keyboard.insertText(msg);
+    }
+    await page.waitForTimeout(80);
     attempts.push(await triggerSend(page));
     const after=await waitForDelivery(page,before,8000);
     await detectWebRateLimit(page,"send-after");
@@ -1210,7 +1211,7 @@ async function sendMessage(page, msg, targetUrl=null) {
     }
     return {delivered:true,attempts,lastUserId:after.lastUserId,url:after.url,messageCount:after.messageCount};
   } catch(error) {
-    if(attempts.length) error.deliveryStage="SEND_ATTEMPTED";
+    error.deliveryStage ||= attempts.length?"SEND_ATTEMPTED":"PRE_SEND";
     throw error;
   }
 }
@@ -1956,7 +1957,7 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
   if(!candidate) return null;
   if(!candidate.ready) return {project:projectName,event:candidate.event,state:"DEFERRED_MIN_GAP",waitSec:candidate.waitSec,eventKey:candidate.eventKey};
   if(workgroupId && !group) return {project:projectName,workgroupId,event:candidate.event,state:"WORKGROUP_NOT_REGISTERED",eventKey:candidate.eventKey};
-  let owner=null;
+  let owner=null, attempt=null, sendReserved=false, delivery=null;
   try {
     if(candidate.ownerSessionRef?.startsWith("codex:"))
       return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"LOCAL_OWNER_REQUIRES_PULL",ownerSessionRef:candidate.ownerSessionRef,eventKey:candidate.eventKey};
@@ -1974,7 +1975,15 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
       return {project:projectName,workgroupId:workgroupId||null,ownerSessionRef:owner.id,event:candidate.event,state:workgroupId?"OWNER_BUSY":"ROOT_BUSY",eventKey:candidate.eventKey,
         rootState:observed.sessionState,composerNonempty:!!String(observed.composerText||"").trim()};
     }
-    const delivery=await sendMessage(page,projectReconcileMessage(candidate),owner.url);
+    attempt={...candidate,deliveryStage:"SEND_ATTEMPTED",attemptId:crypto.randomUUID(),
+      attemptedOwnerSessionRef:owner.id,attemptedTargetUrl:owner.url,attemptedAt:new Date().toISOString()};
+    const reserved={...scopedRuntime,pendingReconcileEvent:attempt};
+    if(workgroupId) runtimeProject.workgroups={...(runtimeProject.workgroups||{}),[workgroupId]:reserved};
+    else Object.assign(runtimeProject,reserved);
+    rt.projects[projectName]=runtimeProject;
+    await saveRuntime(rt);
+    sendReserved=true;
+    delivery=await sendMessage(page,projectReconcileMessage(candidate),owner.url);
     const latest=await loadRuntime();
     const currentProject={...(latest.projects[projectName]||{})};
     const state=workgroupId ? {...((currentProject.workgroups||{})[workgroupId]||{})} : currentProject;
@@ -1994,11 +2003,14 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
     return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"SENT",eventKey:candidate.eventKey,
       latestTaskId:candidate.latestTaskId,rootRole:workgroupId?null:candidate.rootRole,ownerSessionRef:owner.id,delivery};
   } catch(error) {
+    if(attempt && !sendReserved) return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,
+      state:"NOT_SENT",deliveryStage:"PRE_SEND",error:String(error?.message||error),eventKey:candidate.eventKey};
     const latest=await loadRuntime();
     const currentProject={...(latest.projects[projectName]||{})};
     const state=workgroupId ? {...((currentProject.workgroups||{})[workgroupId]||{})} : currentProject;
-    const pending=error.deliveryStage==="SEND_ATTEMPTED"
-      ? {...candidate,deliveryStage:"SEND_ATTEMPTED",attemptedOwnerSessionRef:owner?.id||null,attemptedTargetUrl:owner?.url||null} : candidate;
+    if(state.pendingReconcileEvent?.deliveryStage==="SEND_ATTEMPTED" && state.pendingReconcileEvent.attemptId!==attempt?.attemptId) throw error;
+    const uncertain=sendReserved && (delivery?.delivered || error.deliveryStage!=="PRE_SEND");
+    const pending=uncertain ? {...attempt,...(delivery?{delivery}:{})} : {...candidate,deliveryStage:"PRE_SEND"};
     if(error?.code==="SPACE_IN_USER_CONTROL") {
       Object.assign(state,{pendingReconcileEvent:pending,watchdogPausedForUserControl:true,
         watchdogPausedAt:new Date().toISOString(),
@@ -2019,7 +2031,7 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
     else Object.assign(currentProject,state);
     latest.projects[projectName]=currentProject;
     await saveRuntime(latest);
-    if(error.deliveryStage==="SEND_ATTEMPTED") return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"DELIVERY_UNCONFIRMED",eventKey:candidate.eventKey};
+    if(uncertain) return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"DELIVERY_UNCONFIRMED",error:String(error?.message||error),eventKey:candidate.eventKey};
     if(error?.code==="WEB_RATE_LIMITED") return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"WEB_COOLDOWN",account:error.account,eventKey:candidate.eventKey};
     return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"NOT_SENT",error:String(error?.message||error),eventKey:candidate.eventKey};
   }

@@ -54,6 +54,16 @@ test('first conversation navigation still needs exact message and fresh ID, and 
   assert.equal(deliveryObserved({...start,url:'https://untrusted.example/'},after,message),false);
 });
 
+test('delivery preserves literal disclosure words at either end of the actual message',async()=>{
+  const {deliveryObserved}=await harness();
+  for(const suffix of ['Show more','Show less','显示更多','收起']) {
+    const intended='bounded request '+suffix;
+    assert.equal(deliveryObserved(before,{...after,lastUser:intended},intended),true,suffix);
+    assert.equal(deliveryObserved(before,{...after,lastUser:'bounded request'},intended),false,suffix);
+    assert.equal(deliveryObserved(before,{...after,lastUser:intended},'bounded request'),false,suffix);
+  }
+});
+
 test('delivery polling ignores unrelated traffic until the bound message appears',async()=>{
   const f={snapshots:[{...after,lastUser:'unrelated'},after]};
   const api=await harness(f),page={waitForTimeout:async()=>{}};
@@ -79,7 +89,7 @@ test('send receipt binds the observed message ID and target, while target drift 
   assert.equal(result.lastUserId,'new-user');assert.equal(result.url,url);
   const drift={shortWait:true,snapshots:[{...before,url:'https://chatgpt.com/c/22222222-2222-4222-8222-222222222222'}],latest:after};
   const other=await harness(drift);
-  await assert.rejects(other.sendMessage({...page,fill:async()=>drift.calls.push(['fill'])},message,url),/DELIVERY_TARGET_MISMATCH/);
+  await assert.rejects(other.sendMessage({...page,fill:async()=>drift.calls.push(['fill'])},message,url),error=>error.code==='DELIVERY_TARGET_MISMATCH'&&error.deliveryStage==='PRE_SEND');
   assert.equal(drift.calls.some(([kind])=>kind==='fill'),false);
   assert.equal(other.attempted(),false);
 });
