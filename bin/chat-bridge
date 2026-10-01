@@ -41,7 +41,7 @@ emit_tempfail() {
   python3 - "$@" <<'PY'
 import json,math,sys
 code,status,reason,retry_after,until=sys.argv[1:]
-payload={"ok":False,"status":status,"reason":reason,"code":code,
+payload={"ok":False,"deliveryStage":"PRE_SEND","status":status,"reason":reason,"code":code,
          "retryAfterSec":max(1,math.ceil(float(retry_after)))}
 if until: payload["until"]=until
 print(json.dumps(payload,ensure_ascii=False))

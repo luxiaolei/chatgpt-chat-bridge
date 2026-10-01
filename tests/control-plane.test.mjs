@@ -28,6 +28,10 @@ async function fixture({twoAccounts=false,sessionRef="controller"}={}) {
   const fake=path.join(root,"bridge-worker");
   await writeFile(fake,`#!/bin/sh
 printf '%s\n' "$*" >> "${log}"
+if [ -n "$CHAT_BRIDGE_TEST_RECEIPT" ]; then
+  printf '%s\\n' "$CHAT_BRIDGE_TEST_RECEIPT" >&2
+  exit "\${CHAT_BRIDGE_TEST_EXIT:-75}"
+fi
 if [ -n "$CHAT_BRIDGE_TEST_FAIL_STAGE" ]; then
   printf '[error] {"ok":false,"deliveryStage":"%s","code":"%s"}\\n' "$CHAT_BRIDGE_TEST_FAIL_STAGE" "\${CHAT_BRIDGE_TEST_FAIL_CODE:-SIMULATED}" >&2
   exit 1
@@ -300,9 +304,12 @@ test("reconciliation distinguishes deferred evidence reads without replaying del
     const before=parse(f.call("status",[op.operationId]));
     const lock={code:"PACING_DEFERRED",status:"DEFERRED",reason:"UI_LOCK_BUSY",retryAfterSec:5};
     const cases=[
-      ["UI lock",75,{ok:false,...lock,privateDetail:"not returned"},lock],
-      ["UI pacing",75,{ok:false,...lock,reason:"UI_PACING",retryAfterSec:17},{...lock,reason:"UI_PACING",retryAfterSec:17}],
-      ["Web cooldown",75,{ok:false,code:"WEB_COOLDOWN_ACTIVE",status:"DEFERRED",reason:"WEB_COOLDOWN",retryAfterSec:180},{code:"WEB_COOLDOWN_ACTIVE",status:"DEFERRED",reason:"WEB_COOLDOWN",retryAfterSec:180}],
+      ["UI lock",75,{ok:false,deliveryStage:"PRE_SEND",...lock,privateDetail:"not returned"},lock],
+      ["UI pacing",75,{ok:false,deliveryStage:"PRE_SEND",...lock,reason:"UI_PACING",retryAfterSec:17},{...lock,reason:"UI_PACING",retryAfterSec:17}],
+      ["Web cooldown",75,{ok:false,deliveryStage:"PRE_SEND",code:"WEB_COOLDOWN_ACTIVE",status:"COOLDOWN",reason:"CHATGPT_RATE_LIMIT",retryAfterSec:180},{code:"WEB_COOLDOWN_ACTIVE",status:"COOLDOWN",reason:"CHATGPT_RATE_LIMIT",retryAfterSec:180}],
+      ["send attempted",75,{ok:false,deliveryStage:"SEND_ATTEMPTED",...lock}],
+      ["missing stage",75,{ok:false,...lock}],
+      ["unknown stage",75,{ok:false,deliveryStage:"UNKNOWN",...lock}],
       ["read failure",1,{ok:false,code:"EVIDENCE_LOGIN_UNAVAILABLE"}],
       ["unrecognized tempfail",75,{ok:false,code:"EVIDENCE_LOGIN_UNAVAILABLE"}],
       ["unstructured tempfail",75,"evidence read failed"],
@@ -328,6 +335,87 @@ test("reconciliation distinguishes deferred evidence reads without replaying del
     const audit=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute(\"SELECT count(*) FROM reconciliation_attempts WHERE outcome='STILL_UNKNOWN' AND evidence IS NULL\").fetchone()[0]); print(d.execute(\"SELECT count(*) FROM reconciliation_attempts WHERE reason='CHAT_READ_DEFERRED'\").fetchone()[0]); print(d.execute('SELECT attempts,pre_send_failures FROM operations WHERE id=?',(sys.argv[2],)).fetchone())",path.join(f.state,"bridge.sqlite3"),op.operationId],{encoding:"utf8"});
     assert.equal(audit.status,0,audit.stderr);assert.equal(audit.stdout.trim(),`${cases.length}\n3\n(0, 0)`);
   } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test("temporary deferral requeues only a proven pre-send failure", async()=>{
+  const deferred={ok:false,code:"PACING_DEFERRED",status:"DEFERRED",reason:"UI_LOCK_BUSY",retryAfterSec:5};
+  const cooldown={...deferred,code:"WEB_COOLDOWN_ACTIVE",status:"COOLDOWN",reason:"CHATGPT_RATE_LIMIT"};
+  const cases=[
+    ["UI lock before send",{...deferred,deliveryStage:"PRE_SEND"},"QUEUED"],
+    ["UI pacing before send",{...deferred,reason:"UI_PACING",deliveryStage:"PRE_SEND"},"QUEUED"],
+    ["cooldown before send",{...cooldown,deliveryStage:"PRE_SEND"},"QUEUED"],
+    ["pacing after send attempt",{...deferred,deliveryStage:"SEND_ATTEMPTED"},"DELIVERY_UNKNOWN"],
+    ["cooldown after send attempt",{...cooldown,deliveryStage:"SEND_ATTEMPTED"},"DELIVERY_UNKNOWN"],
+    ["missing stage",deferred,"DELIVERY_UNKNOWN"],
+    ["unknown stage",{...deferred,deliveryStage:"UNKNOWN"},"DELIVERY_UNKNOWN"],
+    ["untyped stage",{...deferred,deliveryStage:{}},"DELIVERY_UNKNOWN"],
+    ["contradictory delivery",{...deferred,deliveryStage:"PRE_SEND",delivered:true},"DELIVERY_UNKNOWN"],
+    ["conflicting receipts",JSON.stringify({...deferred,deliveryStage:"PRE_SEND"})+"\n"+JSON.stringify({...deferred,deliveryStage:"SEND_ATTEMPTED"}),"DELIVERY_UNKNOWN"],
+    ["duplicate stage",JSON.stringify({...deferred,deliveryStage:"SEND_ATTEMPTED"}).slice(0,-1)+',"deliveryStage":"PRE_SEND"}',"DELIVERY_UNKNOWN"],
+  ];
+  for(const [label,receipt,status] of cases){
+    const f=await fixture();
+    try{
+      const parse=r=>{assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);};
+      const op=parse(f.call("submit",[],{requestId:"tempfail",callerRef:"controller",sessionRef:"controller",message:"synthetic bounded dispatch"}));
+      const outcome=parse(f.call("work-one",[],null,{CHAT_BRIDGE_TEST_RECEIPT:typeof receipt==="string"?receipt:JSON.stringify(receipt)}));
+      assert.equal(outcome.operationId,op.operationId,label);
+      assert.equal(outcome.status,status,label);
+      assert.equal(outcome.attempts,1,label);
+      if(status==="DELIVERY_UNKNOWN"){
+        assert.equal(parse(f.call("work-one")).status,"IDLE",label);
+        const retry=f.call("retry",["--operation",op.operationId]);
+        assert.equal(retry.status,2,label);assert.match(retry.stderr,/RETRY_REQUIRES_PROVEN_PRE_SEND_FAILURE/,label);
+      }
+      const counters=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('SELECT attempts,pre_send_failures FROM operations WHERE id=?',(sys.argv[2],)).fetchone())",path.join(f.state,"bridge.sqlite3"),op.operationId],{encoding:"utf8"});
+      assert.equal(counters.status,0,counters.stderr);assert.equal(counters.stdout.trim(),"(1, 0)",label);
+      assert.equal((await readFile(f.log,"utf8")).match(/^send controller /gm)?.length,1,label);
+    } finally {await rm(f.root,{recursive:true,force:true});}
+  }
+});
+
+test("worker receipt decoding handles mixed multiline output and rejects ambiguous or diagnostic JSON", ()=>{
+  const receipt={ok:true,delivered:true,taskId:"synthetic-task",delivery:{delivered:true,lastUserId:"synthetic-user-message",note:'quoted } { " braces'}};
+  const json=JSON.stringify(receipt), pretty=JSON.stringify(receipt,null,2);
+  const error={ok:false,deliveryStage:"PRE_SEND",code:"MODEL_MENU_NOT_READY"};
+  const cases=[
+    ["whole JSON",0,json,"",receipt],
+    ["JSON line with logs",0,"worker log\n"+json+"\nworker done","",receipt],
+    ["multiline stdout with diagnostics",0,pretty+"\n[ego-browser:pages]\nUnhandled page diagnostic","",receipt],
+    ["multiline stderr fallback",0,"worker log",pretty+"\n[ego-browser:pages]\nUnhandled page diagnostic",receipt],
+    ["prefixed multiline error",2,json,"[error] "+JSON.stringify(error,null,2),null],
+    ["stderr error before stdout diagnostics",2,'{"page":"diagnostic"}',"[error] "+JSON.stringify(error),error],
+    ["stdout receipt before stderr diagnostics",0,json,'{"page":"diagnostic"}',receipt],
+    ["repeated identical receipts",0,json+"\n"+pretty,json,receipt],
+    ["conflicting same-stream receipts",0,json+"\n"+JSON.stringify({...receipt,taskId:"different-task"}),"",null],
+    ["conflicting cross-stream receipts",0,json,JSON.stringify(error),null],
+    ["diagnostic object",0,'{"page":"diagnostic","nested":'+pretty+'}',"",null],
+    ["diagnostic array",0,JSON.stringify([receipt],null,2),"",null],
+    ["embedded diagnostic JSON",0,"page diagnostic "+json,"",null],
+    ["generic ok diagnostic",0,'{"ok":true}',"",null],
+    ["untyped delivery flag",0,'{"ok":true,"delivered":"true"}',"",null],
+    ["untyped success flag",0,'{"ok":"true","delivered":true}',"",null],
+    ["numeric success flag",0,'{"ok":1,"stopped":true}',"",null],
+    ["untyped error stage",2,'{"ok":false,"code":"ERROR","deliveryStage":{}}',"",null],
+    ["untyped deferral delay",75,'{"ok":false,"code":"PACING_DEFERRED","status":"DEFERRED","retryAfterSec":"5"}',"",null],
+    ["nonfinite deferral delay",75,'{"ok":false,"code":"PACING_DEFERRED","status":"DEFERRED","retryAfterSec":1e999}',"",null],
+    ["incomplete JSON",0,pretty.slice(0,-1),"",null],
+    ["incomplete diagnostic array",0,JSON.stringify([receipt],null,2).slice(0,-1),"",null],
+    ["legacy new-chat receipt",0,JSON.stringify({id:"synthetic-chat",project:"P",account:"a",url:"https://chatgpt.com/c/synthetic-chat"}),"",{id:"synthetic-chat",project:"P",account:"a",url:"https://chatgpt.com/c/synthetic-chat"}],
+    ["legacy stop receipt",0,'{"stopped":true}',"",{stopped:true}],
+    ["legacy delivery receipt",0,'{"delivered":true}',"",{delivered:true}],
+    ["duplicate receipt field",0,'{"ok":true,"delivered":false,"delivered":true}',"",null],
+    ["diagnostic id",0,'{"id":"page-label"}',"",null],
+  ];
+  const result=spawnSync("python3",["-B","-c",String.raw`
+import importlib.util,json,subprocess,sys
+spec=importlib.util.spec_from_file_location('receipt_coordinator',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+cases=json.load(sys.stdin)
+print(json.dumps([m.parse_worker_receipt(subprocess.CompletedProcess([],c[1],c[2],c[3])) for c in cases]))
+`,coordinator],{input:JSON.stringify(cases),encoding:"utf8"});
+  assert.equal(result.status,0,result.stderr);
+  const parsed=JSON.parse(result.stdout);
+  for(const [index,item] of cases.entries()) assert.deepEqual(parsed[index],item[4],item[0]);
 });
 
 test("queued notifications wait for a committed successor and then follow it", async()=>{
