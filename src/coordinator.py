@@ -138,7 +138,8 @@ def connection(config, state, initialize=True):
     if initialize:
         subprocess.run([sys.executable, str(pathlib.Path(__file__).with_name("state-store.py")), "get", str(config), str(state), "registry"],
                        check=True, stdout=subprocess.DEVNULL, timeout=20)
-    db = sqlite3.connect(state / "bridge.sqlite3", timeout=30)
+    path = state / "bridge.sqlite3"
+    db = sqlite3.connect(path if initialize else path.resolve().as_uri() + "?mode=rw", uri=not initialize, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA busy_timeout=30000")
     if not initialize:
@@ -3645,7 +3646,16 @@ def main():
     if command in {"image-session-occupancy", "image-io-admission", "image-output-io-admission", "image-delivery-io-admission", "image-delivery-receipt"}:
         print(json.dumps(image_local_read(config, state, command, json.load(sys.stdin))))
         return
-    db = connection(config, state, initialize=command != "native-admission")
+    if command in {"admission-check", "local-owner-contract"} and (state / "bridge.sqlite3").exists():
+        db = connection(config, state, initialize=False)
+        db.execute("PRAGMA query_only=ON")
+        table = "control_state" if command == "admission-check" else "operations"
+        # Legacy documents-only stores still need the first queue/control bootstrap.
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone():
+            db.close()
+            db = connection(config, state)
+    else:
+        db = connection(config, state, initialize=command != "native-admission")
     try:
         if command == "image-batch-create":
             value = image_batch_create(db, json.load(sys.stdin))
