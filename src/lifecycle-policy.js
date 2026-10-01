@@ -73,6 +73,8 @@
       reason: "DOMAIN_IDLE_WITH_DURABLE_PROGRESS",
       project: projectName,
       ...(groupScoped ? {workgroupId, ownerSessionRef: clean(scope?.ownerSessionRef)} : {}),
+      ...(!groupScoped && clean(durable.replyToSessionRef || durable.controllerSessionRef)
+        ? {ownerSessionRef: clean(durable.replyToSessionRef || durable.controllerSessionRef)} : {}),
       rootRole: policy.reconcileRole,
       latestTaskId: durable.taskId || null,
       latestGithub: durable.github || null,
@@ -95,7 +97,7 @@
       const scopedRuntime = (runtimeProject.workgroups || {})[workgroupId] || {};
       const candidate = reconcileCandidate(projectName, project, tasks, scopedRuntime, nowMs, {
         workgroupId,
-        ownerSessionRef: group.controllerSessionRef,
+        ownerSessionRef: group.controllerSessionRef || group.ownerSessionRef,
       });
       if (candidate) candidates.push(candidate);
     }

@@ -12,7 +12,7 @@ async function fixture(autoReconcile=true, consumed=false) {
   const registry={defaultAccount:"default",accounts:{default:{name:"default"}},projects:{
     P:{name:"P",activeAccount:"default",rootController:"root",bindings:{},
       lifecycle:{autoReconcile,minGapSec:0}}
-  },chats:{}};
+  },chats:{root:{id:"root",project:"P",account:"default",role:"root",status:"active"}}};
   const runtime={version:2,projects:{P:consumed?{lastReconcileProgressAt:"2026-09-24T06:00:00Z"}:{}},tasks:{
     A:{taskId:"A",project:"P",role:"worker",status:"COMPLETE",github:"https://example/A",updatedAt:"2026-09-24T06:00:00Z"}
   },sessions:{}};

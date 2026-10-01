@@ -885,15 +885,19 @@ function normalizedEvidenceText(text) {
     .replace(/\s+(?:Show more|Show less|显示更多|收起)$/i,"").trim();
 }
 
-async function expandEvidenceMessages(page) {
+async function expandEvidenceMessages(page, latestOnly=false) {
   for(let pass=0;pass<3;pass++) {
-    const expanded=await page.evaluate(()=>{
-      const buttons=[...document.querySelectorAll('button')].filter(button=>
+    const expanded=await page.evaluate((latestOnly)=>{
+      let buttons=[...document.querySelectorAll('button')].filter(button=>
         /^(?:Show more|显示更多|展开)$/i.test((button.innerText||button.getAttribute('aria-label')||'').trim()) &&
         button.closest('[data-message-author-role="user"], [data-chatgpt-search-unit-key$=":user"], [data-content-search-unit-key$=":user"]'));
+      if(latestOnly) {
+        const latest=[...document.querySelectorAll('[data-message-author-role="user"], [data-chatgpt-search-unit-key$=":user"], [data-content-search-unit-key$=":user"]')].at(-1);
+        buttons=buttons.filter(button=>latest?.contains(button));
+      }
       for(const button of buttons) button.click();
       return buttons.length;
-    });
+    },latestOnly);
     if(!expanded) break;
     await page.waitForTimeout(150);
   }
@@ -1044,7 +1048,8 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       online:navigator.onLine,visibility:document.visibilityState,pageWasDiscarded:!!document.wasDiscarded,
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,
       lastAssistantTextSource:lastAssistantMsg?.textSource||'rendered-dom',
-      userMessages:includeUserMessages?ms.filter(x=>x.role==='user'):undefined,
+      userMessages:includeUserMessages===true?ms.filter(x=>x.role==='user'):undefined,
+      userMessageIds:includeUserMessages?ms.filter(x=>x.role==='user').map(x=>x.id).filter(Boolean):undefined,
       messageCount:ms.length,assistantCount:ms.filter(x=>x.role==='assistant').length,
       assistantChars:lastAssistant?.length||0,
       mutationSeq:globalThis.__CHAT_BRIDGE_WATCH.seq,
@@ -1112,12 +1117,20 @@ async function observeSession(chat,page,task=null) {
   return hb;
 }
 
-function deliveryObserved(before, after) {
-  if(!after) return false;
-  if(after.messageCount>before.messageCount && after.lastUser) return true;
-  if(after.lastUserId && after.lastUserId!==before.lastUserId) return true;
-  if(after.url && before?.url && after.url!==before.url && /\/c\/[0-9a-f-]+/i.test(after.url)) return true;
-  return false;
+function deliveryObserved(before, after, message=before?.expectedMessage) {
+  const expected=String(message||"").replace(/\s+/g," ").trim();
+  if(!before || !after?.lastUserId || !expected ||
+    String(after.lastUser||"").replace(/\s+/g," ").trim()!==expected ||
+    after.lastUserId===before.lastUserId || (before.userMessageIds||[]).includes(after.lastUserId)) return false;
+  const target=before.targetUrl||before.url;
+  if(sameConversationUrl(after.url,target)) return true;
+  if(!sameConversationUrl(after.url,after.url)) return false;
+  try {
+    const start=new URL(target);
+    if(start.origin!=="https://chatgpt.com" || start.username || start.password) return false;
+    const project=projectHomeId(target), observedProject=projectKey(projectIdFromUrl(after.url));
+    return (!!project || start.pathname==="/") && (!project || !observedProject || project===observedProject);
+  } catch { return false; }
 }
 
 async function waitForDelivery(page, before, timeout=3000) {
@@ -1126,6 +1139,10 @@ async function waitForDelivery(page, before, timeout=3000) {
   while(Date.now()<deadline) {
     await page.waitForTimeout(150);
     latest=await state(page);
+    if(!deliveryObserved(before,latest)) {
+      await expandEvidenceMessages(page,true);
+      latest=await state(page);
+    }
     if(deliveryObserved(before,latest)) return latest;
     await detectWebRateLimit(page,"send-verify");
   }
@@ -1152,45 +1169,51 @@ async function activateComposer(page) {
 
 async function triggerSend(page) {
   const hasSend=await page.evaluate(()=>!!document.querySelector('button[data-testid="send-button"]'));
-  if(hasSend) {
-    try { await page.click('button[data-testid="send-button"]'); return "click"; }
-    catch {}
+  sendAttempted=true;
+  try {
+    if(hasSend) {
+      await page.click('button[data-testid="send-button"]'); return "click";
+    }
+    await page.press(COMPOSER_SELECTOR,"Enter");
+    return "enter";
+  } catch(error) {
+    error.deliveryStage="SEND_ATTEMPTED";throw error;
   }
-  try { await page.press(COMPOSER_SELECTOR,"Enter"); return "enter"; }
-  catch {}
-  await activateComposer(page);
-  await page.keyboard.press("Enter");
-  return "enter";
 }
 
-async function sendMessage(page, msg) {
-  await assertImagePageFree(page);
-  await detectWebRateLimit(page,"send-before");
-  const before=await state(page);
-  assertComposerSafe(before);
-  try { await page.fill(COMPOSER_SELECTOR,msg); }
-  catch {
-    await activateComposer(page);
-    await page.keyboard.press("ControlOrMeta+A");
-    await page.keyboard.press("Backspace");
-    await page.keyboard.insertText(msg);
-  }
-  await page.waitForTimeout(80);
+async function sendMessage(page, msg, targetUrl=null) {
   const attempts=[];
-  sendAttempted=true;
-  attempts.push(await triggerSend(page));
-  let after=await waitForDelivery(page,before,8000);
-  if(!deliveryObserved(before,after) && String(after.composerText||"").trim()) {
+  try {
+    await assertImagePageFree(page);
+    await detectWebRateLimit(page,"send-before");
+    const before=await state(page,"ids");
+    assertComposerSafe(before);
+    if(targetUrl && !sameConversationUrl(before.url,targetUrl) &&
+      !(projectHomeId(before.url) && projectHomeId(before.url)===projectHomeId(targetUrl))) {
+      const error=new Error("DELIVERY_TARGET_MISMATCH");error.code=error.message;throw error;
+    }
+    before.expectedMessage=msg; before.targetUrl=targetUrl||before.url;
+    try { await page.fill(COMPOSER_SELECTOR,msg); }
+    catch {
+      await activateComposer(page);
+      await page.keyboard.press("ControlOrMeta+A");
+      await page.keyboard.press("Backspace");
+      await page.keyboard.insertText(msg);
+    }
+    await page.waitForTimeout(80);
     attempts.push(await triggerSend(page));
-    after=await waitForDelivery(page,before,8000);
+    const after=await waitForDelivery(page,before,8000);
+    await detectWebRateLimit(page,"send-after");
+    if(!deliveryObserved(before,after)) {
+      const err=new Error(`DELIVERY_UNCONFIRMED: composer=${after.composerPresent?"present":"missing"} text=${String(after.composerText||"").trim()?"nonempty":"empty"} attempts=${attempts.join(",")}`);
+      err.code="DELIVERY_UNCONFIRMED";
+      throw err;
+    }
+    return {delivered:true,attempts,lastUserId:after.lastUserId,url:after.url,messageCount:after.messageCount};
+  } catch(error) {
+    error.deliveryStage ||= attempts.length?"SEND_ATTEMPTED":"PRE_SEND";
+    throw error;
   }
-  await detectWebRateLimit(page,"send-after");
-  if(!deliveryObserved(before,after)) {
-    const err=new Error(`DELIVERY_UNCONFIRMED: composer=${after.composerPresent?"present":"missing"} text=${String(after.composerText||"").trim()?"nonempty":"empty"} attempts=${attempts.join(",")}`);
-    err.code="DELIVERY_UNCONFIRMED";
-    throw err;
-  }
-  return {delivered:true,attempts,lastUserId:after.lastUserId||null,messageCount:after.messageCount};
 }
 
 async function uploadImage(page, file, mimeType=null, {beforeUpload=null}={}) {
@@ -1228,9 +1251,9 @@ async function uploadImage(page, file, mimeType=null, {beforeUpload=null}={}) {
   return {uploaded:true,path:file,mimeType:detected,bytes:info.size};
 }
 
-async function askMessage(page, msg, timeout=180000) {
+async function askMessage(page, msg, timeout=180000, targetUrl=null) {
   const before=await state(page);
-  await sendMessage(page,msg);
+  await sendMessage(page,msg,targetUrl);
   await page.waitForFunction((n) => {
     const a=[...document.querySelectorAll('[data-message-author-role="assistant"], [data-chatgpt-search-unit-key$=":assistant"], [data-content-search-unit-key$=":assistant"]')];
     const stop=[...document.querySelectorAll("button")].some(b =>
@@ -1241,9 +1264,9 @@ async function askMessage(page, msg, timeout=180000) {
   return await state(page);
 }
 
-async function streamMessage(page, msg, {requestId, turnId, timeout=180000}={}) {
+async function streamMessage(page, msg, {requestId, turnId, timeout=180000, targetUrl=null}={}) {
   const before=await state(page);
-  await sendMessage(page,msg);
+  await sendMessage(page,msg,targetUrl);
   let sequence=0, emitted="", assistantMessageId=null;
   const emit=(type,payload)=>console.log(JSON.stringify({requestId,turnId,sequence:++sequence,type,...payload,observedAt:new Date().toISOString()}));
   emit("progress",{progress:{state:"started",delivery:"confirmed"}});
@@ -1820,6 +1843,27 @@ async function waitForGenerationStop(page, timeout=7000) {
 async function notifyController(reg, task, message) {
   const rootController=reg.projects?.[task.project]?.rootController || "conductor";
   const targets=notificationTargets(task,rootController);
+  const exact=task.replyToSessionRef||task.controllerSessionRef;
+  if(task.localOwner || exact?.startsWith("codex:")) {
+    try {
+      const owner=taskOwner(reg,task.taskId,task.project,task.sessionId,task.controllerSessionRef||exact,task.replyToSessionRef||exact);
+      if(!owner || owner.kind!=="codex" || owner.transport!=="local-pull" || exact!==`codex:${owner.threadId}` ||
+        (task.localOwner && ["kind","threadId","host","transport"].some(key=>task.localOwner[key]!==owner[key])))
+        throw new Error("LOCAL_OWNER_TARGET_MISMATCH");
+      const messageHash=crypto.createHash("sha256").update(JSON.stringify([message,task.stallNoticeAttemptAt||null])).digest("hex");
+      const previous=task.watchdogLocalNotification;
+      const event=previous?.ownerRef===exact && previous.messageHash===messageHash ? {cursor:previous.eventCursor}
+        : await emitTaskEvent(task,"CONTROLLER_NOTICE_LOCAL",{ownerRef:exact,localOwner:owner,message,receiptSupported:false});
+      if(!event?.cursor) throw new Error("LOCAL_NOTIFICATION_JOURNAL_UNAVAILABLE");
+      task.watchdogLocalNotification={ownerRef:exact,messageHash,eventCursor:event.cursor};
+      delete task.watchdogPendingNotification;
+      return {sent:false,queued:false,recorded:true,status:"RECORDED_LOCAL",target:exact,targets,
+        eventCursor:event.cursor,deliveryMode:"local-event-journal",receiptSupported:false};
+    } catch(error) {
+      task.watchdogPendingNotification=message;
+      return {sent:false,targets,failures:[{target:exact||null,reason:error.message}]};
+    }
+  }
   const identity=reg.accounts?.[task.account]?.identity;
   const accountScope=identity
     ? Object.entries(reg.accounts||{}).filter(([,value])=>value?.identity===identity).map(([alias])=>alias)
@@ -1827,16 +1871,16 @@ async function notifyController(reg, task, message) {
   const failures=[];
   for(const target of targets) {
     try {
-      const controller=resolveControllerTarget(reg.chats,target,task.project,(task.replyToSessionRef||task.controllerSessionRef)?null:accountScope);
-      if(controller.id===task.sessionId) {
+      const controller=exact ? reg.chats?.[target] : resolveControllerTarget(reg.chats,target,task.project,accountScope);
+      if(controller?.id===task.sessionId) {
         failures.push({target,reason:"target is task session"});
         continue;
       }
-      const operation=coordinated("callback",{taskId:task.taskId,targetRef:controller.id,message});
+      const operation=coordinated("callback",{taskId:task.taskId,targetRef:exact?target:controller.id,message});
       if(operation.status==="SENT") delete task.watchdogPendingNotification;
       else task.watchdogPendingNotification=message;
       return {sent:operation.status==="SENT",queued:operation.status==="QUEUED",operationId:operation.operationId,
-        status:operation.status,target,role:controller.role||controller.name,targets};
+        status:operation.status,target,role:operation.role||controller?.role||controller?.name,targets};
     } catch(error) {
       if(error?.code==="WEB_RATE_LIMITED") {
         task.watchdogPendingNotification=message;
@@ -1871,17 +1915,25 @@ function projectReconcileMessage(candidate) {
 
 function resolveLifecycleOwner(reg, group, projectName) {
   let ref=group?.controllerSessionRef||group?.ownerSessionRef||null;
+  const exact=!!ref, workgroupId=group?.workgroupId||null;
   const seen=new Set();
   while(ref && !seen.has(ref)) {
     seen.add(ref);
     const chat=reg.chats?.[ref];
-    if(chat?.project===projectName && (chat.status||"active")==="active") return chat;
+    if(!chat) return null;
+    if(chat.project!==projectName) throw new Error("OWNER_PROJECT_MISMATCH");
+    if((chat.workgroupId||null)!==workgroupId && (!workgroupId || chat.workgroupId)) throw new Error("OWNER_WORKGROUP_MISMATCH");
+    if(!chat.successorSessionRef && (chat.status||"active")==="active") return chat;
     ref=chat?.successorSessionRef||null;
   }
+  if(ref) throw new Error("OWNER_SUCCESSOR_CYCLE");
+  if(exact) return null;
   const role=String(group?.controllerRole||"").trim();
   if(role) {
-    const matches=Object.values(reg.chats||{}).filter(chat=>chat.project===projectName && chat.role===role && (chat.status||"active")==="active");
+    const matches=Object.values(reg.chats||{}).filter(chat=>chat.project===projectName && chat.role===role &&
+      (chat.workgroupId||null)===workgroupId && (chat.status||"active")==="active");
     if(matches.length===1) return matches[0];
+    if(matches.length>1) throw new Error(`AMBIGUOUS_CONTROLLER: ${role}`);
   }
   return null;
 }
@@ -1893,28 +1945,45 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
   const rt=await loadRuntime(), runtimeProject=rt.projects[projectName]||{};
   const group=workgroupId ? (project.workgroups||{})[workgroupId] : null;
   const scopedRuntime=workgroupId ? ((runtimeProject.workgroups||{})[workgroupId]||{}) : runtimeProject;
+  if(runtimeProject.watchdogPausedForUserControl || scopedRuntime.watchdogPausedForUserControl)
+    return {project:projectName,workgroupId:workgroupId||null,state:"USER_CONTROLLED",paused:true};
+  if(scopedRuntime.pendingReconcileEvent?.deliveryStage==="SEND_ATTEMPTED")
+    return {project:projectName,workgroupId:workgroupId||null,state:"DELIVERY_UNCONFIRMED",eventKey:scopedRuntime.pendingReconcileEvent.eventKey};
   const lifecycleScope=workgroupId
-    ? {workgroupId,ownerSessionRef:group?.controllerSessionRef}
+    ? {workgroupId,ownerSessionRef:group?.controllerSessionRef||group?.ownerSessionRef}
     : (Object.keys(project.workgroups||{}).length ? {legacyOnly:true} : null);
   const candidate=reconcileCandidate(projectName,project,Object.values(rt.tasks||{}),scopedRuntime,Date.now(),
     lifecycleScope);
   if(!candidate) return null;
   if(!candidate.ready) return {project:projectName,event:candidate.event,state:"DEFERRED_MIN_GAP",waitSec:candidate.waitSec,eventKey:candidate.eventKey};
   if(workgroupId && !group) return {project:projectName,workgroupId,event:candidate.event,state:"WORKGROUP_NOT_REGISTERED",eventKey:candidate.eventKey};
-  const a=account||project.activeAccount||reg.defaultAccount||DEFAULT_ACCOUNT;
+  let owner=null, attempt=null, sendReserved=false, delivery=null;
   try {
-    const owner=workgroupId
-      ? resolveLifecycleOwner(reg,group,projectName)
-      : resolveChat(reg,candidate.rootRole,projectName,a);
+    if(candidate.ownerSessionRef?.startsWith("codex:"))
+      return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"LOCAL_OWNER_REQUIRES_PULL",ownerSessionRef:candidate.ownerSessionRef,eventKey:candidate.eventKey};
+    owner=resolveLifecycleOwner(reg,{...group,workgroupId,controllerSessionRef:candidate.ownerSessionRef,
+      controllerRole:group?.controllerRole||candidate.rootRole},projectName);
     if(!owner) return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"OWNER_UNRESOLVED",eventKey:candidate.eventKey};
-    await assertWebAvailable(owner.account||a);
+    if(account && owner.account!==account)
+      return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"OWNER_ACCOUNT_MISMATCH",ownerSessionRef:owner.id,account:owner.account,eventKey:candidate.eventKey};
+    if(Object.values(rt.tasks||{}).some(task=>task.project===projectName && task.sessionId===owner.id && task.watchdogPausedForUserControl))
+      return {project:projectName,workgroupId:workgroupId||null,state:"USER_CONTROLLED",ownerSessionRef:owner.id,paused:true,eventKey:candidate.eventKey};
+    await assertWebAvailable(owner.account);
     const {page}=await ensurePage(reg,owner,{pauseOnUserControl:true});
     const observed=await observeSession(owner,page,null);
     if(observed.generating || !observed.inputReady || String(observed.composerText||"").trim()) {
       return {project:projectName,workgroupId:workgroupId||null,ownerSessionRef:owner.id,event:candidate.event,state:workgroupId?"OWNER_BUSY":"ROOT_BUSY",eventKey:candidate.eventKey,
         rootState:observed.sessionState,composerNonempty:!!String(observed.composerText||"").trim()};
     }
-    const delivery=await sendMessage(page,projectReconcileMessage(candidate));
+    attempt={...candidate,deliveryStage:"SEND_ATTEMPTED",attemptId:crypto.randomUUID(),
+      attemptedOwnerSessionRef:owner.id,attemptedTargetUrl:owner.url,attemptedAt:new Date().toISOString()};
+    const reserved={...scopedRuntime,pendingReconcileEvent:attempt};
+    if(workgroupId) runtimeProject.workgroups={...(runtimeProject.workgroups||{}),[workgroupId]:reserved};
+    else Object.assign(runtimeProject,reserved);
+    rt.projects[projectName]=runtimeProject;
+    await saveRuntime(rt);
+    sendReserved=true;
+    delivery=await sendMessage(page,projectReconcileMessage(candidate),owner.url);
     const latest=await loadRuntime();
     const currentProject={...(latest.projects[projectName]||{})};
     const state=workgroupId ? {...((currentProject.workgroups||{})[workgroupId]||{})} : currentProject;
@@ -1934,11 +2003,16 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
     return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"SENT",eventKey:candidate.eventKey,
       latestTaskId:candidate.latestTaskId,rootRole:workgroupId?null:candidate.rootRole,ownerSessionRef:owner.id,delivery};
   } catch(error) {
+    if(attempt && !sendReserved) return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,
+      state:"NOT_SENT",deliveryStage:"PRE_SEND",error:String(error?.message||error),eventKey:candidate.eventKey};
     const latest=await loadRuntime();
     const currentProject={...(latest.projects[projectName]||{})};
     const state=workgroupId ? {...((currentProject.workgroups||{})[workgroupId]||{})} : currentProject;
+    if(state.pendingReconcileEvent?.deliveryStage==="SEND_ATTEMPTED" && state.pendingReconcileEvent.attemptId!==attempt?.attemptId) throw error;
+    const uncertain=sendReserved && (delivery?.delivered || error.deliveryStage!=="PRE_SEND");
+    const pending=uncertain ? {...attempt,...(delivery?{delivery}:{})} : {...candidate,deliveryStage:"PRE_SEND"};
     if(error?.code==="SPACE_IN_USER_CONTROL") {
-      Object.assign(state,{pendingReconcileEvent:candidate,watchdogPausedForUserControl:true,
+      Object.assign(state,{pendingReconcileEvent:pending,watchdogPausedForUserControl:true,
         watchdogPausedAt:new Date().toISOString(),
         watchdogPausedSpace:error.spaceName||null,
         watchdogPausedOwnership:error.ownership||null});
@@ -1951,12 +2025,13 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
       return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"USER_CONTROLLED",paused:true,
         spaceName:error.spaceName||null,ownership:error.ownership||null,eventKey:candidate.eventKey};
     }
-    Object.assign(state,{pendingReconcileEvent:candidate,lastReconcileError:String(error?.message||error),
+    Object.assign(state,{pendingReconcileEvent:pending,lastReconcileError:String(error?.message||error),
       lastReconcileErrorAt:new Date().toISOString()});
     if(workgroupId) currentProject.workgroups={...(currentProject.workgroups||{}),[workgroupId]:state};
     else Object.assign(currentProject,state);
     latest.projects[projectName]=currentProject;
     await saveRuntime(latest);
+    if(uncertain) return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"DELIVERY_UNCONFIRMED",error:String(error?.message||error),eventKey:candidate.eventKey};
     if(error?.code==="WEB_RATE_LIMITED") return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"WEB_COOLDOWN",account:error.account,eventKey:candidate.eventKey};
     return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"NOT_SENT",error:String(error?.message||error),eventKey:candidate.eventKey};
   }
@@ -1979,7 +2054,7 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
     if(live.stallNoticeKey!==noticeKey && (!Number.isFinite(lastAttempt) || Date.now()-lastAttempt>=300000)) {
       live.stallNoticeAttemptAt=new Date().toISOString();
       notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: SUSPECT_STALL\nrole: ${live.role||chat.role}\nsummary: No visible progress beyond the warning threshold. Generation was NOT stopped. Inspect durable/tool progress before explicitly recovering; do not replay completed work.`);
-      if(notification?.queued || notification?.sent || notification?.operationId) live.stallNoticeKey=noticeKey;
+      if(notification?.queued || notification?.sent || notification?.recorded || notification?.operationId) live.stallNoticeKey=noticeKey;
       live.lastRecoveryDecision="QUIET_GENERATION_DEFERRED";
       await saveRuntime(rt);
       await emitTaskEvent(live,"RECOVERY_DEFERRED",{reason:"QUIET_GENERATION_IS_NOT_FAILURE",quietForSec:observed.quietForSec,effortMismatch:observed.effortMismatch||false});
@@ -1995,7 +2070,7 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
     let notification={sent:false,reason:"already notified"};
     if(!live.watchdogNotifiedAt) {
       notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: BLOCKED\nsession_state: ${observed.sessionState}\nrole: ${live.role||chat.role}\nsummary: ${live.blockedReason}; reconcile GitHub and replace/recover the session if needed.`);
-      if(notification.sent) live.watchdogNotifiedAt=now.toISOString();
+      if(notification.sent || notification.recorded) live.watchdogNotifiedAt=now.toISOString();
     }
     rt.tasks[live.taskId]=live; await saveRuntime(rt);
     return {action:"BLOCKED",attempts,notification};
@@ -2004,21 +2079,21 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
   if(observed.sessionState==="ERROR_RECOVERABLE") {
     detail=await nativeRetry(page);
     if(detail.clicked) method="native-"+(detail.kind||"retry");
-    else { await sendMessage(page,"continue"); method="continue"; }
+    else { await sendMessage(page,"continue",chat.url); method="continue"; }
   } else if(observed.sessionState==="IDLE_INCOMPLETE") {
     if(aggressive && attempts>=2 && live.originalMessage) {
-      await sendMessage(page,`[RECOVERY ${live.taskId}] Continue this existing task without duplicating completed work. Reconcile current GitHub/task state first. Original task:\n${live.originalMessage}`);
+      await sendMessage(page,`[RECOVERY ${live.taskId}] Continue this existing task without duplicating completed work. Reconcile current GitHub/task state first. Original task:\n${live.originalMessage}`,chat.url);
       method="guarded-resend-original";
     } else {
       const msg=attempts===0?"continue":"continue from where you left off. Do not restart or duplicate completed work; inspect the current task/GitHub state first.";
-      await sendMessage(page,msg); method="continue";
+      await sendMessage(page,msg,chat.url); method="continue";
     }
   } else if(observed.sessionState==="SUSPECT_STALL") {
     detail=await stopGeneration(page);
     if(!detail.stopped || !await waitForGenerationStop(page,7000)) return {action:"DEFERRED",reason:"GENERATION_STOP_NOT_CONFIRMED",detail};
     const current=(await loadRuntime()).tasks[task.taskId];
     if(!current || !activeTaskStatus(current.status) || current.watchdogPausedForUserControl) return {action:"SKIPPED",reason:"TASK_CHANGED_DURING_STOP"};
-    await sendMessage(page,"continue from where you left off. Do not restart or duplicate completed work; inspect the current task/GitHub state first.");
+    await sendMessage(page,"continue from where you left off. Do not restart or duplicate completed work; inspect the current task/GitHub state first.",chat.url);
     method="stop-and-continue";
   } else {
     return {action:"NONE",attempts};
@@ -2160,7 +2235,7 @@ async function watchOnce(reg, project=null, account=null, options={}) {
         const latest=await loadRuntime(), live=latest.tasks[task.taskId];
         if(!live || live.status!=="BLOCKED" || !live.watchdogPendingNotification) continue;
         const notification=await notifyController(reg,live,live.watchdogPendingNotification);
-        if(notification.sent) live.watchdogNotifiedAt=new Date().toISOString();
+        if(notification.sent || notification.recorded) live.watchdogNotifiedAt=new Date().toISOString();
         latest.tasks[live.taskId]=live; await saveRuntime(latest);
         results.push({taskId:live.taskId,state:"BLOCKED",notification});
         continue;
@@ -2191,7 +2266,7 @@ status: BLOCKED
 session_state: CONTEXT_EXHAUSTED
 role: ${live.role||chat.role}
 summary: Conversation reached a hard context limit. Do not retry/continue this Chat; prepare a checkpointed replacement session.`);
-          if(notification.sent) live.watchdogNotifiedAt=new Date().toISOString();
+          if(notification.sent || notification.recorded) live.watchdogNotifiedAt=new Date().toISOString();
         }
         latest.tasks[live.taskId]=live; await saveRuntime(latest);
       } else if(options.autoRecover!==false && ["ERROR_RECOVERABLE","IDLE_INCOMPLETE","SUSPECT_STALL","BLOCKED"].includes(observed.sessionState)) {
@@ -2223,7 +2298,7 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
           if(!["COMPLETE","FAILED","CANCELLED"].includes(String(live.status).toUpperCase())) live.status="AWAITING_DURABLE_UPDATE";
           if(options.autoRecover!==false && !live.watchdogResultNotifiedAt) {
             notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: AWAITING_DURABLE_UPDATE\nsession_state: IDLE_COMPLETE\nrole: ${live.role||chat.role}\nsummary: Worker is idle with a new assistant result. Reconcile GitHub/callback evidence before marking COMPLETE.`);
-            if(notification.sent) live.watchdogResultNotifiedAt=new Date().toISOString();
+            if(notification.sent || notification.recorded) live.watchdogResultNotifiedAt=new Date().toISOString();
             live.watchdogResultNotification=notification;
           }
         }
@@ -2266,12 +2341,19 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
         results.push({taskId:task.taskId,state:"TASK_CHANGED",status:live?.status||null});
         continue;
       }
+      if(error.deliveryStage==="SEND_ATTEMPTED") {
+        live.status="BLOCKED";live.blockedReason="DELIVERY_UNCONFIRMED";live.lastWatchError=error.message;live.lastWatchErrorAt=new Date().toISOString();
+        live.watchdogPendingNotification=`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: DELIVERY_UNCONFIRMED\nsummary: A recovery send was attempted without confirmation. Reconcile the exact conversation/message; do not replay this task or recovery.`;
+        latest.tasks[live.taskId]=live;await saveRuntime(latest);
+        results.push({taskId:live.taskId,state:"DELIVERY_UNCONFIRMED",error:error.message});
+        continue;
+      }
       live.watchErrorCount=Number(live.watchErrorCount||0)+1; live.lastWatchError=error.message; live.lastWatchErrorAt=new Date().toISOString();
       let notification=null;
       if(options.autoRecover!==false && live.watchErrorCount>=3 && live.status!=="BLOCKED") {
         live.status="BLOCKED"; live.blockedReason=`watch failed ${live.watchErrorCount} times: ${error.message}`;
         notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: BLOCKED\nrole: ${live.role||"unknown"}\nsummary: ${live.blockedReason}`);
-        if(notification.sent) live.watchdogNotifiedAt=new Date().toISOString();
+        if(notification.sent || notification.recorded) live.watchdogNotifiedAt=new Date().toISOString();
       }
       latest.tasks[live.taskId]=live; await saveRuntime(latest);
       results.push({taskId:task.taskId,role:task.role,sessionId:chat?.id||task.sessionId||null,state:"WATCH_ERROR",error:error.message,watchErrorCount:live.watchErrorCount,notification});
@@ -2284,14 +2366,11 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
     const scopes=workgroups.length ? [...workgroups,null] : [null];
     for(const workgroupId of scopes) {
       const group=workgroupId ? projectCfg.workgroups[workgroupId] : null;
-      if(account && !workgroupId && activeAccount(reg,p,null)!==account) continue;
-      const lifecycleOwner=workgroupId ? resolveLifecycleOwner(reg,group,p) : null;
-      if(account && workgroupId && lifecycleOwner && lifecycleOwner.account!==account) continue;
       if(options.autoRecover===false) {
         const latest=await loadRuntime();
         const candidate=reconcileCandidate(p,projectCfg,Object.values(latest.tasks||{}),
           workgroupId ? ((latest.projects[p]?.workgroups||{})[workgroupId]||{}) : (latest.projects[p]||{}),Date.now(),
-          workgroupId ? {workgroupId,ownerSessionRef:group?.controllerSessionRef}
+          workgroupId ? {workgroupId,ownerSessionRef:group?.controllerSessionRef||group?.ownerSessionRef}
             : (Object.keys(projectCfg.workgroups||{}).length ? {legacyOnly:true} : null));
         if(candidate) results.push({project:p,workgroupId:workgroupId||null,projectLifecycle:{...candidate,state:candidate.ready?"DRY_RUN_READY":"DRY_RUN_DEFERRED"}});
         continue;
@@ -3042,7 +3121,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     try {
       const imagePath=opt("image-path",null);
       if(imagePath) upload=await uploadImage(page,imagePath,opt("mime-type",null));
-      delivery=await sendMessage(page,msg);
+      delivery=await sendMessage(page,msg,chat.url);
     }
     catch(error) {
       if(tracked){
@@ -3075,7 +3154,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
     const dispatchModel=await applyDispatchModel(page,chat,null,null);
     const upload=opt("image-path",null)?await uploadImage(page,opt("image-path",null),opt("mime-type",null)):null;
-    const st=await askMessage(page,msg,Number(opt("timeout","180000")));
+    const st=await askMessage(page,msg,Number(opt("timeout","180000")),chat.url);
     print({chat:chat.name,response:st.lastAssistant,upload,modelSelection:dispatchModel?{
       model:dispatchModel.model||dispatchModel.observed?.model||null,
       effort:dispatchModel.effort||dispatchModel.observed?.effort||null,
@@ -3089,7 +3168,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     if(!requestId||!turnId) throw new Error("request-id and turn-id are required");
     try { await applyDispatchModel(page,chat,null,null); }
     catch(error) { if(!deferrableModelUiError(error)) throw error; }
-    await streamMessage(page,msg,{requestId,turnId,timeout:Number(opt("timeout","180000"))});
+    await streamMessage(page,msg,{requestId,turnId,timeout:Number(opt("timeout","180000")),targetUrl:chat.url});
   }
   if(cmd==="model"){
     const m=positionals(2).join(" "); if(!m) throw new Error("model required"); const applied=await applyModelSpec(page,m,opt("effort",null));
@@ -3121,10 +3200,10 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     if(linked) print(await gradedRecover(reg,chat,page,linked,observed,{maxAttempts:Number(opt("max-recovery","3"))||3,cooldownSec:0,aggressive:args.includes("--aggressive")}));
     else if(observed.sessionState==="ERROR_RECOVERABLE") print(await nativeRetry(page));
     else if(observed.generating && !args.includes("--aggressive")) print({ok:false,action:"DEFERRED",reason:"QUIET_GENERATION_IS_NOT_FAILURE",recommendation:"INSPECT_WITHOUT_STOP"});
-    else if(observed.generating){const stopped=await stopGeneration(page);const confirmed=stopped.stopped&&await waitForGenerationStop(page,7000);if(confirmed)await sendMessage(page,"continue");print({ok:!!confirmed,method:confirmed?"stop-and-continue":"stop-unconfirmed",stopped});}
-    else {await sendMessage(page,args.includes("--aggressive")&&observed.lastUser?observed.lastUser:"continue");print({ok:true,method:args.includes("--aggressive")?"resend-last-user":"continue"});}
+    else if(observed.generating){const stopped=await stopGeneration(page);const confirmed=stopped.stopped&&await waitForGenerationStop(page,7000);if(confirmed)await sendMessage(page,"continue",chat.url);print({ok:!!confirmed,method:confirmed?"stop-and-continue":"stop-unconfirmed",stopped});}
+    else {await sendMessage(page,args.includes("--aggressive")&&observed.lastUser?observed.lastUser:"continue",chat.url);print({ok:true,method:args.includes("--aggressive")?"resend-last-user":"continue"});}
   }
-  if(cmd==="resend"){const st=await state(page);if(!st.lastUser)throw new Error("no last user message");await sendMessage(page,st.lastUser);print({ok:true,resent:st.lastUser});}
+  if(cmd==="resend"){const st=await state(page);if(!st.lastUser)throw new Error("no last user message");await sendMessage(page,st.lastUser,chat.url);print({ok:true,resent:st.lastUser});}
 }
 else if(cmd==="new"){
   const p=project; if(!p) throw new Error("--project required");
@@ -3151,7 +3230,7 @@ else if(cmd==="new"){
       applied={model,effort:requestedEffort||observed.effort||null,observed,deferredUntilDispatch:true};
     }
     const before=await state(page);
-    await sendMessage(page,first); await page.waitForURL(/\/c\/[0-9a-f-]+/i,{timeout:30000});
+    await sendMessage(page,first,binding.projectUrl); await page.waitForURL(/\/c\/[0-9a-f-]+/i,{timeout:30000});
     const url=await page.url(), id=convId(url), projectBase=url.includes("/g/g-p-")?url.replace(/\/c\/[^/]+.*$/,''):binding.projectBase;
     if(projectBase){binding.projectBase=projectBase;binding.projectUrl=projectBase+"/project";binding.projectId=projectIdFromUrl(projectBase);}
     reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model,effort:requestedEffort||applied.effort||null,affinityKey,workgroupId,
