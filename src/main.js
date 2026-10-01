@@ -1820,6 +1820,27 @@ async function waitForGenerationStop(page, timeout=7000) {
 async function notifyController(reg, task, message) {
   const rootController=reg.projects?.[task.project]?.rootController || "conductor";
   const targets=notificationTargets(task,rootController);
+  const exact=task.replyToSessionRef||task.controllerSessionRef;
+  if(task.localOwner || exact?.startsWith("codex:")) {
+    try {
+      const owner=taskOwner(reg,task.taskId,task.project,task.sessionId,task.controllerSessionRef||exact,task.replyToSessionRef||exact);
+      if(!owner || owner.kind!=="codex" || owner.transport!=="local-pull" || exact!==`codex:${owner.threadId}` ||
+        (task.localOwner && ["kind","threadId","host","transport"].some(key=>task.localOwner[key]!==owner[key])))
+        throw new Error("LOCAL_OWNER_TARGET_MISMATCH");
+      const messageHash=crypto.createHash("sha256").update(JSON.stringify([message,task.stallNoticeAttemptAt||null])).digest("hex");
+      const previous=task.watchdogLocalNotification;
+      const event=previous?.ownerRef===exact && previous.messageHash===messageHash ? {cursor:previous.eventCursor}
+        : await emitTaskEvent(task,"CONTROLLER_NOTICE_LOCAL",{ownerRef:exact,localOwner:owner,message,receiptSupported:false});
+      if(!event?.cursor) throw new Error("LOCAL_NOTIFICATION_JOURNAL_UNAVAILABLE");
+      task.watchdogLocalNotification={ownerRef:exact,messageHash,eventCursor:event.cursor};
+      delete task.watchdogPendingNotification;
+      return {sent:false,queued:false,recorded:true,status:"RECORDED_LOCAL",target:exact,targets,
+        eventCursor:event.cursor,deliveryMode:"local-event-journal",receiptSupported:false};
+    } catch(error) {
+      task.watchdogPendingNotification=message;
+      return {sent:false,targets,failures:[{target:exact||null,reason:error.message}]};
+    }
+  }
   const identity=reg.accounts?.[task.account]?.identity;
   const accountScope=identity
     ? Object.entries(reg.accounts||{}).filter(([,value])=>value?.identity===identity).map(([alias])=>alias)
@@ -1827,16 +1848,16 @@ async function notifyController(reg, task, message) {
   const failures=[];
   for(const target of targets) {
     try {
-      const controller=resolveControllerTarget(reg.chats,target,task.project,(task.replyToSessionRef||task.controllerSessionRef)?null:accountScope);
-      if(controller.id===task.sessionId) {
+      const controller=exact ? reg.chats?.[target] : resolveControllerTarget(reg.chats,target,task.project,accountScope);
+      if(controller?.id===task.sessionId) {
         failures.push({target,reason:"target is task session"});
         continue;
       }
-      const operation=coordinated("callback",{taskId:task.taskId,targetRef:controller.id,message});
+      const operation=coordinated("callback",{taskId:task.taskId,targetRef:exact?target:controller.id,message});
       if(operation.status==="SENT") delete task.watchdogPendingNotification;
       else task.watchdogPendingNotification=message;
       return {sent:operation.status==="SENT",queued:operation.status==="QUEUED",operationId:operation.operationId,
-        status:operation.status,target,role:controller.role||controller.name,targets};
+        status:operation.status,target,role:operation.role||controller?.role||controller?.name,targets};
     } catch(error) {
       if(error?.code==="WEB_RATE_LIMITED") {
         task.watchdogPendingNotification=message;
@@ -1871,17 +1892,25 @@ function projectReconcileMessage(candidate) {
 
 function resolveLifecycleOwner(reg, group, projectName) {
   let ref=group?.controllerSessionRef||group?.ownerSessionRef||null;
+  const exact=!!ref, workgroupId=group?.workgroupId||null;
   const seen=new Set();
   while(ref && !seen.has(ref)) {
     seen.add(ref);
     const chat=reg.chats?.[ref];
-    if(chat?.project===projectName && (chat.status||"active")==="active") return chat;
+    if(!chat) return null;
+    if(chat.project!==projectName) throw new Error("OWNER_PROJECT_MISMATCH");
+    if((chat.workgroupId||null)!==workgroupId && (!workgroupId || chat.workgroupId)) throw new Error("OWNER_WORKGROUP_MISMATCH");
+    if(!chat.successorSessionRef && (chat.status||"active")==="active") return chat;
     ref=chat?.successorSessionRef||null;
   }
+  if(ref) throw new Error("OWNER_SUCCESSOR_CYCLE");
+  if(exact) return null;
   const role=String(group?.controllerRole||"").trim();
   if(role) {
-    const matches=Object.values(reg.chats||{}).filter(chat=>chat.project===projectName && chat.role===role && (chat.status||"active")==="active");
+    const matches=Object.values(reg.chats||{}).filter(chat=>chat.project===projectName && chat.role===role &&
+      (chat.workgroupId||null)===workgroupId && (chat.status||"active")==="active");
     if(matches.length===1) return matches[0];
+    if(matches.length>1) throw new Error(`AMBIGUOUS_CONTROLLER: ${role}`);
   }
   return null;
 }
@@ -1893,21 +1922,27 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
   const rt=await loadRuntime(), runtimeProject=rt.projects[projectName]||{};
   const group=workgroupId ? (project.workgroups||{})[workgroupId] : null;
   const scopedRuntime=workgroupId ? ((runtimeProject.workgroups||{})[workgroupId]||{}) : runtimeProject;
+  if(runtimeProject.watchdogPausedForUserControl || scopedRuntime.watchdogPausedForUserControl)
+    return {project:projectName,workgroupId:workgroupId||null,state:"USER_CONTROLLED",paused:true};
   const lifecycleScope=workgroupId
-    ? {workgroupId,ownerSessionRef:group?.controllerSessionRef}
+    ? {workgroupId,ownerSessionRef:group?.controllerSessionRef||group?.ownerSessionRef}
     : (Object.keys(project.workgroups||{}).length ? {legacyOnly:true} : null);
   const candidate=reconcileCandidate(projectName,project,Object.values(rt.tasks||{}),scopedRuntime,Date.now(),
     lifecycleScope);
   if(!candidate) return null;
   if(!candidate.ready) return {project:projectName,event:candidate.event,state:"DEFERRED_MIN_GAP",waitSec:candidate.waitSec,eventKey:candidate.eventKey};
   if(workgroupId && !group) return {project:projectName,workgroupId,event:candidate.event,state:"WORKGROUP_NOT_REGISTERED",eventKey:candidate.eventKey};
-  const a=account||project.activeAccount||reg.defaultAccount||DEFAULT_ACCOUNT;
   try {
-    const owner=workgroupId
-      ? resolveLifecycleOwner(reg,group,projectName)
-      : resolveChat(reg,candidate.rootRole,projectName,a);
+    if(candidate.ownerSessionRef?.startsWith("codex:"))
+      return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"LOCAL_OWNER_REQUIRES_PULL",ownerSessionRef:candidate.ownerSessionRef,eventKey:candidate.eventKey};
+    const owner=resolveLifecycleOwner(reg,{...group,workgroupId,controllerSessionRef:candidate.ownerSessionRef,
+      controllerRole:group?.controllerRole||candidate.rootRole},projectName);
     if(!owner) return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"OWNER_UNRESOLVED",eventKey:candidate.eventKey};
-    await assertWebAvailable(owner.account||a);
+    if(account && owner.account!==account)
+      return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"OWNER_ACCOUNT_MISMATCH",ownerSessionRef:owner.id,account:owner.account,eventKey:candidate.eventKey};
+    if(Object.values(rt.tasks||{}).some(task=>task.project===projectName && task.sessionId===owner.id && task.watchdogPausedForUserControl))
+      return {project:projectName,workgroupId:workgroupId||null,state:"USER_CONTROLLED",ownerSessionRef:owner.id,paused:true,eventKey:candidate.eventKey};
+    await assertWebAvailable(owner.account);
     const {page}=await ensurePage(reg,owner,{pauseOnUserControl:true});
     const observed=await observeSession(owner,page,null);
     if(observed.generating || !observed.inputReady || String(observed.composerText||"").trim()) {
@@ -1979,7 +2014,7 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
     if(live.stallNoticeKey!==noticeKey && (!Number.isFinite(lastAttempt) || Date.now()-lastAttempt>=300000)) {
       live.stallNoticeAttemptAt=new Date().toISOString();
       notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: SUSPECT_STALL\nrole: ${live.role||chat.role}\nsummary: No visible progress beyond the warning threshold. Generation was NOT stopped. Inspect durable/tool progress before explicitly recovering; do not replay completed work.`);
-      if(notification?.queued || notification?.sent || notification?.operationId) live.stallNoticeKey=noticeKey;
+      if(notification?.queued || notification?.sent || notification?.recorded || notification?.operationId) live.stallNoticeKey=noticeKey;
       live.lastRecoveryDecision="QUIET_GENERATION_DEFERRED";
       await saveRuntime(rt);
       await emitTaskEvent(live,"RECOVERY_DEFERRED",{reason:"QUIET_GENERATION_IS_NOT_FAILURE",quietForSec:observed.quietForSec,effortMismatch:observed.effortMismatch||false});
@@ -1995,7 +2030,7 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
     let notification={sent:false,reason:"already notified"};
     if(!live.watchdogNotifiedAt) {
       notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: BLOCKED\nsession_state: ${observed.sessionState}\nrole: ${live.role||chat.role}\nsummary: ${live.blockedReason}; reconcile GitHub and replace/recover the session if needed.`);
-      if(notification.sent) live.watchdogNotifiedAt=now.toISOString();
+      if(notification.sent || notification.recorded) live.watchdogNotifiedAt=now.toISOString();
     }
     rt.tasks[live.taskId]=live; await saveRuntime(rt);
     return {action:"BLOCKED",attempts,notification};
@@ -2160,7 +2195,7 @@ async function watchOnce(reg, project=null, account=null, options={}) {
         const latest=await loadRuntime(), live=latest.tasks[task.taskId];
         if(!live || live.status!=="BLOCKED" || !live.watchdogPendingNotification) continue;
         const notification=await notifyController(reg,live,live.watchdogPendingNotification);
-        if(notification.sent) live.watchdogNotifiedAt=new Date().toISOString();
+        if(notification.sent || notification.recorded) live.watchdogNotifiedAt=new Date().toISOString();
         latest.tasks[live.taskId]=live; await saveRuntime(latest);
         results.push({taskId:live.taskId,state:"BLOCKED",notification});
         continue;
@@ -2191,7 +2226,7 @@ status: BLOCKED
 session_state: CONTEXT_EXHAUSTED
 role: ${live.role||chat.role}
 summary: Conversation reached a hard context limit. Do not retry/continue this Chat; prepare a checkpointed replacement session.`);
-          if(notification.sent) live.watchdogNotifiedAt=new Date().toISOString();
+          if(notification.sent || notification.recorded) live.watchdogNotifiedAt=new Date().toISOString();
         }
         latest.tasks[live.taskId]=live; await saveRuntime(latest);
       } else if(options.autoRecover!==false && ["ERROR_RECOVERABLE","IDLE_INCOMPLETE","SUSPECT_STALL","BLOCKED"].includes(observed.sessionState)) {
@@ -2223,7 +2258,7 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
           if(!["COMPLETE","FAILED","CANCELLED"].includes(String(live.status).toUpperCase())) live.status="AWAITING_DURABLE_UPDATE";
           if(options.autoRecover!==false && !live.watchdogResultNotifiedAt) {
             notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: AWAITING_DURABLE_UPDATE\nsession_state: IDLE_COMPLETE\nrole: ${live.role||chat.role}\nsummary: Worker is idle with a new assistant result. Reconcile GitHub/callback evidence before marking COMPLETE.`);
-            if(notification.sent) live.watchdogResultNotifiedAt=new Date().toISOString();
+            if(notification.sent || notification.recorded) live.watchdogResultNotifiedAt=new Date().toISOString();
             live.watchdogResultNotification=notification;
           }
         }
@@ -2271,7 +2306,7 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
       if(options.autoRecover!==false && live.watchErrorCount>=3 && live.status!=="BLOCKED") {
         live.status="BLOCKED"; live.blockedReason=`watch failed ${live.watchErrorCount} times: ${error.message}`;
         notification=await notifyController(reg,live,`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: BLOCKED\nrole: ${live.role||"unknown"}\nsummary: ${live.blockedReason}`);
-        if(notification.sent) live.watchdogNotifiedAt=new Date().toISOString();
+        if(notification.sent || notification.recorded) live.watchdogNotifiedAt=new Date().toISOString();
       }
       latest.tasks[live.taskId]=live; await saveRuntime(latest);
       results.push({taskId:task.taskId,role:task.role,sessionId:chat?.id||task.sessionId||null,state:"WATCH_ERROR",error:error.message,watchErrorCount:live.watchErrorCount,notification});
@@ -2284,14 +2319,11 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
     const scopes=workgroups.length ? [...workgroups,null] : [null];
     for(const workgroupId of scopes) {
       const group=workgroupId ? projectCfg.workgroups[workgroupId] : null;
-      if(account && !workgroupId && activeAccount(reg,p,null)!==account) continue;
-      const lifecycleOwner=workgroupId ? resolveLifecycleOwner(reg,group,p) : null;
-      if(account && workgroupId && lifecycleOwner && lifecycleOwner.account!==account) continue;
       if(options.autoRecover===false) {
         const latest=await loadRuntime();
         const candidate=reconcileCandidate(p,projectCfg,Object.values(latest.tasks||{}),
           workgroupId ? ((latest.projects[p]?.workgroups||{})[workgroupId]||{}) : (latest.projects[p]||{}),Date.now(),
-          workgroupId ? {workgroupId,ownerSessionRef:group?.controllerSessionRef}
+          workgroupId ? {workgroupId,ownerSessionRef:group?.controllerSessionRef||group?.ownerSessionRef}
             : (Object.keys(projectCfg.workgroups||{}).length ? {legacyOnly:true} : null));
         if(candidate) results.push({project:p,workgroupId:workgroupId||null,projectLifecycle:{...candidate,state:candidate.ready?"DRY_RUN_READY":"DRY_RUN_DEFERRED"}});
         continue;
