@@ -2520,17 +2520,22 @@ def reconcile_delivery(db, operation_id):
                 "reason": reason, "evidence": superseded}
     expected = hashlib.sha256(" ".join(row["message"].split()).encode()).hexdigest()
     evidence, reason = None, "NO_SESSION_REFERENCE"
-    diagnostic = None
+    diagnostic, read_deferred = None, None
     if row["session_ref"]:
         bridge = os.environ.get("CHAT_BRIDGE_BIN") or str(pathlib.Path.home() / ".local/bin/chat-bridge")
         command = [bridge, "evidence", row["session_ref"], "--project", row["project"],
                    "--account", row["account_alias"], "--expected-hash", expected]
         try:
             completed = run_bridge(command)
-            evidence = parse_worker_receipt(completed) if completed.returncode == 0 else None
+            receipt = parse_worker_receipt(completed)
+            evidence = receipt if completed.returncode == 0 else None
             reason = "MESSAGE_NOT_PROVEN" if evidence else "CHAT_READ_UNAVAILABLE"
             if not evidence:
                 diagnostic = worker_diagnostic(completed.returncode, completed.stderr, "evidence")
+                if completed.returncode == 75 and receipt and receipt.get("code") in {"PACING_DEFERRED", "WEB_COOLDOWN_ACTIVE"}:
+                    reason = "CHAT_READ_DEFERRED"
+                    read_deferred = {key: receipt[key] for key in ("code", "status", "reason", "retryAfterSec") if key in receipt}
+                    diagnostic["worker"]["readDeferred"] = read_deferred
         except (OSError, subprocess.TimeoutExpired) as error:
             reason = "CHAT_READ_UNAVAILABLE"
             diagnostic = worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "evidence")
@@ -2587,7 +2592,8 @@ def reconcile_delivery(db, operation_id):
     except Exception:
         db.rollback()
         raise
-    return {"operationId":operation_id,"kind":row["kind"],"outcome":outcome,"reason":reason,"evidence":evidence}
+    return {"operationId":operation_id,"kind":row["kind"],"outcome":outcome,"reason":reason,"evidence":evidence,
+            **({"readDeferred":read_deferred} if read_deferred else {})}
 
 
 def work_one(db):

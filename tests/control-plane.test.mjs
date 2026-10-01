@@ -45,6 +45,10 @@ elif [ "$1" = "task" ]; then
 elif [ "$1" = "stop" ]; then
   printf '{"stopped":true}\\n'
 elif [ "$1" = "evidence" ]; then
+  if [ "\${CHAT_BRIDGE_TEST_EVIDENCE_EXIT:-0}" != "0" ]; then
+    printf '%s\\n' "$CHAT_BRIDGE_TEST_EVIDENCE" >&2
+    exit "$CHAT_BRIDGE_TEST_EVIDENCE_EXIT"
+  fi
   printf '%s\\n' "$CHAT_BRIDGE_TEST_EVIDENCE"
 fi
 `,{mode:0o755});
@@ -283,6 +287,46 @@ test("reconciliation accepts Project URL slugs only with complete exact bound ev
     const audit=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('SELECT count(*) FROM reconciliation_attempts').fetchone()[0]); print(d.execute(\"SELECT count(*) FROM reconciliation_attempts WHERE outcome='STILL_UNKNOWN' AND evidence IS NOT NULL\").fetchone()[0])",path.join(f.state,"bridge.sqlite3")],{encoding:"utf8"});
     assert.equal(audit.status,0,audit.stderr);
     assert.equal(audit.stdout.trim(),`${cases.length}\n0`);
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test("reconciliation distinguishes deferred evidence reads without replaying delivery", async()=>{
+  const f=await fixture();
+  try{
+    const parse=r=>{assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);};
+    const op=parse(f.call("submit",[],{requestId:"deferred-evidence",callerRef:"controller",sessionRef:"controller",message:"synthetic read"}));
+    const updated=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute(\"UPDATE operations SET status='DELIVERY_UNKNOWN',reason='LOST_RECEIPT' WHERE id=?\",(sys.argv[2],)); d.commit()",path.join(f.state,"bridge.sqlite3"),op.operationId],{encoding:"utf8"});
+    assert.equal(updated.status,0,updated.stderr);
+    const before=parse(f.call("status",[op.operationId]));
+    const lock={code:"PACING_DEFERRED",status:"DEFERRED",reason:"UI_LOCK_BUSY",retryAfterSec:5};
+    const cases=[
+      ["UI lock",75,{ok:false,...lock,privateDetail:"not returned"},lock],
+      ["UI pacing",75,{ok:false,...lock,reason:"UI_PACING",retryAfterSec:17},{...lock,reason:"UI_PACING",retryAfterSec:17}],
+      ["Web cooldown",75,{ok:false,code:"WEB_COOLDOWN_ACTIVE",status:"DEFERRED",reason:"WEB_COOLDOWN",retryAfterSec:180},{code:"WEB_COOLDOWN_ACTIVE",status:"DEFERRED",reason:"WEB_COOLDOWN",retryAfterSec:180}],
+      ["read failure",1,{ok:false,code:"EVIDENCE_LOGIN_UNAVAILABLE"}],
+      ["unrecognized tempfail",75,{ok:false,code:"EVIDENCE_LOGIN_UNAVAILABLE"}],
+      ["unstructured tempfail",75,"evidence read failed"],
+    ];
+    for(const [label,exitCode,receipt,deferred] of cases){
+      const outcome=parse(f.call("reconcile",["--operation",op.operationId],null,{
+        CHAT_BRIDGE_TEST_EVIDENCE:typeof receipt==="string"?receipt:JSON.stringify(receipt),CHAT_BRIDGE_TEST_EVIDENCE_EXIT:String(exitCode)}));
+      assert.equal(outcome.outcome,"STILL_UNKNOWN",label);
+      assert.equal(outcome.reason,deferred?"CHAT_READ_DEFERRED":"CHAT_READ_UNAVAILABLE",label);
+      assert.deepEqual(outcome.readDeferred,deferred,label);
+      assert.equal(outcome.evidence,null,label);
+      assert.deepEqual(parse(f.call("status",[op.operationId])),before,label);
+      const privateResult=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('SELECT result FROM operations WHERE id=?',(sys.argv[2],)).fetchone()[0])",path.join(f.state,"bridge.sqlite3"),op.operationId],{encoding:"utf8"});
+      assert.equal(privateResult.status,0,privateResult.stderr);
+      const worker=JSON.parse(privateResult.stdout).reconcileWorker;
+      assert.equal(worker.exitCode,exitCode,label);
+      assert.deepEqual(worker.readDeferred,deferred,label);
+    }
+    const retry=f.call("retry",["--operation",op.operationId]);
+    assert.equal(retry.status,2);assert.match(retry.stderr,/RETRY_REQUIRES_PROVEN_PRE_SEND_FAILURE/);
+    const calls=(await readFile(f.log,"utf8")).trim().split("\n");
+    assert.equal(calls.length,cases.length);assert.ok(calls.every(line=>line.startsWith("evidence controller ")));
+    const audit=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute(\"SELECT count(*) FROM reconciliation_attempts WHERE outcome='STILL_UNKNOWN' AND evidence IS NULL\").fetchone()[0]); print(d.execute(\"SELECT count(*) FROM reconciliation_attempts WHERE reason='CHAT_READ_DEFERRED'\").fetchone()[0]); print(d.execute('SELECT attempts,pre_send_failures FROM operations WHERE id=?',(sys.argv[2],)).fetchone())",path.join(f.state,"bridge.sqlite3"),op.operationId],{encoding:"utf8"});
+    assert.equal(audit.status,0,audit.stderr);assert.equal(audit.stdout.trim(),`${cases.length}\n3\n(0, 0)`);
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
