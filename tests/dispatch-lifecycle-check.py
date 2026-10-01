@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Isolated lifecycle checks; invoked by Node tests or directly, fake children only."""
 import argparse
+import errno
+import io
 import importlib.util
 import json
 import os
 import pathlib
+import runpy
 import signal
 import sqlite3
 import subprocess
@@ -12,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -322,6 +326,92 @@ def temporary_queue(coordinator, fakes, *, existing=True, worker_body):
 
 
 def integration_case(case, coordinator, runner, runner_path, fakes):
+    if case in ('private-cleanup-failure', 'private-runner-cleanup-failure'):
+        coordinator.BRIDGE_TERM_GRACE_SEC = runner.CLIENT_TERM_GRACE_SEC = .2
+        pre_send = json.dumps({'ok': False, 'code': 'MODEL_MENU_NOT_READY', 'deliveryStage': 'PRE_SEND'})
+        for denied_signal in (signal.SIGTERM, signal.SIGKILL):
+            for timed_out in (False, True):
+                out, err = 'synthetic captured stdout', pre_send
+                class Child:
+                    pid = 424242
+                    returncode = None
+                    stdout = stderr = None
+                    calls = 0
+                    def communicate(self, *args, **kwargs):
+                        self.calls += 1
+                        a, b = (out.encode(), err.encode()) if case.endswith('runner-cleanup-failure') else (out, err)
+                        if timed_out and self.calls == 1:
+                            raise subprocess.TimeoutExpired('synthetic-child', .2, output=a, stderr=b)
+                        self.returncode = 0
+                        return a, b
+                signals = []
+                def deny(pid, sig):
+                    assert pid == Child.pid
+                    signals.append(sig)
+                    if sig == denied_signal:
+                        raise PermissionError(errno.EPERM, 'synthetic cleanup denied')
+                clock = iter(([0, 0, 4, 4, 5] if timed_out else [0, 0, 0, 1]) + [10] * 20)
+                child = Child()
+                if case == 'private-runner-cleanup-failure':
+                    sink_out = io.TextIOWrapper(io.BytesIO())
+                    sink_err = io.TextIOWrapper(io.BytesIO())
+                    with patch.object(runner.sys, 'argv', ['runner', 'fake-client', '3']), patch.object(runner.sys, 'stdin', io.TextIOWrapper(io.BytesIO(b'synthetic input'))), patch.object(runner.sys, 'stdout', sink_out), patch.object(runner.sys, 'stderr', sink_err), patch.object(runner.subprocess, 'Popen', return_value=child), patch.object(runner.os, 'killpg', deny), patch.object(runner.time, 'monotonic', side_effect=clock), patch.object(runner.time, 'sleep'):
+                        try:
+                            runner.main()
+                            raise AssertionError('cleanup failure became success')
+                        except PermissionError as error:
+                            assert error.output == out.encode() and error.stderr == err.encode()
+                            assert error.cleanup['phase'] == ('TERM' if denied_signal == signal.SIGTERM else 'KILL')
+                            assert error.timed_out is timed_out
+                    child = Child()
+                    sink_out = io.TextIOWrapper(io.BytesIO())
+                    sink_err = io.TextIOWrapper(io.BytesIO())
+                    clock = iter([0, 0, 1] + [10] * 20)
+                    with patch.object(runner.sys, 'argv', ['runner', 'fake-client', '3']), patch.object(runner.sys, 'stdin', io.TextIOWrapper(io.BytesIO(b'synthetic input'))), patch.object(runner.sys, 'stdout', sink_out), patch.object(runner.sys, 'stderr', sink_err), patch.object(runner.subprocess, 'Popen', return_value=child), patch.object(runner.os, 'killpg', deny), patch.object(runner.time, 'monotonic', side_effect=clock), patch.object(runner.time, 'sleep'):
+                        try:
+                            runpy.run_path(str(runner_path), run_name='__main__')
+                            raise AssertionError('runner cleanup failure became success')
+                        except SystemExit as error:
+                            assert error.code == 2
+                        sink_out.flush(); sink_err.flush()
+                        emitted_out, emitted_err = sink_out.buffer.getvalue().decode(), sink_err.buffer.getvalue().decode()
+                    assert emitted_out == out and emitted_err.startswith(err)
+                    completed = subprocess.CompletedProcess([], 2, emitted_out, emitted_err)
+                    assert coordinator.parse_worker_receipt(completed) is None
+                    detail = coordinator.worker_diagnostic(2, emitted_err, 'dispatch', stdout=emitted_out)['worker']
+                    assert detail['cleanup']['errno'] == errno.EPERM and detail['timedOut'] is timed_out
+                    assert detail['capturedReceipt']['deliveryStage'] == 'PRE_SEND'
+                    continue
+                with patch.object(coordinator.subprocess, 'Popen', return_value=child), patch.object(coordinator.os, 'killpg', deny), patch.object(coordinator.time, 'monotonic', side_effect=clock), patch.object(coordinator.time, 'sleep'):
+                    try:
+                        coordinator.run_bridge(['PRIVATE_TEST_ARGV'], timeout=3)
+                        raise AssertionError('cleanup failure became success')
+                    except (PermissionError, subprocess.TimeoutExpired) as error:
+                        captured_error = error
+                        assert isinstance(error, subprocess.TimeoutExpired) is timed_out
+                        assert error.output == out and error.stderr == err
+                        assert error.cleanup == {'errno': errno.EPERM, 'phase': 'TERM' if denied_signal == signal.SIGTERM else 'KILL', 'leaderPid': Child.pid, 'groupId': Child.pid, 'leaderReturnCode': child.returncode}
+                        diagnostic = coordinator.worker_diagnostic(None, error.stderr, 'dispatch', error=error)
+                        assert diagnostic['worker']['cleanup'] == error.cleanup
+                        assert diagnostic['worker']['timedOut'] is timed_out
+                        assert diagnostic['worker']['capturedReceipt']['deliveryStage'] == 'PRE_SEND'
+                        assert 'PRIVATE_TEST_ARGV' not in json.dumps(diagnostic) and 'synthetic captured stdout' not in json.dumps(diagnostic)
+                assert signal.SIGTERM in signals and denied_signal in signals
+        db, op, config, state = temporary_queue(coordinator, fakes, worker_body="raise AssertionError('must not invoke real worker')\n")
+        try:
+            if case == 'private-cleanup-failure':
+                with patch.object(coordinator, 'run_bridge', side_effect=captured_error):
+                    result = coordinator.work_one(db)
+            else:
+                with patch.object(coordinator, 'run_bridge', return_value=completed):
+                    result = coordinator.work_one(db)
+            assert result['status'] == 'DELIVERY_UNKNOWN'
+            saved = db.execute('SELECT attempts,pre_send_failures,result FROM operations WHERE id=?', (op['operationId'],)).fetchone()
+            assert tuple(saved[:2]) == (1, 0)
+            assert json.loads(saved['result'])['worker']['cleanup']['errno'] == errno.EPERM
+        finally:
+            db.close()
+        return
     if case in ('cancelled-claim-commit', 'cancelled-claim-after-commit'):
         marker = fakes.directory/'must-not-spawn'
         db, op, config, state = temporary_queue(coordinator, fakes,

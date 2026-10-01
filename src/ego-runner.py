@@ -22,6 +22,9 @@ def stop_client(process):
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    except PermissionError as error:
+        error.cleanup = {"errno": error.errno, "phase": "TERM", "leaderPid": process.pid, "groupId": process.pid, "leaderReturnCode": process.returncode}
+        raise
     try:
         stdout, stderr = process.communicate(timeout=CLIENT_TERM_GRACE_SEC)
     except subprocess.TimeoutExpired as pending:
@@ -42,6 +45,10 @@ def stop_client(process):
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            except PermissionError as error:
+                error.output, error.stderr = stdout, stderr
+                error.cleanup = {"errno": error.errno, "phase": "KILL", "leaderPid": process.pid, "groupId": process.pid, "leaderReturnCode": process.returncode}
+                raise
             break
         time.sleep(min(.05, remaining))
     try:
@@ -73,6 +80,7 @@ def main():
         raise ValueError("timeout must be between 1 and 600 seconds")
     payload = sys.stdin.buffer.read()
     process, interrupted, timed_out = None, None, False
+    stdout, stderr = b"", b""
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
 
     def interrupt(signum, _frame):
@@ -93,8 +101,9 @@ def main():
         if interrupted is not None:
             raise SystemExit(128 + interrupted)
         try:
-            process.communicate(payload, timeout=timeout)
-        except subprocess.TimeoutExpired:
+            stdout, stderr = process.communicate(payload, timeout=timeout)
+        except subprocess.TimeoutExpired as pending:
+            stdout, stderr = pending.output, pending.stderr
             timed_out = True
     finally:
         # Repeated TERM/INT cannot interrupt cleanup of the separately owned group.
@@ -102,7 +111,14 @@ def main():
             signal.signal(sig, signal.SIG_IGN)
         try:
             if process is not None:
-                write_output(*stop_client(process))
+                try:
+                    write_output(*stop_client(process))
+                except PermissionError as error:
+                    error.output = getattr(error, "output", None) or stdout
+                    error.stderr = getattr(error, "stderr", None) or stderr
+                    error.timed_out = timed_out
+                    write_output(error.output, error.stderr)
+                    raise
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
@@ -116,5 +132,9 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (ValueError, OSError) as error:
-        print(json.dumps({"ok": False, "status": "EGO_RUNNER_ERROR", "error": str(error)}), file=sys.stderr)
+        payload = {"ok": False, "status": "EGO_RUNNER_ERROR", "error": str(error)}
+        if hasattr(error, "cleanup"):
+            payload.update(cleanup=error.cleanup, timedOut=error.timed_out)
+            print(file=sys.stderr)  # Keep the failure marker separate from captured diagnostics.
+        print(json.dumps(payload), file=sys.stderr)
         raise SystemExit(2)

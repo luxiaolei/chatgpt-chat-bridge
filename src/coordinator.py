@@ -2265,6 +2265,9 @@ def stop_bridge(process):
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
+    except PermissionError as error:
+        error.cleanup = {"errno": error.errno, "phase": "TERM", "leaderPid": process.pid, "groupId": process.pid, "leaderReturnCode": process.returncode}
+        raise
     try:
         stdout, stderr = process.communicate(timeout=BRIDGE_TERM_GRACE_SEC)
     except subprocess.TimeoutExpired as pending:
@@ -2286,6 +2289,10 @@ def stop_bridge(process):
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            except PermissionError as error:
+                error.output, error.stderr = stdout, stderr
+                error.cleanup = {"errno": error.errno, "phase": "KILL", "leaderPid": process.pid, "groupId": process.pid, "leaderReturnCode": process.returncode}
+                raise
             break
         time.sleep(min(.05, remaining))
     try:
@@ -2306,7 +2313,8 @@ def run_bridge(args, timeout=None, capture=True):
     with bridge_cancellation():
         if _bridge_interrupted is not None:
             raise InterruptedError("BRIDGE_CANCELLED")
-        process, timed_out = None, False
+        process, timed_out, original_error = None, False, None
+        stdout, stderr = None, None
         try:
             # Signals only latch here, including between real spawn and assignment.
             process = subprocess.Popen(args, stdout=subprocess.PIPE if capture else None,
@@ -2319,14 +2327,26 @@ def run_bridge(args, timeout=None, capture=True):
                     timed_out = True
                     break
                 try:
-                    process.communicate(timeout=min(.2, remaining))
+                    stdout, stderr = process.communicate(timeout=min(.2, remaining))
                     break
-                except subprocess.TimeoutExpired:
-                    pass  # Worker threads observe cancellation without installing signals.
+                except subprocess.TimeoutExpired as pending:
+                    stdout, stderr = pending.output, pending.stderr
+        except OSError as error:
+            original_error = error
+            error.bridge_phase = "SPAWN" if process is None else "CAPTURE"
+            raise
         finally:
             if process is not None:
                 # Repeated signals stay latched throughout cleanup, including normal EOF.
-                stdout, stderr = stop_bridge(process)
+                try:
+                    stdout, stderr = stop_bridge(process)
+                except PermissionError as cleanup_error:
+                    stdout = getattr(cleanup_error, "output", None) or stdout
+                    stderr = getattr(cleanup_error, "stderr", None) or stderr
+                    error = original_error or (subprocess.TimeoutExpired("chat-bridge", timeout) if timed_out else cleanup_error)
+                    error.output, error.stderr = stdout, stderr
+                    error.cleanup, error.timed_out = cleanup_error.cleanup, timed_out
+                    raise error from None
         if _bridge_interrupted is not None:
             raise InterruptedError("BRIDGE_CANCELLED")
         if timed_out:
@@ -2336,11 +2356,43 @@ def run_bridge(args, timeout=None, capture=True):
         return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
-def worker_diagnostic(returncode, stderr, phase):
+def worker_diagnostic(returncode, stderr, phase, error=None, stdout=None):
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", errors="replace")
     # Private SQLite diagnostics only; public operation/queue responses omit result.
-    return {"worker": {"phase": phase, "exitCode": returncode, "stderrTail": (stderr or "")[-2048:]}}
+    worker = {"phase": phase, "exitCode": returncode, "stderrTail": (stderr or "")[-2048:]}
+    cleanup = getattr(error, "cleanup", None)
+    timed_out = isinstance(error, subprocess.TimeoutExpired) or getattr(error, "timed_out", False)
+    receipt_stderr = stderr or ""
+    if cleanup is None:
+        for line in reversed(worker["stderrTail"].splitlines()):
+            try:
+                detail = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(detail, dict) and detail.get("status") == "EGO_RUNNER_ERROR" and "cleanup" in detail:
+                cleanup, timed_out = detail["cleanup"], detail.get("timedOut") is True
+                receipt_stderr = receipt_stderr[:receipt_stderr.rfind(line)]
+                break
+    if type(getattr(error, "errno", None)) is int:
+        worker["errno"] = error.errno
+    if getattr(error, "bridge_phase", None) in ("SPAWN", "CAPTURE"):
+        worker["errorPhase"] = error.bridge_phase
+    if isinstance(cleanup, dict):
+        worker["cleanup"] = {key: cleanup[key] for key in ("errno", "leaderPid", "groupId", "leaderReturnCode")
+                             if key in cleanup and (type(cleanup[key]) is int or cleanup[key] is None)}
+        if cleanup.get("phase") in ("TERM", "KILL"):
+            worker["cleanup"]["phase"] = cleanup["phase"]
+        worker["timedOut"] = timed_out is True
+        stdout = getattr(error, "output", None) if stdout is None else stdout
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        receipt = parse_worker_receipt(subprocess.CompletedProcess([], 1, stdout or "", receipt_stderr))
+        if receipt and receipt.get("deliveryStage") in ("PRE_SEND", "SEND_ATTEMPTED"):
+            worker["capturedReceipt"] = {"deliveryStage": receipt["deliveryStage"]}
+            if re.fullmatch(r"[A-Z0-9_]{1,100}", str(receipt.get("code") or "")):
+                worker["capturedReceipt"]["code"] = receipt["code"]
+    return {"worker": worker}
 
 
 def claim(db):
@@ -2431,6 +2483,8 @@ def parse_worker_receipt(completed):
                 return None
             if not isinstance(value, dict):
                 continue
+            if value.get("status") == "EGO_RUNNER_ERROR" and "cleanup" in value:
+                return None  # A captured pre-send/success receipt cannot override failed cleanup.
             if any(key in value and not isinstance(value[key], bool) for key in ("ok", "delivered", "stopped", "interruptRequested", "cancelled")):
                 continue
             if "deliveryStage" in value and value["deliveryStage"] not in ("PRE_SEND", "SEND_ATTEMPTED"):
@@ -2574,7 +2628,7 @@ def reconcile_delivery(db, operation_id):
             evidence = receipt if completed.returncode == 0 else None
             reason = "MESSAGE_NOT_PROVEN" if evidence else "CHAT_READ_UNAVAILABLE"
             if not evidence:
-                diagnostic = worker_diagnostic(completed.returncode, completed.stderr, "evidence")
+                diagnostic = worker_diagnostic(completed.returncode, completed.stderr, "evidence", stdout=completed.stdout)
                 if (completed.returncode == 75 and receipt and receipt.get("ok") is False
                         and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("code") in {"PACING_DEFERRED", "WEB_COOLDOWN_ACTIVE"}):
                     reason = "CHAT_READ_DEFERRED"
@@ -2582,7 +2636,7 @@ def reconcile_delivery(db, operation_id):
                     diagnostic["worker"]["readDeferred"] = read_deferred
         except (OSError, subprocess.TimeoutExpired) as error:
             reason = "CHAT_READ_UNAVAILABLE"
-            diagnostic = worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "evidence")
+            diagnostic = worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "evidence", error=error)
     reg = registry(db)
     binding = ((reg.get("projects") or {}).get(row["project"]) or {}).get("bindings", {}).get(row["account_alias"]) or {}
     expected_project = (re.search(r"g-p-[0-9a-f]{32}", binding.get("projectId") or binding.get("projectUrl") or "") or [None])[0]
@@ -2697,7 +2751,7 @@ def work_one(db):
         completed = run_bridge(args)
     except (OSError, subprocess.TimeoutExpired) as error:
         return finish(db, row, "DELIVERY_UNKNOWN", type(error).__name__,
-                      result=worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "dispatch"))
+                      result=worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "dispatch", error=error))
     receipt = parse_worker_receipt(completed)
     if completed.returncode == 75:
         detail = receipt or {}
@@ -2720,10 +2774,10 @@ def work_one(db):
         if receipt and receipt.get("deliveryStage") == "SEND_ATTEMPTED":
             return finish(db, row, "DELIVERY_UNKNOWN", "SEND_ATTEMPTED_" + str(receipt.get("code") or "ERROR")[:200])
         return finish(db, row, "DELIVERY_UNKNOWN", "WORKER_EXIT_" + str(completed.returncode),
-                      result=worker_diagnostic(completed.returncode, completed.stderr, "dispatch"))
+                      result=worker_diagnostic(completed.returncode, completed.stderr, "dispatch", stdout=completed.stdout))
     if receipt is None:
         return finish(db, row, "DELIVERY_UNKNOWN", "WORKER_RECEIPT_UNREADABLE",
-                      result=worker_diagnostic(completed.returncode, completed.stderr, "dispatch"))
+                      result=worker_diagnostic(completed.returncode, completed.stderr, "dispatch", stdout=completed.stdout))
     if row["kind"] == "stop":
         if receipt.get("ok") is False:
             return finish(db,row,"DELIVERY_UNKNOWN","STOP_NOT_CONFIRMED")
@@ -2756,10 +2810,10 @@ def work_one(db):
             recorded = run_bridge(record_args, timeout=TASK_RECORD_TIMEOUT_SEC)
         except (OSError, subprocess.TimeoutExpired) as error:
             return finish(db, row, "DELIVERY_UNKNOWN", "TASK_RECORD_NOT_CONFIRMED", session_ref=target,
-                          result=worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "task-record"))
+                          result=worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "task-record", error=error))
         if recorded.returncode:
             return finish(db, row, "DELIVERY_UNKNOWN", "TASK_RECORD_NOT_CONFIRMED", session_ref=target,
-                          result=worker_diagnostic(recorded.returncode, recorded.stderr, "task-record"))
+                          result=worker_diagnostic(recorded.returncode, recorded.stderr, "task-record", stdout=recorded.stdout))
     if row["kind"] == "dispatch":
         clear_capacity_wait(db, row["task_id"])
     result_payload = {"delivered": True, "modelSelection": receipt.get("modelSelection")}
