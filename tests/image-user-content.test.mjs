@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
 import {inspectEgoImagePage} from '../src/capabilities/image/chatgpt-ego.ui.js';
 import {imagePromptHash} from '../src/capabilities/image/chatgpt-ego.js';
+const source=await readFile(new URL('../src/main.js',import.meta.url),'utf8');
+const state=new Function(source.slice(source.indexOf('async function state('),source.indexOf('\nfunction classifySnapshot'))+';return state;')();
 
 // Synthetic rendering of the observed public bubble structure. Control labels
 // and collapsed ellipsis are siblings of the full search-result content target.
@@ -15,7 +18,7 @@ function element(attrs={},text='',children=[]) {
   const node={tagName:attrs.tag||'DIV',children,parentElement:null,
     get innerText(){return [text,...children.map(child=>child.innerText)].filter(Boolean).join('\n');},
     get textContent(){return text+children.map(child=>child.textContent).join('');},
-    getAttribute:name=>attrs[name]??null,getClientRects:()=>[{}],
+    getAttribute:name=>attrs[name]??null,getClientRects:()=>[{}],getBoundingClientRect:()=>({width:1,height:1}),
     querySelectorAll:selector=>descendants(node).filter(child=>matches(child,selector)),
     querySelector:selector=>node.querySelectorAll(selector)[0]||null,
     closest:selector=>{let n=node;while(n && !matches(n,selector))n=n.parentElement;return n;},
@@ -25,16 +28,17 @@ function element(attrs={},text='',children=[]) {
   return node;
 }
 
-async function observe(messages) {
+async function observe(messages,reader=inspectEgoImagePage) {
   const root=element({},'',messages),values={
-    document:{body:root,querySelector:selector=>selector==='main, [role="main"]'?root:null,querySelectorAll:()=>[]},
+    document:{body:root,querySelector:selector=>selector==='main, [role="main"]'||selector==='main'?root:null,querySelectorAll:selector=>root.querySelectorAll(selector)},
     location:{href:'https://chatgpt.com/c/11111111-1111-1111-1111-111111111111'},
     navigator:{onLine:true},getComputedStyle:()=>({display:'block',visibility:'visible'}),
+    __CHAT_BRIDGE_WATCH:{root,seq:0,lastMutationAt:Date.now(),startedAt:Date.now()},
   };
   const prior=new Map(Object.keys(values).map(k=>[k,Object.getOwnPropertyDescriptor(globalThis,k)]));
   try {
     for(const [k,value] of Object.entries(values))Object.defineProperty(globalThis,k,{value,configurable:true});
-    return await inspectEgoImagePage({evaluate:async(fn,args)=>fn(args)});
+    return await reader({evaluate:async(fn,args)=>fn(args)});
   }finally{for(const [k,d] of prior){if(d)Object.defineProperty(globalThis,k,d);else delete globalThis[k];}}
 }
 function user(body,{expanded=false,ambiguous=false,nested=false,duplicateBubble=false,clipped=false}={}) {
@@ -86,4 +90,47 @@ test('a legacy bubble without a content target preserves its authored heading an
   const result=await observe([element({'data-message-author-role':'user','data-message-id':'legacy-user'},'',[
     element({'data-user-message-bubble':'true'},body)])]);
   assert.equal(result.messagesComplete,true);assert.equal(result.messages[0].promptHash,imagePromptHash(body));
+});
+
+const snapshot=messages=>observe(messages,page=>state(page,true));
+test('shared send and evidence snapshots exclude disclosure controls and retain the exact authored body',async()=>{
+  for(const suffix of ['Show less','Show more','收起','展开']) for(const expanded of [false,true]) for(const legacy of [false,true]) {
+    const body='You said: authored heading.\nParagraph and footer '+suffix;
+    const rich=user(body,{expanded});
+    const message=legacy?element({'data-message-author-role':'user','data-message-id':'actual-user'},'',rich.children):rich;
+    const result=await snapshot([message]);
+    assert.equal(result.lastUser,body);
+    assert.equal(result.lastUserId,'actual-user');
+    assert.equal(result.userMessages[0].text,body);
+    assert.equal(imagePromptHash(result.userMessages[0].text),imagePromptHash(body));
+  }
+});
+
+test('nested inline links belong to the unique outer body and paragraph boundaries remain intact',async()=>{
+  const message=user('First paragraph',{expanded:true});
+  const target=message.querySelector('[data-search-result-target]');
+  for(const text of ['linked reference','Last paragraph Show less']) {
+    const child=element({'data-search-result-target':'',tag:'A'},text);
+    child.parentElement=target;target.children.push(child);
+  }
+  const body='First paragraph\nlinked reference\nLast paragraph Show less';
+  assert.notEqual(target.textContent,body);
+  const result=await snapshot([message]);
+  assert.equal(result.lastUser,body);
+  assert.equal(result.userMessages[0].text,body);
+  assert.notEqual(result.lastUser,'linked reference');
+});
+
+test('missing or ambiguous authored structures provide no full-text evidence; plain legacy bodies remain supported',async()=>{
+  const body='bounded request Show more';
+  const missing=element({'data-chatgpt-search-unit-key':'turn:user','data-chatgpt-search-message-ids':'actual-user'},body);
+  const linkOnly=user(body,{expanded:true});linkOnly.querySelector('[data-search-result-target]').tagName='A';
+  const controlledLegacy=element({'data-message-author-role':'user','data-message-id':'actual-user'},body,[element({tag:'BUTTON'},'Show less')]);
+  for(const message of [missing,linkOnly,controlledLegacy,user(body,{ambiguous:true}),user(body,{duplicateBubble:true})]) {
+    const result=await snapshot([message]);
+    assert.equal(result.lastUser,null);
+    assert.equal(result.userMessages[0].text,null);
+  }
+  const legacy=await snapshot([element({'data-message-author-role':'user','data-message-id':'actual-user'},body)]);
+  assert.equal(legacy.lastUser,body);
 });

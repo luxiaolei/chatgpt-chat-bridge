@@ -945,8 +945,25 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       // Offscreen conversation history is valid; display:none fallback/search clones are not.
       return style.display!=="none" && style.visibility!=="hidden" && rect.width>0 && rect.height>0;
     }
+    function userMessageText(node) {
+      const bubbles=[...node.querySelectorAll('[data-user-message-bubble="true"]')];
+      if(bubbles.length>1) return null;
+      const bubble=bubbles[0]||(node.getAttribute('data-user-message-bubble')==='true'?node:null);
+      if(!bubble) return node.getAttribute('data-message-author-role')==='user' &&
+        !node.querySelector('button, [data-thread-find-skip]') ? (node.innerText||'').trim() : null;
+      const targets=[...bubble.querySelectorAll('[data-search-result-target]')];
+      const outer=targets.filter(target=>{
+        const parent=target.parentElement?.closest('[data-search-result-target]');
+        return !parent || !bubble.contains(parent);
+      });
+      if(outer.length>1 || (outer.length===1 && outer[0].tagName!=='DIV')) return null;
+      const content=outer[0]||bubble;
+      if(content.querySelector('button, [data-thread-find-skip]')) return null;
+      return (content.innerText||'').trim();
+    }
     const legacy=[...document.querySelectorAll('[data-message-author-role]')].filter(renderedMessage).map(e=>({
-      role:e.getAttribute('data-message-author-role'), id:e.getAttribute('data-message-id')||null, text:(e.innerText||'').trim(),
+      role:e.getAttribute('data-message-author-role'), id:e.getAttribute('data-message-id')||null,
+      text:e.getAttribute('data-message-author-role')==='user'?userMessageText(e):(e.innerText||'').trim(),
       ...(e.getAttribute('data-message-author-role')==='assistant'?assistantSource(e,e.getAttribute('data-message-id')):null)
     }));
     let ms=legacy;
@@ -969,11 +986,10 @@ async function state(page, includeUserMessages=false, controlAction=null) {
         const dedupe=id?(role+':'+id):(role+':'+key);
         if(seen.has(dedupe)) continue;
         seen.add(dedupe);
-        const content=role==='user'
-          ? (unit.querySelector('[data-user-message-bubble="true"]')||unit)
-          : (unit.querySelector('[data-markdown-text-style="assistant-message"]')||unit.querySelector('[data-chatgpt-selection-message-id]')||unit);
-        let text=(content.innerText||content.textContent||'').trim();
-        text=text.replace(/^(?:You said:|ChatGPT said:)\s*/i,'').trim();
+        const content=role==='assistant'
+          ? (unit.querySelector('[data-markdown-text-style="assistant-message"]')||unit.querySelector('[data-chatgpt-selection-message-id]')||unit) : null;
+        let text=role==='user'?userMessageText(unit):(content.innerText||content.textContent||'').trim();
+        if(role==='assistant') text=text.replace(/^(?:You said:|ChatGPT said:)\s*/i,'').trim();
         const original=role==='assistant'?assistantSource(content,id):null;
         ms.push({role,id,text,...original});
       }
