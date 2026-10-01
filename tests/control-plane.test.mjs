@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 
 const coordinator = path.resolve("src/coordinator.py");
 
-async function fixture({twoAccounts=false}={}) {
+async function fixture({twoAccounts=false,sessionRef="controller"}={}) {
   const root=await mkdtemp(path.join(tmpdir(),"bridge-v09-"));
   const config=path.join(root,"config"), state=path.join(root,"state"), log=path.join(root,"worker.log");
   await mkdir(config); await mkdir(state);
@@ -21,7 +21,7 @@ async function fixture({twoAccounts=false}={}) {
   const registry={
     defaultProject:"P",defaultAccount:"a",accounts,
     projects:{P:{name:"P",activeAccount:"a",rootController:"conductor",bindings,workgroups:{},businessState:"REPLANNING",durableStateRef:"https://example.invalid/issues/1"}},
-    chats:{controller:{id:"controller",project:"P",account:"a",role:"conductor",status:"active",model:"Latest",effort:"High"}}
+    chats:{[sessionRef]:{id:sessionRef,project:"P",account:"a",role:"conductor",status:"active",model:"Latest",effort:"High"}}
   };
   await writeFile(path.join(config,"registry.json"),JSON.stringify(registry));
   await writeFile(path.join(state,"runtime.json"),JSON.stringify({version:2,projects:{},tasks:{},sessions:{}}));
@@ -192,7 +192,7 @@ test("transient pre-send retry stops at the limit and becomes visible for review
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
-test("unknown dispatch, callback and management require exact bound Chat evidence and leave an audit", async()=>{
+for(const suffix of ["","-test-project"]) test(`unknown dispatch, callback and management require exact bound Chat evidence (${suffix||"no slug"}) and leave an audit`, async()=>{
   const f=await fixture();
   try{
     const parse=r=>{ assert.equal(r.status,0,r.stderr); return JSON.parse(r.stdout); };
@@ -210,7 +210,7 @@ test("unknown dispatch, callback and management require exact bound Chat evidenc
     assert.equal(blockedMigration.unknownOperations.length,3);
     const accountId=createHash("sha256").update("identity:one").digest("hex");
     const evidence=(op,messageId,hash)=>JSON.stringify({ok:true,project:"P",account:"a",accountId,sessionRef:"controller",
-      url:"https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/c/controller",observedAt:"2026-09-26T12:00:00Z",
+      url:"https://chatgpt.com/g/g-p-"+"a".repeat(32)+suffix+"/c/controller",observedAt:"2026-09-26T12:00:00Z",
       matches:[{messageId,textHash:hash}]});
     const messageOf=id=>spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('SELECT message FROM operations WHERE id=?',(sys.argv[2],)).fetchone()[0])",path.join(f.state,"bridge.sqlite3"),id],{encoding:"utf8"}).stdout.trim();
     for(const [index,op] of operations.entries()){
@@ -230,6 +230,59 @@ test("unknown dispatch, callback and management require exact bound Chat evidenc
     const audit=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('SELECT count(*) FROM reconciliation_attempts').fetchone()[0]); print(d.execute(\"SELECT status FROM management_deliveries WHERE event_id='reconcile-event'\").fetchone()[0]); print(d.execute(\"SELECT callback_status FROM task_results WHERE task_id='reconcile-task'\").fetchone()[0])",path.join(f.state,"bridge.sqlite3")],{encoding:"utf8"});
     assert.equal(audit.status,0,audit.stderr);
     assert.equal(audit.stdout.trim(),"4\nDELIVERED\nDELIVERED");
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
+test("reconciliation accepts Project URL slugs only with complete exact bound evidence", async()=>{
+  const sessionRef="11111111-2222-4333-8444-555555555555";
+  const projectId="g-p-"+"a".repeat(32), base="https://chatgpt.com/g/"+projectId;
+  const f=await fixture({sessionRef});
+  try{
+    const parse=r=>{assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);};
+    const message="synthetic  exact\nmessage";
+    const op=parse(f.call("submit",[],{requestId:"project-url-evidence",callerRef:sessionRef,sessionRef,message}));
+    const stored=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('SELECT message FROM operations WHERE id=?',(sys.argv[2],)).fetchone()[0])",path.join(f.state,"bridge.sqlite3"),op.operationId],{encoding:"utf8"});
+    assert.equal(stored.status,0,stored.stderr);
+    const hash=createHash("sha256").update(stored.stdout.replace(/\s+/g," ").trim()).digest("hex");
+    const match={messageId:"exact-user-message",textHash:hash};
+    const receipt={ok:true,project:"P",account:"a",accountId:createHash("sha256").update("identity:one").digest("hex"),
+      sessionRef,url:base+"-test-project/c/"+sessionRef,observedAt:"2026-10-01T12:00:00Z",matches:[match]};
+    const cases=[
+      ["with slug",{},true],
+      ["without slug",{url:base+"/c/"+sessionRef},true],
+      ["wrong Project URL",{url:receipt.url.replace(projectId,"g-p-"+"b".repeat(32))}],
+      ["invalid Project ID boundary",{url:receipt.url.replace(projectId,projectId+"a")}],
+      ["wrong conversation URL",{url:receipt.url.replace(sessionRef,"66666666-7777-4888-8999-000000000000")}],
+      ["wrong session reference",{sessionRef:"other-session"}],
+      ["wrong account identity",{accountId:"0".repeat(64)}],
+      ["wrong account alias",{account:"b"}],
+      ["wrong logical Project",{project:"Other"}],
+      ["no matching user message",{matches:[]}],
+      ["ambiguous matching user messages",{matches:[match,{...match,messageId:"second-user-message"}]}],
+      ["mismatched normalized hash",{matches:[{...match,textHash:"0".repeat(64)}]}],
+      ["missing message ID",{matches:[{textHash:hash}]}],
+      ["missing observation time",{observedAt:undefined}],
+    ];
+    for(const [label,patch,delivered=false] of cases){
+      const updated=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute(\"UPDATE operations SET status='DELIVERY_UNKNOWN',reason='LOST_RECEIPT',result=NULL WHERE id=?\",(sys.argv[2],)); d.commit()",path.join(f.state,"bridge.sqlite3"),op.operationId],{encoding:"utf8"});
+      assert.equal(updated.status,0,updated.stderr);
+      const outcome=parse(f.call("reconcile",["--operation",op.operationId],null,{CHAT_BRIDGE_TEST_EVIDENCE:JSON.stringify({...receipt,...patch})}));
+      assert.equal(outcome.outcome,delivered?"RECONCILED_DELIVERED":"STILL_UNKNOWN",label);
+      assert.equal(parse(f.call("status",[op.operationId])).status,delivered?"SENT":"DELIVERY_UNKNOWN",label);
+      if(delivered){
+        assert.equal(outcome.evidence.projectId,projectId,label);
+        assert.equal(outcome.evidence.messageId,match.messageId,label);
+      }else{
+        assert.equal(outcome.reason,"EVIDENCE_INCOMPLETE_OR_MISMATCHED",label);
+        assert.equal(outcome.evidence,null,label);
+      }
+    }
+    const calls=(await readFile(f.log,"utf8")).trim().split("\n");
+    assert.equal(calls.length,cases.length);
+    assert.ok(calls.every(line=>line===`evidence ${sessionRef} --project P --account a --expected-hash ${hash}`));
+    const audit=spawnSync("python3",["-c","import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('SELECT count(*) FROM reconciliation_attempts').fetchone()[0]); print(d.execute(\"SELECT count(*) FROM reconciliation_attempts WHERE outcome='STILL_UNKNOWN' AND evidence IS NOT NULL\").fetchone()[0])",path.join(f.state,"bridge.sqlite3")],{encoding:"utf8"});
+    assert.equal(audit.status,0,audit.stderr);
+    assert.equal(audit.stdout.trim(),`${cases.length}\n0`);
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 

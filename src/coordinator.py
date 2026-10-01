@@ -2537,7 +2537,7 @@ def reconcile_delivery(db, operation_id):
     reg = registry(db)
     binding = ((reg.get("projects") or {}).get(row["project"]) or {}).get("bindings", {}).get(row["account_alias"]) or {}
     expected_project = (re.search(r"g-p-[0-9a-f]{32}", binding.get("projectId") or binding.get("projectUrl") or "") or [None])[0]
-    observed_project = (re.search(r"/g/(g-p-[0-9a-f]{32})/", (evidence or {}).get("url") or "") or [None, None])[1]
+    observed_project = (re.search(r"/g/(g-p-[0-9a-f]{32})(?:[-/]|$)", (evidence or {}).get("url") or "") or [None, None])[1]
     observed_session = (re.search(r"/c/([^/?#]+)", (evidence or {}).get("url") or "") or [None, None])[1]
     matches = (evidence or {}).get("matches") or []
     proven = (bool(expected_project) and expected_project == observed_project
