@@ -51,6 +51,7 @@ import json,pathlib,sys
 data=json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert data["status"]=="DEFERRED", data
 assert data["reason"]=="UI_LOCK_BUSY", data
+assert data["deliveryStage"]=="PRE_SEND", data
 PY
 [[ "$(wc -l < "$LOG" | tr -d ' ')" == "1" ]]
 rm -f "$LOG"
@@ -79,6 +80,7 @@ import json,pathlib,sys
 data=json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert data["status"]=="DEFERRED", data
 assert data["reason"]=="UI_PACING", data
+assert data["deliveryStage"]=="PRE_SEND", data
 assert data["retryAfterSec"]>=1, data
 PY
 python3 - "$ELAPSED" <<'PY'
@@ -133,6 +135,7 @@ import json,pathlib,sys
 data=json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert data["status"]=="COOLDOWN", data
 assert data["reason"]=="CHATGPT_RATE_LIMIT", data
+assert data["deliveryStage"]=="PRE_SEND", data
 assert data["retryAfterSec"]>=1, data
 PY
 [[ "$(wc -l < "$LOG" | tr -d ' ')" == "2" ]]

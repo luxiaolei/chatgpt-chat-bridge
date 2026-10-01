@@ -2411,19 +2411,61 @@ def finish(db, row, status, reason=None, retry_after=0, result=None, session_ref
 
 def parse_worker_receipt(completed):
     streams = (completed.stderr or "", completed.stdout or "") if completed.returncode else (completed.stdout or "", completed.stderr or "")
+    def unique_object(pairs):
+        value = dict(pairs)
+        if len(value) != len(pairs):
+            raise ValueError("DUPLICATE_RECEIPT_FIELD")
+        return value
+    decoder, selected = json.JSONDecoder(object_pairs_hook=unique_object), None
     for stream in streams:
         text = stream.strip()
-        if not text:
-            continue
-        candidates = [text, *reversed([line.strip() for line in text.splitlines() if line.strip()])]
-        for candidate in candidates:
-            try:
-                value = json.loads(candidate.removeprefix("[error] "))
-            except ValueError:
+        consumed = 0
+        # Decode only line-start JSON, skipping its nested values and diagnostic prose.
+        for start in re.finditer(r'(?m)^[ \t]*(?:\[error\] )?(?=\{|\[\s*(?:[\{\["0-9-]|\]|true\b|false\b|null\b))', text):
+            if start.start() < consumed:
                 continue
-            if isinstance(value, dict):
-                return value
-    return None
+            try:
+                value, consumed = decoder.raw_decode(text, start.end())
+            except ValueError:
+                return None
+            if not isinstance(value, dict):
+                continue
+            if any(key in value and not isinstance(value[key], bool) for key in ("ok", "delivered", "stopped", "interruptRequested", "cancelled")):
+                continue
+            if "deliveryStage" in value and value["deliveryStage"] not in ("PRE_SEND", "SEND_ATTEMPTED"):
+                continue
+            ok, code = value.get("ok"), value.get("code")
+            if ok is False:
+                if any(value.get(key) is True for key in ("delivered", "stopped", "interruptRequested", "cancelled")):
+                    continue
+                if isinstance(code, str) and code in {"PACING_DEFERRED", "WEB_COOLDOWN_ACTIVE"}:
+                    delay = value.get("retryAfterSec")
+                    valid = value.get("status") in ("DEFERRED", "COOLDOWN") and type(delay) in (int, float) and 0 < delay < float("inf")
+                else:
+                    valid = isinstance(code, str) and bool(code) and value.get("deliveryStage") in ("PRE_SEND", "SEND_ATTEMPTED")
+            elif "delivered" in value:
+                valid = (ok is None or ok is True) and isinstance(value["delivered"], bool)
+            elif "matches" in value:
+                valid = ok is True and isinstance(value["matches"], list)
+            elif "nativeTarget" in value:
+                target = value["nativeTarget"]
+                valid = ok is True and isinstance(target, dict) and all(isinstance(target.get(key), str) and target[key]
+                        for key in ("host", "threadId", "cwd", "socket"))
+            elif "interruptRequested" in value or "cancelled" in value:
+                valid = ok is True and isinstance(value.get("turnId"), str) and bool(value["turnId"]) and any(
+                        isinstance(value.get(key), bool) for key in ("interruptRequested", "cancelled"))
+            elif "id" in value:
+                valid = isinstance(value["id"], str) and bool(value["id"]) and (ok is True or (ok is None and all(
+                        isinstance(value.get(key), str) and value[key] for key in ("project", "account", "url"))))
+            else:
+                valid = (ok is None or ok is True) and isinstance(value.get("stopped"), bool)
+            if not valid:
+                continue
+            if selected is not None and selected != value:
+                return None  # Conflicting receipts cannot prove a send or a safe retry.
+            if selected is None:
+                selected = value  # Keep the existing stdout/stderr preference for matching receipts.
+    return selected
 
 
 def pre_send_retry_after(row, receipt):
@@ -2520,24 +2562,30 @@ def reconcile_delivery(db, operation_id):
                 "reason": reason, "evidence": superseded}
     expected = hashlib.sha256(" ".join(row["message"].split()).encode()).hexdigest()
     evidence, reason = None, "NO_SESSION_REFERENCE"
-    diagnostic = None
+    diagnostic, read_deferred = None, None
     if row["session_ref"]:
         bridge = os.environ.get("CHAT_BRIDGE_BIN") or str(pathlib.Path.home() / ".local/bin/chat-bridge")
         command = [bridge, "evidence", row["session_ref"], "--project", row["project"],
                    "--account", row["account_alias"], "--expected-hash", expected]
         try:
             completed = run_bridge(command)
-            evidence = parse_worker_receipt(completed) if completed.returncode == 0 else None
+            receipt = parse_worker_receipt(completed)
+            evidence = receipt if completed.returncode == 0 else None
             reason = "MESSAGE_NOT_PROVEN" if evidence else "CHAT_READ_UNAVAILABLE"
             if not evidence:
                 diagnostic = worker_diagnostic(completed.returncode, completed.stderr, "evidence")
+                if (completed.returncode == 75 and receipt and receipt.get("ok") is False
+                        and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("code") in {"PACING_DEFERRED", "WEB_COOLDOWN_ACTIVE"}):
+                    reason = "CHAT_READ_DEFERRED"
+                    read_deferred = {key: receipt[key] for key in ("code", "status", "reason", "retryAfterSec") if key in receipt}
+                    diagnostic["worker"]["readDeferred"] = read_deferred
         except (OSError, subprocess.TimeoutExpired) as error:
             reason = "CHAT_READ_UNAVAILABLE"
             diagnostic = worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "evidence")
     reg = registry(db)
     binding = ((reg.get("projects") or {}).get(row["project"]) or {}).get("bindings", {}).get(row["account_alias"]) or {}
     expected_project = (re.search(r"g-p-[0-9a-f]{32}", binding.get("projectId") or binding.get("projectUrl") or "") or [None])[0]
-    observed_project = (re.search(r"/g/(g-p-[0-9a-f]{32})/", (evidence or {}).get("url") or "") or [None, None])[1]
+    observed_project = (re.search(r"/g/(g-p-[0-9a-f]{32})(?:[-/]|$)", (evidence or {}).get("url") or "") or [None, None])[1]
     observed_session = (re.search(r"/c/([^/?#]+)", (evidence or {}).get("url") or "") or [None, None])[1]
     matches = (evidence or {}).get("matches") or []
     proven = (bool(expected_project) and expected_project == observed_project
@@ -2587,7 +2635,8 @@ def reconcile_delivery(db, operation_id):
     except Exception:
         db.rollback()
         raise
-    return {"operationId":operation_id,"kind":row["kind"],"outcome":outcome,"reason":reason,"evidence":evidence}
+    return {"operationId":operation_id,"kind":row["kind"],"outcome":outcome,"reason":reason,"evidence":evidence,
+            **({"readDeferred":read_deferred} if read_deferred else {})}
 
 
 def work_one(db):
@@ -2651,7 +2700,7 @@ def work_one(db):
     receipt = parse_worker_receipt(completed)
     if completed.returncode == 75:
         detail = receipt or {}
-        if detail.get("code") in {"PACING_DEFERRED", "WEB_COOLDOWN_ACTIVE"}:
+        if detail.get("ok") is False and detail.get("deliveryStage") == "PRE_SEND" and detail.get("code") in {"PACING_DEFERRED", "WEB_COOLDOWN_ACTIVE"}:
             return finish(db, row, "QUEUED", detail.get("reason"), max(1, float(detail.get("retryAfterSec", 10))))
     if completed.returncode and receipt and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("code") == "CAPACITY_WAIT":
         if row["kind"] == "dispatch":
