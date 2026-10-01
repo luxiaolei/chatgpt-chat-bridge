@@ -85,7 +85,7 @@ def reconcile_pending(reg, runtime, project, now=None):
     return bool(reconcile_pending_scopes(reg, runtime, project, now))
 
 
-def lifecycle_account(reg, project, owner, role, workgroup):
+def lifecycle_owner(reg, project, owner, role, workgroup):
     chats = reg.get("chats", {})
     seen = set()
     if owner:
@@ -96,13 +96,13 @@ def lifecycle_account(reg, project, owner, role, workgroup):
             if chat.get("project") != project or (actual != workgroup and (not workgroup or actual)):
                 return None
             if not chat.get("successorSessionRef") and chat.get("status", "active") == "active":
-                return chat.get("account")
+                return chat
             owner = chat.get("successorSessionRef")
         return None
     matches = [chat for chat in chats.values() if chat.get("project") == project
                and chat.get("role") == role and chat.get("status", "active") == "active"
                and (chat.get("workgroupId") or None) == workgroup]
-    return matches[0].get("account") if len(matches) == 1 else None
+    return matches[0] if len(matches) == 1 else None
 
 
 def reconcile_pending_scopes(reg, runtime, project, now=None):
@@ -126,7 +126,7 @@ def reconcile_pending_scopes(reg, runtime, project, now=None):
     gap = max(0, float(300 if raw_gap is None else raw_gap))
     current = now or datetime.now(timezone.utc)
     for group_id, scoped, rp in scopes:
-        if rp.get("watchdogPausedForUserControl"):
+        if rp.get("watchdogPausedForUserControl") or (rp.get("pendingReconcileEvent") or {}).get("deliveryStage") == "SEND_ATTEMPTED":
             continue
         if group_id:
             active = [t for t in scoped if str(t.get("status") or "").upper() not in terminal]
@@ -157,8 +157,10 @@ def reconcile_pending_scopes(reg, runtime, project, now=None):
         owner = (group.get("controllerSessionRef") or group.get("ownerSessionRef")) if group_id else latest.get("replyToSessionRef") or latest.get("controllerSessionRef")
         if str(owner or "").startswith("codex:"):
             continue  # Local owners pull results; there is no authorized background wake-up transport.
-        account = lifecycle_account(reg, project, owner, group.get("controllerRole") or root, group_id) or project_account(reg, project)
-        pending.append((group_id, account))
+        target = lifecycle_owner(reg, project, owner, group.get("controllerRole") or root, group_id)
+        if not target or not target.get("account") or any(t.get("sessionId") == target.get("id") and t.get("watchdogPausedForUserControl") for t in tasks):
+            continue
+        pending.append((group_id, target["account"]))
     return pending
 
 

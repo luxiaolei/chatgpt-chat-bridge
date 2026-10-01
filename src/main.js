@@ -885,15 +885,19 @@ function normalizedEvidenceText(text) {
     .replace(/\s+(?:Show more|Show less|显示更多|收起)$/i,"").trim();
 }
 
-async function expandEvidenceMessages(page) {
+async function expandEvidenceMessages(page, latestOnly=false) {
   for(let pass=0;pass<3;pass++) {
-    const expanded=await page.evaluate(()=>{
-      const buttons=[...document.querySelectorAll('button')].filter(button=>
+    const expanded=await page.evaluate((latestOnly)=>{
+      let buttons=[...document.querySelectorAll('button')].filter(button=>
         /^(?:Show more|显示更多|展开)$/i.test((button.innerText||button.getAttribute('aria-label')||'').trim()) &&
         button.closest('[data-message-author-role="user"], [data-chatgpt-search-unit-key$=":user"], [data-content-search-unit-key$=":user"]'));
+      if(latestOnly) {
+        const latest=[...document.querySelectorAll('[data-message-author-role="user"], [data-chatgpt-search-unit-key$=":user"], [data-content-search-unit-key$=":user"]')].at(-1);
+        buttons=buttons.filter(button=>latest?.contains(button));
+      }
       for(const button of buttons) button.click();
       return buttons.length;
-    });
+    },latestOnly);
     if(!expanded) break;
     await page.waitForTimeout(150);
   }
@@ -1044,7 +1048,8 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       online:navigator.onLine,visibility:document.visibilityState,pageWasDiscarded:!!document.wasDiscarded,
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,
       lastAssistantTextSource:lastAssistantMsg?.textSource||'rendered-dom',
-      userMessages:includeUserMessages?ms.filter(x=>x.role==='user'):undefined,
+      userMessages:includeUserMessages===true?ms.filter(x=>x.role==='user'):undefined,
+      userMessageIds:includeUserMessages?ms.filter(x=>x.role==='user').map(x=>x.id).filter(Boolean):undefined,
       messageCount:ms.length,assistantCount:ms.filter(x=>x.role==='assistant').length,
       assistantChars:lastAssistant?.length||0,
       mutationSeq:globalThis.__CHAT_BRIDGE_WATCH.seq,
@@ -1112,12 +1117,19 @@ async function observeSession(chat,page,task=null) {
   return hb;
 }
 
-function deliveryObserved(before, after) {
-  if(!after) return false;
-  if(after.messageCount>before.messageCount && after.lastUser) return true;
-  if(after.lastUserId && after.lastUserId!==before.lastUserId) return true;
-  if(after.url && before?.url && after.url!==before.url && /\/c\/[0-9a-f-]+/i.test(after.url)) return true;
-  return false;
+function deliveryObserved(before, after, message=before?.expectedMessage) {
+  if(!before || !after?.lastUserId || !normalizedEvidenceText(message) ||
+    normalizedEvidenceText(after.lastUser)!==normalizedEvidenceText(message) ||
+    after.lastUserId===before.lastUserId || (before.userMessageIds||[]).includes(after.lastUserId)) return false;
+  const target=before.targetUrl||before.url;
+  if(sameConversationUrl(after.url,target)) return true;
+  if(!sameConversationUrl(after.url,after.url)) return false;
+  try {
+    const start=new URL(target);
+    if(start.origin!=="https://chatgpt.com" || start.username || start.password) return false;
+    const project=projectHomeId(target), observedProject=projectKey(projectIdFromUrl(after.url));
+    return (!!project || start.pathname==="/") && (!project || !observedProject || project===observedProject);
+  } catch { return false; }
 }
 
 async function waitForDelivery(page, before, timeout=3000) {
@@ -1126,6 +1138,10 @@ async function waitForDelivery(page, before, timeout=3000) {
   while(Date.now()<deadline) {
     await page.waitForTimeout(150);
     latest=await state(page);
+    if(normalizedEvidenceText(latest.lastUser)!==normalizedEvidenceText(before.expectedMessage)) {
+      await expandEvidenceMessages(page,true);
+      latest=await state(page);
+    }
     if(deliveryObserved(before,latest)) return latest;
     await detectWebRateLimit(page,"send-verify");
   }
@@ -1152,22 +1168,28 @@ async function activateComposer(page) {
 
 async function triggerSend(page) {
   const hasSend=await page.evaluate(()=>!!document.querySelector('button[data-testid="send-button"]'));
-  if(hasSend) {
-    try { await page.click('button[data-testid="send-button"]'); return "click"; }
-    catch {}
+  sendAttempted=true;
+  try {
+    if(hasSend) {
+      await page.click('button[data-testid="send-button"]'); return "click";
+    }
+    await page.press(COMPOSER_SELECTOR,"Enter");
+    return "enter";
+  } catch(error) {
+    error.deliveryStage="SEND_ATTEMPTED";throw error;
   }
-  try { await page.press(COMPOSER_SELECTOR,"Enter"); return "enter"; }
-  catch {}
-  await activateComposer(page);
-  await page.keyboard.press("Enter");
-  return "enter";
 }
 
-async function sendMessage(page, msg) {
+async function sendMessage(page, msg, targetUrl=null) {
   await assertImagePageFree(page);
   await detectWebRateLimit(page,"send-before");
-  const before=await state(page);
+  const before=await state(page,"ids");
   assertComposerSafe(before);
+  if(targetUrl && !sameConversationUrl(before.url,targetUrl) &&
+    !(projectHomeId(before.url) && projectHomeId(before.url)===projectHomeId(targetUrl))) {
+    const error=new Error("DELIVERY_TARGET_MISMATCH");error.code=error.message;throw error;
+  }
+  before.expectedMessage=msg; before.targetUrl=targetUrl||before.url;
   try { await page.fill(COMPOSER_SELECTOR,msg); }
   catch {
     await activateComposer(page);
@@ -1177,20 +1199,20 @@ async function sendMessage(page, msg) {
   }
   await page.waitForTimeout(80);
   const attempts=[];
-  sendAttempted=true;
-  attempts.push(await triggerSend(page));
-  let after=await waitForDelivery(page,before,8000);
-  if(!deliveryObserved(before,after) && String(after.composerText||"").trim()) {
+  try {
     attempts.push(await triggerSend(page));
-    after=await waitForDelivery(page,before,8000);
+    const after=await waitForDelivery(page,before,8000);
+    await detectWebRateLimit(page,"send-after");
+    if(!deliveryObserved(before,after)) {
+      const err=new Error(`DELIVERY_UNCONFIRMED: composer=${after.composerPresent?"present":"missing"} text=${String(after.composerText||"").trim()?"nonempty":"empty"} attempts=${attempts.join(",")}`);
+      err.code="DELIVERY_UNCONFIRMED";
+      throw err;
+    }
+    return {delivered:true,attempts,lastUserId:after.lastUserId,url:after.url,messageCount:after.messageCount};
+  } catch(error) {
+    if(attempts.length) error.deliveryStage="SEND_ATTEMPTED";
+    throw error;
   }
-  await detectWebRateLimit(page,"send-after");
-  if(!deliveryObserved(before,after)) {
-    const err=new Error(`DELIVERY_UNCONFIRMED: composer=${after.composerPresent?"present":"missing"} text=${String(after.composerText||"").trim()?"nonempty":"empty"} attempts=${attempts.join(",")}`);
-    err.code="DELIVERY_UNCONFIRMED";
-    throw err;
-  }
-  return {delivered:true,attempts,lastUserId:after.lastUserId||null,messageCount:after.messageCount};
 }
 
 async function uploadImage(page, file, mimeType=null, {beforeUpload=null}={}) {
@@ -1228,9 +1250,9 @@ async function uploadImage(page, file, mimeType=null, {beforeUpload=null}={}) {
   return {uploaded:true,path:file,mimeType:detected,bytes:info.size};
 }
 
-async function askMessage(page, msg, timeout=180000) {
+async function askMessage(page, msg, timeout=180000, targetUrl=null) {
   const before=await state(page);
-  await sendMessage(page,msg);
+  await sendMessage(page,msg,targetUrl);
   await page.waitForFunction((n) => {
     const a=[...document.querySelectorAll('[data-message-author-role="assistant"], [data-chatgpt-search-unit-key$=":assistant"], [data-content-search-unit-key$=":assistant"]')];
     const stop=[...document.querySelectorAll("button")].some(b =>
@@ -1241,9 +1263,9 @@ async function askMessage(page, msg, timeout=180000) {
   return await state(page);
 }
 
-async function streamMessage(page, msg, {requestId, turnId, timeout=180000}={}) {
+async function streamMessage(page, msg, {requestId, turnId, timeout=180000, targetUrl=null}={}) {
   const before=await state(page);
-  await sendMessage(page,msg);
+  await sendMessage(page,msg,targetUrl);
   let sequence=0, emitted="", assistantMessageId=null;
   const emit=(type,payload)=>console.log(JSON.stringify({requestId,turnId,sequence:++sequence,type,...payload,observedAt:new Date().toISOString()}));
   emit("progress",{progress:{state:"started",delivery:"confirmed"}});
@@ -1924,6 +1946,8 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
   const scopedRuntime=workgroupId ? ((runtimeProject.workgroups||{})[workgroupId]||{}) : runtimeProject;
   if(runtimeProject.watchdogPausedForUserControl || scopedRuntime.watchdogPausedForUserControl)
     return {project:projectName,workgroupId:workgroupId||null,state:"USER_CONTROLLED",paused:true};
+  if(scopedRuntime.pendingReconcileEvent?.deliveryStage==="SEND_ATTEMPTED")
+    return {project:projectName,workgroupId:workgroupId||null,state:"DELIVERY_UNCONFIRMED",eventKey:scopedRuntime.pendingReconcileEvent.eventKey};
   const lifecycleScope=workgroupId
     ? {workgroupId,ownerSessionRef:group?.controllerSessionRef||group?.ownerSessionRef}
     : (Object.keys(project.workgroups||{}).length ? {legacyOnly:true} : null);
@@ -1932,10 +1956,11 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
   if(!candidate) return null;
   if(!candidate.ready) return {project:projectName,event:candidate.event,state:"DEFERRED_MIN_GAP",waitSec:candidate.waitSec,eventKey:candidate.eventKey};
   if(workgroupId && !group) return {project:projectName,workgroupId,event:candidate.event,state:"WORKGROUP_NOT_REGISTERED",eventKey:candidate.eventKey};
+  let owner=null;
   try {
     if(candidate.ownerSessionRef?.startsWith("codex:"))
       return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"LOCAL_OWNER_REQUIRES_PULL",ownerSessionRef:candidate.ownerSessionRef,eventKey:candidate.eventKey};
-    const owner=resolveLifecycleOwner(reg,{...group,workgroupId,controllerSessionRef:candidate.ownerSessionRef,
+    owner=resolveLifecycleOwner(reg,{...group,workgroupId,controllerSessionRef:candidate.ownerSessionRef,
       controllerRole:group?.controllerRole||candidate.rootRole},projectName);
     if(!owner) return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"OWNER_UNRESOLVED",eventKey:candidate.eventKey};
     if(account && owner.account!==account)
@@ -1949,7 +1974,7 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
       return {project:projectName,workgroupId:workgroupId||null,ownerSessionRef:owner.id,event:candidate.event,state:workgroupId?"OWNER_BUSY":"ROOT_BUSY",eventKey:candidate.eventKey,
         rootState:observed.sessionState,composerNonempty:!!String(observed.composerText||"").trim()};
     }
-    const delivery=await sendMessage(page,projectReconcileMessage(candidate));
+    const delivery=await sendMessage(page,projectReconcileMessage(candidate),owner.url);
     const latest=await loadRuntime();
     const currentProject={...(latest.projects[projectName]||{})};
     const state=workgroupId ? {...((currentProject.workgroups||{})[workgroupId]||{})} : currentProject;
@@ -1972,8 +1997,10 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
     const latest=await loadRuntime();
     const currentProject={...(latest.projects[projectName]||{})};
     const state=workgroupId ? {...((currentProject.workgroups||{})[workgroupId]||{})} : currentProject;
+    const pending=error.deliveryStage==="SEND_ATTEMPTED"
+      ? {...candidate,deliveryStage:"SEND_ATTEMPTED",attemptedOwnerSessionRef:owner?.id||null,attemptedTargetUrl:owner?.url||null} : candidate;
     if(error?.code==="SPACE_IN_USER_CONTROL") {
-      Object.assign(state,{pendingReconcileEvent:candidate,watchdogPausedForUserControl:true,
+      Object.assign(state,{pendingReconcileEvent:pending,watchdogPausedForUserControl:true,
         watchdogPausedAt:new Date().toISOString(),
         watchdogPausedSpace:error.spaceName||null,
         watchdogPausedOwnership:error.ownership||null});
@@ -1986,12 +2013,13 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
       return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"USER_CONTROLLED",paused:true,
         spaceName:error.spaceName||null,ownership:error.ownership||null,eventKey:candidate.eventKey};
     }
-    Object.assign(state,{pendingReconcileEvent:candidate,lastReconcileError:String(error?.message||error),
+    Object.assign(state,{pendingReconcileEvent:pending,lastReconcileError:String(error?.message||error),
       lastReconcileErrorAt:new Date().toISOString()});
     if(workgroupId) currentProject.workgroups={...(currentProject.workgroups||{}),[workgroupId]:state};
     else Object.assign(currentProject,state);
     latest.projects[projectName]=currentProject;
     await saveRuntime(latest);
+    if(error.deliveryStage==="SEND_ATTEMPTED") return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"DELIVERY_UNCONFIRMED",eventKey:candidate.eventKey};
     if(error?.code==="WEB_RATE_LIMITED") return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"WEB_COOLDOWN",account:error.account,eventKey:candidate.eventKey};
     return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"NOT_SENT",error:String(error?.message||error),eventKey:candidate.eventKey};
   }
@@ -2039,21 +2067,21 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
   if(observed.sessionState==="ERROR_RECOVERABLE") {
     detail=await nativeRetry(page);
     if(detail.clicked) method="native-"+(detail.kind||"retry");
-    else { await sendMessage(page,"continue"); method="continue"; }
+    else { await sendMessage(page,"continue",chat.url); method="continue"; }
   } else if(observed.sessionState==="IDLE_INCOMPLETE") {
     if(aggressive && attempts>=2 && live.originalMessage) {
-      await sendMessage(page,`[RECOVERY ${live.taskId}] Continue this existing task without duplicating completed work. Reconcile current GitHub/task state first. Original task:\n${live.originalMessage}`);
+      await sendMessage(page,`[RECOVERY ${live.taskId}] Continue this existing task without duplicating completed work. Reconcile current GitHub/task state first. Original task:\n${live.originalMessage}`,chat.url);
       method="guarded-resend-original";
     } else {
       const msg=attempts===0?"continue":"continue from where you left off. Do not restart or duplicate completed work; inspect the current task/GitHub state first.";
-      await sendMessage(page,msg); method="continue";
+      await sendMessage(page,msg,chat.url); method="continue";
     }
   } else if(observed.sessionState==="SUSPECT_STALL") {
     detail=await stopGeneration(page);
     if(!detail.stopped || !await waitForGenerationStop(page,7000)) return {action:"DEFERRED",reason:"GENERATION_STOP_NOT_CONFIRMED",detail};
     const current=(await loadRuntime()).tasks[task.taskId];
     if(!current || !activeTaskStatus(current.status) || current.watchdogPausedForUserControl) return {action:"SKIPPED",reason:"TASK_CHANGED_DURING_STOP"};
-    await sendMessage(page,"continue from where you left off. Do not restart or duplicate completed work; inspect the current task/GitHub state first.");
+    await sendMessage(page,"continue from where you left off. Do not restart or duplicate completed work; inspect the current task/GitHub state first.",chat.url);
     method="stop-and-continue";
   } else {
     return {action:"NONE",attempts};
@@ -2299,6 +2327,13 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
       const latest=await loadRuntime(), live=latest.tasks[task.taskId];
       if(!live || !activeTaskStatus(live.status)) {
         results.push({taskId:task.taskId,state:"TASK_CHANGED",status:live?.status||null});
+        continue;
+      }
+      if(error.deliveryStage==="SEND_ATTEMPTED") {
+        live.status="BLOCKED";live.blockedReason="DELIVERY_UNCONFIRMED";live.lastWatchError=error.message;live.lastWatchErrorAt=new Date().toISOString();
+        live.watchdogPendingNotification=`[WATCHDOG]\ntask_id: ${live.taskId}\nstatus: DELIVERY_UNCONFIRMED\nsummary: A recovery send was attempted without confirmation. Reconcile the exact conversation/message; do not replay this task or recovery.`;
+        latest.tasks[live.taskId]=live;await saveRuntime(latest);
+        results.push({taskId:live.taskId,state:"DELIVERY_UNCONFIRMED",error:error.message});
         continue;
       }
       live.watchErrorCount=Number(live.watchErrorCount||0)+1; live.lastWatchError=error.message; live.lastWatchErrorAt=new Date().toISOString();
@@ -3074,7 +3109,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     try {
       const imagePath=opt("image-path",null);
       if(imagePath) upload=await uploadImage(page,imagePath,opt("mime-type",null));
-      delivery=await sendMessage(page,msg);
+      delivery=await sendMessage(page,msg,chat.url);
     }
     catch(error) {
       if(tracked){
@@ -3107,7 +3142,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
     const dispatchModel=await applyDispatchModel(page,chat,null,null);
     const upload=opt("image-path",null)?await uploadImage(page,opt("image-path",null),opt("mime-type",null)):null;
-    const st=await askMessage(page,msg,Number(opt("timeout","180000")));
+    const st=await askMessage(page,msg,Number(opt("timeout","180000")),chat.url);
     print({chat:chat.name,response:st.lastAssistant,upload,modelSelection:dispatchModel?{
       model:dispatchModel.model||dispatchModel.observed?.model||null,
       effort:dispatchModel.effort||dispatchModel.observed?.effort||null,
@@ -3121,7 +3156,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     if(!requestId||!turnId) throw new Error("request-id and turn-id are required");
     try { await applyDispatchModel(page,chat,null,null); }
     catch(error) { if(!deferrableModelUiError(error)) throw error; }
-    await streamMessage(page,msg,{requestId,turnId,timeout:Number(opt("timeout","180000"))});
+    await streamMessage(page,msg,{requestId,turnId,timeout:Number(opt("timeout","180000")),targetUrl:chat.url});
   }
   if(cmd==="model"){
     const m=positionals(2).join(" "); if(!m) throw new Error("model required"); const applied=await applyModelSpec(page,m,opt("effort",null));
@@ -3153,10 +3188,10 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     if(linked) print(await gradedRecover(reg,chat,page,linked,observed,{maxAttempts:Number(opt("max-recovery","3"))||3,cooldownSec:0,aggressive:args.includes("--aggressive")}));
     else if(observed.sessionState==="ERROR_RECOVERABLE") print(await nativeRetry(page));
     else if(observed.generating && !args.includes("--aggressive")) print({ok:false,action:"DEFERRED",reason:"QUIET_GENERATION_IS_NOT_FAILURE",recommendation:"INSPECT_WITHOUT_STOP"});
-    else if(observed.generating){const stopped=await stopGeneration(page);const confirmed=stopped.stopped&&await waitForGenerationStop(page,7000);if(confirmed)await sendMessage(page,"continue");print({ok:!!confirmed,method:confirmed?"stop-and-continue":"stop-unconfirmed",stopped});}
-    else {await sendMessage(page,args.includes("--aggressive")&&observed.lastUser?observed.lastUser:"continue");print({ok:true,method:args.includes("--aggressive")?"resend-last-user":"continue"});}
+    else if(observed.generating){const stopped=await stopGeneration(page);const confirmed=stopped.stopped&&await waitForGenerationStop(page,7000);if(confirmed)await sendMessage(page,"continue",chat.url);print({ok:!!confirmed,method:confirmed?"stop-and-continue":"stop-unconfirmed",stopped});}
+    else {await sendMessage(page,args.includes("--aggressive")&&observed.lastUser?observed.lastUser:"continue",chat.url);print({ok:true,method:args.includes("--aggressive")?"resend-last-user":"continue"});}
   }
-  if(cmd==="resend"){const st=await state(page);if(!st.lastUser)throw new Error("no last user message");await sendMessage(page,st.lastUser);print({ok:true,resent:st.lastUser});}
+  if(cmd==="resend"){const st=await state(page);if(!st.lastUser)throw new Error("no last user message");await sendMessage(page,st.lastUser,chat.url);print({ok:true,resent:st.lastUser});}
 }
 else if(cmd==="new"){
   const p=project; if(!p) throw new Error("--project required");
@@ -3183,7 +3218,7 @@ else if(cmd==="new"){
       applied={model,effort:requestedEffort||observed.effort||null,observed,deferredUntilDispatch:true};
     }
     const before=await state(page);
-    await sendMessage(page,first); await page.waitForURL(/\/c\/[0-9a-f-]+/i,{timeout:30000});
+    await sendMessage(page,first,binding.projectUrl); await page.waitForURL(/\/c\/[0-9a-f-]+/i,{timeout:30000});
     const url=await page.url(), id=convId(url), projectBase=url.includes("/g/g-p-")?url.replace(/\/c\/[^/]+.*$/,''):binding.projectBase;
     if(projectBase){binding.projectBase=projectBase;binding.projectUrl=projectBase+"/project";binding.projectId=projectIdFromUrl(projectBase);}
     reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model,effort:requestedEffort||applied.effort||null,affinityKey,workgroupId,

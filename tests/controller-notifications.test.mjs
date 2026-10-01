@@ -26,7 +26,7 @@ async function harness(f) {
     assertWebAvailable=async account=>{f.calls.push(['cooldown',account]);};
     ensurePage=async(_reg,chat,options)=>{f.calls.push(['page',chat.id,options]);if(f.pause){const e=new Error('user control');e.code='SPACE_IN_USER_CONTROL';throw e;}return {page:{}};};
     observeSession=async()=>({inputReady:true,generating:false,sessionState:'IDLE_COMPLETE',...f.observed});
-    sendMessage=async(_page,message)=>{f.calls.push(['send',message]);return {delivered:true};};
+    sendMessage=async(_page,message)=>{f.calls.push(['send',message]);if(f.deliveryError){const e=new Error('DELIVERY_UNCONFIRMED');e.code='DELIVERY_UNCONFIRMED';e.deliveryStage='SEND_ATTEMPTED';throw e;}return {delivered:true};};
     emitTaskEvent=async(task,type,data)=>f.emit?f.emit(task,type,data):(f.events.push({taskId:task.taskId,type,data}),{cursor:'event-'+f.events.length});
     coordinated=(command,payload)=>{f.calls.push([command,payload]);return f.coordinate?f.coordinate(command,payload):{status:'QUEUED',operationId:'op'};};
     detachTerminalTaskPages=async()=>[];
@@ -141,6 +141,31 @@ test('group and owner task pauses stay local and local lifecycle owners never fa
   }
 });
 
+test('unconfirmed lifecycle delivery retains its event and never retries on a later scan',async()=>{
+  const f=fixture();f.deliveryError=true;
+  const api=await harness(f),first=await api.maybeNotifyProjectReconcile(f.reg,'P');
+  assert.equal(first.state,'DELIVERY_UNCONFIRMED');
+  assert.equal(f.runtime.projects.P.lastReconcileProgressAt,undefined);
+  assert.equal(f.runtime.projects.P.pendingReconcileEvent.deliveryStage,'SEND_ATTEMPTED');
+  f.deliveryError=false;
+  assert.equal((await api.maybeNotifyProjectReconcile(f.reg,'P')).state,'DELIVERY_UNCONFIRMED');
+  assert.equal(sent(f).length,1);
+});
+
+test('unconfirmed watchdog continuation blocks the existing task instead of recovering it again',async()=>{
+  const f=fixture();f.deliveryError=true;f.observed={sessionState:'IDLE_INCOMPLETE'};
+  f.reg.projects.P.lifecycle.autoReconcile=false;
+  f.reg.chats.worker={id:'worker',project:'P',account:'new',role:'worker',status:'active'};
+  Object.assign(f.runtime.tasks.T,{status:'RUNNING',sessionId:'worker',account:'new',controllerSessionRef:'root'});
+  const api=await harness(f);
+  await api.watchProject(f.reg,'P','new',{skipLifecycle:true});
+  assert.equal(f.runtime.tasks.T.status,'BLOCKED');
+  assert.equal(f.runtime.tasks.T.blockedReason,'DELIVERY_UNCONFIRMED');
+  f.deliveryError=false;
+  await api.watchProject(f.reg,'P','new',{skipLifecycle:true});
+  assert.equal(sent(f).length,1);
+});
+
 test('local owner notices use replayable local events without Web delivery or acceptance',async()=>{
   const root=await mkdtemp(path.join(tmpdir(),'bridge-owner-notice-'));
   const config=path.join(root,'config'),state=path.join(root,'state');
@@ -202,7 +227,24 @@ test('preflight admits only the actual legacy owner account, including successor
     await writeFile(path.join(config,'registry.json'),JSON.stringify(f.reg));
     await writeFile(path.join(state,'runtime.json'),JSON.stringify(f.runtime));
     assert.equal(run('owner'),'1');assert.equal(run('new'),'0');
+    for(const mode of ['zero','missing','multiple','foreign','cycle','owner-paused','sibling','local','unconfirmed']) {
+      const invalid=fixture();
+      if(mode==='zero') invalid.reg.chats={};
+      if(mode==='missing') invalid.runtime.tasks.T.replyToSessionRef='missing';
+      if(mode==='multiple') invalid.reg.chats.other={...invalid.reg.chats.root,id:'other',account:'new'};
+      if(mode==='foreign') {invalid.runtime.tasks.T.replyToSessionRef='foreign';invalid.reg.chats.foreign={...invalid.reg.chats.root,id:'foreign',project:'Q'};}
+      if(mode==='cycle') {invalid.runtime.tasks.T.replyToSessionRef='cycle';invalid.reg.chats.cycle={...invalid.reg.chats.root,id:'cycle',status:'archived',successorSessionRef:'cycle'};}
+      if(mode==='owner-paused') invalid.runtime.tasks.owner={taskId:'owner',project:'P',sessionId:'root',role:'00-g',status:'BLOCKED',watchdogPausedForUserControl:true};
+      if(mode==='sibling') invalid.reg.chats.root.workgroupId='B';
+      if(mode==='local') invalid.runtime.tasks.T.controllerSessionRef='codex:11111111-1111-4111-8111-111111111111';
+      if(mode==='unconfirmed') invalid.runtime.projects.P.pendingReconcileEvent={deliveryStage:'SEND_ATTEMPTED'};
+      await writeFile(path.join(config,'registry.json'),JSON.stringify(invalid.reg));
+      await writeFile(path.join(state,'runtime.json'),JSON.stringify(invalid.runtime));
+      assert.equal(run('owner'),'0',mode);assert.equal(run('new'),'0',mode);
+    }
     const worker=path.join(root,'watch');await writeFile(worker,'#!/bin/sh\nprintf \'%s\\n\' "$@"\n',{mode:0o755});
+    await writeFile(path.join(config,'registry.json'),JSON.stringify(f.reg));
+    await writeFile(path.join(state,'runtime.json'),JSON.stringify(f.runtime));
     const args=execFileSync('python3',[script,'watch-all',config,state,worker,'watch','--project','P'],{encoding:'utf8'});
     assert.match(args,/--account\nowner\n/);
     f.runtime.tasks.T.controllerSessionRef=undefined;
