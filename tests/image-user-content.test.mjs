@@ -1,10 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {inspectEgoImagePage} from '../src/capabilities/image/chatgpt-ego.ui.js';
 import {imagePromptHash} from '../src/capabilities/image/chatgpt-ego.js';
 const source=await readFile(new URL('../src/main.js',import.meta.url),'utf8');
 const state=new Function(source.slice(source.indexOf('async function state('),source.indexOf('\nfunction classifySnapshot'))+';return state;')();
+const normalize=source.slice(source.indexOf('function normalizedEvidenceText('),source.indexOf('\nasync function expandEvidenceMessages'));
+const evidenceAt=source.indexOf('const matches=(observed.userMessages||[]).filter(');
+const evidenceMatches=new Function('observed','expected','crypto',normalize+'\n'+
+  source.slice(evidenceAt,source.indexOf('\n    print({ok:true,project:chat.project',evidenceAt))+';return matches;');
 
 // Synthetic rendering of the observed public bubble structure. Control labels
 // and collapsed ellipsis are siblings of the full search-result content target.
@@ -126,11 +131,24 @@ test('missing or ambiguous authored structures provide no full-text evidence; pl
   const missing=element({'data-chatgpt-search-unit-key':'turn:user','data-chatgpt-search-message-ids':'actual-user'},body);
   const linkOnly=user(body,{expanded:true});linkOnly.querySelector('[data-search-result-target]').tagName='A';
   const controlledLegacy=element({'data-message-author-role':'user','data-message-id':'actual-user'},body,[element({tag:'BUTTON'},'Show less')]);
-  for(const message of [missing,linkOnly,controlledLegacy,user(body,{ambiguous:true}),user(body,{duplicateBubble:true})]) {
+  const rootAndNested=element({'data-message-author-role':'user','data-message-id':'actual-user','data-user-message-bubble':'true'},'different outer body',[
+    element({'data-user-message-bubble':'true'},body)]);
+  for(const message of [missing,linkOnly,controlledLegacy,rootAndNested,user(body,{ambiguous:true}),user(body,{duplicateBubble:true})]) {
     const result=await snapshot([message]);
     assert.equal(result.lastUser,null);
     assert.equal(result.userMessages[0].text,null);
   }
   const legacy=await snapshot([element({'data-message-author-role':'user','data-message-id':'actual-user'},body)]);
   assert.equal(legacy.lastUser,body);
+});
+
+test('the CLI evidence caller hashes complete authored suffixes and rejects another shorter operation',async()=>{
+  const hash=text=>crypto.createHash('sha256').update(text.replace(/\s+/g,' ').trim()).digest('hex');
+  for(const legacy of [false,true]) for(const suffix of ['Show more','Show less','显示更多','收起']) {
+    const body='bounded request '+suffix,rich=user(body,{expanded:true});
+    const message=legacy?element({'data-message-author-role':'user','data-message-id':'actual-user'},'',rich.children):rich;
+    const result=await snapshot([message]);
+    assert.equal(evidenceMatches(result,hash(body),crypto).length,1);
+    assert.equal(evidenceMatches(result,hash('bounded request'),crypto).length,0);
+  }
 });

@@ -881,8 +881,7 @@ function hashText(v="") {
 }
 
 function normalizedEvidenceText(text) {
-  return String(text||"").replace(/\s+/g," ").trim()
-    .replace(/\s+(?:Show more|Show less|显示更多|收起)$/i,"").trim();
+  return String(text||"").replace(/\s+/g," ").trim();
 }
 
 async function expandEvidenceMessages(page, latestOnly=false) {
@@ -946,9 +945,10 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       return style.display!=="none" && style.visibility!=="hidden" && rect.width>0 && rect.height>0;
     }
     function userMessageText(node) {
-      const bubbles=[...node.querySelectorAll('[data-user-message-bubble="true"]')];
+      const bubbles=[...(node.getAttribute('data-user-message-bubble')==='true'?[node]:[]),
+        ...node.querySelectorAll('[data-user-message-bubble="true"]')];
       if(bubbles.length>1) return null;
-      const bubble=bubbles[0]||(node.getAttribute('data-user-message-bubble')==='true'?node:null);
+      const bubble=bubbles[0]||null;
       if(!bubble) return node.getAttribute('data-message-author-role')==='user' &&
         !node.querySelector('button, [data-thread-find-skip]') ? (node.innerText||'').trim() : null;
       const targets=[...bubble.querySelectorAll('[data-search-result-target]')];
