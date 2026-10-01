@@ -42,10 +42,10 @@ test("conversation load error uses one native Retry before readiness",async()=>{
   assert.equal(selectors,2);
 });
 
-test("evidence expands only user messages and strips UI disclosure labels",async()=>{
+test("evidence expands only user messages and preserves literal disclosure words",async()=>{
   const message="[RESULT]\ntask_id: CB09-1\nsummary: done";
-  assert.equal(normalize(message+"\nShow less"),normalize(message));
-  assert.equal(normalize(message+"\nShow more"),normalize(message));
+  assert.equal(normalize(message+"\nShow less"),normalize(message)+" Show less");
+  assert.equal(normalize(message+"\nShow more"),normalize(message)+" Show more");
   let calls=0,waits=0;
   await expand({evaluate:async()=>++calls===1?1:0,waitForTimeout:async()=>{waits++;}});
   assert.equal(calls,2); assert.equal(waits,1);
