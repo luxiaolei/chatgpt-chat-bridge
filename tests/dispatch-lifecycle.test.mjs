@@ -10,6 +10,7 @@ const cases = [
   'coordinator-term', 'outer-spawn-assignment-int', 'serve-term', 'cancelled-claim-lock',
   'cancelled-claim-commit', 'cancelled-claim-after-commit',
   'timeout-budget-compatibility', 'private-diagnostic-bound', 'stale-claim-budget',
+  'private-cleanup-failure', 'private-runner-cleanup-failure', 'private-native-cleanup-failure',
   'dispatch-unstructured-diagnostic', 'dispatch-timeout-unknown',
   'evidence-timeout-unknown', 'task-record-timeout', 'task-record-unstructured',
   'structured-receipt-preserved',
