@@ -326,6 +326,38 @@ def temporary_queue(coordinator, fakes, *, existing=True, worker_body):
 
 
 def integration_case(case, coordinator, runner, runner_path, fakes):
+    if case == 'private-native-cleanup-failure':
+        error = PermissionError(errno.EPERM, 'synthetic cleanup denied')
+        error.cleanup = {'errno': errno.EPERM, 'phase': 'TERM', 'leaderPid': 424242, 'groupId': 424242, 'leaderReturnCode': 0}
+        error.output, error.stderr = 'PRIVATE_STDOUT', json.dumps({'ok': False, 'code': 'MODEL_MENU_NOT_READY', 'deliveryStage': 'PRE_SEND'})
+        error.timed_out = False
+        for action in ('send', 'create', 'read', 'cancel'):
+            for phase in (None, 'CAPTURE', 'SPAWN'):
+                error.bridge_phase = phase
+                with patch.object(coordinator, 'run_bridge', side_effect=error):
+                    receipt = coordinator.native_call({'action': action})
+                assert receipt['deliveryStage'] == 'SEND_ATTEMPTED'
+                assert 'worker' not in receipt and 'PRIVATE_STDOUT' not in json.dumps(receipt)
+        for phase, stage in (('SPAWN', 'PRE_SEND'), ('CAPTURE', 'SEND_ATTEMPTED'), (None, 'SEND_ATTEMPTED')):
+            capture = OSError(errno.EIO, 'synthetic adapter failure')
+            capture.bridge_phase = phase
+            with patch.object(coordinator, 'run_bridge', side_effect=capture):
+                assert coordinator.native_call({'action': 'send'})['deliveryStage'] == stage
+        db, op, config, state = temporary_queue(coordinator, fakes, worker_body="raise AssertionError('must not invoke real worker')\n")
+        try:
+            db.execute('UPDATE operations SET native_target=? WHERE id=?', ('{}', op['operationId']))
+            db.commit()
+            with patch.object(coordinator, 'run_bridge', side_effect=error):
+                result = coordinator.work_one(db)
+            assert result['status'] == 'DELIVERY_UNKNOWN' and 'worker' not in result
+            saved = db.execute('SELECT attempts,pre_send_failures,result FROM operations WHERE id=?', (op['operationId'],)).fetchone()
+            assert tuple(saved[:2]) == (1, 0)
+            private = json.loads(saved['result'])['worker']
+            assert private['cleanup']['errno'] == errno.EPERM and private['capturedReceipt']['deliveryStage'] == 'PRE_SEND'
+            assert 'PRIVATE_STDOUT' not in json.dumps(private)
+        finally:
+            db.close()
+        return
     if case in ('private-cleanup-failure', 'private-runner-cleanup-failure'):
         coordinator.BRIDGE_TERM_GRACE_SEC = runner.CLIENT_TERM_GRACE_SEC = .2
         pre_send = json.dumps({'ok': False, 'code': 'MODEL_MENU_NOT_READY', 'deliveryStage': 'PRE_SEND'})
@@ -397,6 +429,16 @@ def integration_case(case, coordinator, runner, runner_path, fakes):
                         assert diagnostic['worker']['capturedReceipt']['deliveryStage'] == 'PRE_SEND'
                         assert 'PRIVATE_TEST_ARGV' not in json.dumps(diagnostic) and 'synthetic captured stdout' not in json.dumps(diagnostic)
                 assert signal.SIGTERM in signals and denied_signal in signals
+        if case == 'private-runner-cleanup-failure':
+            original = OSError(errno.EIO, 'synthetic capture failure')
+            cleanup = PermissionError(errno.EPERM, 'synthetic cleanup denied')
+            cleanup.cleanup = {'errno': errno.EPERM, 'phase': 'TERM', 'leaderPid': Child.pid, 'groupId': Child.pid, 'leaderReturnCode': None}
+            with patch.object(runner.sys, 'argv', ['runner', 'fake-client', '3']), patch.object(runner.sys, 'stdin', io.TextIOWrapper(io.BytesIO(b''))), patch.object(runner.subprocess, 'Popen', return_value=Child()), patch.object(Child, 'communicate', side_effect=original), patch.object(runner.os, 'killpg', side_effect=cleanup), patch.object(runner, 'write_output'):
+                try:
+                    runner.main()
+                    raise AssertionError('capture/cleanup failure became success')
+                except OSError as error:
+                    assert error is original and error.cleanup == cleanup.cleanup
         db, op, config, state = temporary_queue(coordinator, fakes, worker_body="raise AssertionError('must not invoke real worker')\n")
         try:
             if case == 'private-cleanup-failure':

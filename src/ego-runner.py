@@ -79,7 +79,7 @@ def main():
     if not 1 <= timeout <= 600:  # Direct-runner compatibility, rejecting NaN/inf.
         raise ValueError("timeout must be between 1 and 600 seconds")
     payload = sys.stdin.buffer.read()
-    process, interrupted, timed_out = None, None, False
+    process, interrupted, timed_out, original_error = None, None, False, None
     stdout, stderr = b"", b""
     previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
 
@@ -105,6 +105,9 @@ def main():
         except subprocess.TimeoutExpired as pending:
             stdout, stderr = pending.output, pending.stderr
             timed_out = True
+    except OSError as error:
+        original_error = error
+        raise
     finally:
         # Repeated TERM/INT cannot interrupt cleanup of the separately owned group.
         for sig in previous:
@@ -113,12 +116,14 @@ def main():
             if process is not None:
                 try:
                     write_output(*stop_client(process))
-                except PermissionError as error:
-                    error.output = getattr(error, "output", None) or stdout
-                    error.stderr = getattr(error, "stderr", None) or stderr
+                except PermissionError as cleanup_error:
+                    error = original_error or cleanup_error
+                    error.output = getattr(cleanup_error, "output", None) or stdout
+                    error.stderr = getattr(cleanup_error, "stderr", None) or stderr
+                    error.cleanup = cleanup_error.cleanup
                     error.timed_out = timed_out
                     write_output(error.output, error.stderr)
-                    raise
+                    raise error from None
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)

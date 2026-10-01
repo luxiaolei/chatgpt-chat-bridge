@@ -460,7 +460,7 @@ def native_target(payload, creating=False):
     return {key: target.get(key) for key in ("host", "threadId", "cwd", "socket")}
 
 
-def native_call(payload):
+def native_call(payload, diagnostic=None):
     adapter = pathlib.Path(__file__).with_name("native-codex.mjs")
     if not adapter.is_file():
         return {"ok": False, "code": "NATIVE_ADAPTER_UNAVAILABLE", "deliveryStage": "PRE_SEND"}
@@ -468,11 +468,15 @@ def native_call(payload):
     try:
         completed = run_bridge(command)
         receipt = parse_worker_receipt(completed)
+        if receipt is None and diagnostic is not None:
+            diagnostic.update(worker_diagnostic(completed.returncode, completed.stderr, "native", stdout=completed.stdout))
         return receipt or {"ok": False, "code": "NATIVE_RECEIPT_UNREADABLE", "deliveryStage": "SEND_ATTEMPTED"}
-    except OSError:
-        return {"ok": False, "code": "NATIVE_ADAPTER_UNAVAILABLE", "deliveryStage": "PRE_SEND"}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "code": "NATIVE_ADAPTER_TIMEOUT", "deliveryStage": "SEND_ATTEMPTED"}
+    except (OSError, subprocess.TimeoutExpired) as error:
+        pre_send = getattr(error, "bridge_phase", None) == "SPAWN" and not hasattr(error, "cleanup")
+        code = "NATIVE_ADAPTER_UNAVAILABLE" if pre_send else "NATIVE_ADAPTER_TIMEOUT" if isinstance(error, subprocess.TimeoutExpired) else "NATIVE_ADAPTER_ERROR"
+        if diagnostic is not None:
+            diagnostic.update(worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "native", error=error))
+        return {"ok": False, "code": code, "deliveryStage": "PRE_SEND" if pre_send else "SEND_ATTEMPTED"}
 
 
 def native_operation_payload(row, action="send"):
@@ -506,18 +510,21 @@ def work_native(db, row):
         return finish(db, row, "FAILED_PRE_SEND", "NATIVE_TARGET_RESERVED", pre_send_failure=True)
     payload = native_operation_payload(row)
     payload["admission"] = {"state": str(state_dir_for(db)), "operationId": row["id"]}
-    receipt = native_call(payload)
+    diagnostic = {}
+    receipt = native_call(payload, diagnostic)
+    result = {**receipt, **diagnostic}
     if receipt.get("ok") and receipt.get("delivered") and receipt.get("turnId"):
-        return finish(db, row, "SENT", result=receipt)
+        return finish(db, row, "SENT", result=result)
     if receipt.get("deliveryStage") == "PRE_SEND":
         if receipt.get("code") in {"NATIVE_TARGET_BUSY", "NATIVE_ADMISSION_BLOCKED"}:
-            return finish(db, row, "QUEUED", receipt["code"], 30, result=receipt)
-        return finish(db, row, "FAILED_PRE_SEND", receipt.get("code"), result=receipt, pre_send_failure=True)
-    return finish(db, row, "DELIVERY_UNKNOWN", receipt.get("code"), result=receipt)
+            return finish(db, row, "QUEUED", receipt["code"], 30, result=result)
+        return finish(db, row, "FAILED_PRE_SEND", receipt.get("code"), result=result, pre_send_failure=True)
+    return finish(db, row, "DELIVERY_UNKNOWN", receipt.get("code"), result=result)
 
 
 def reconcile_native(db, row):
-    receipt = native_call(native_operation_payload(row, "read"))
+    diagnostic = {}
+    receipt = native_call(native_operation_payload(row, "read"), diagnostic)
     proven = receipt.get("ok") and receipt.get("delivered") and receipt.get("turnId")
     now = stamp()
     begin_immediate(db)
@@ -527,7 +534,7 @@ def reconcile_native(db, row):
             raise ValueError("OPERATION_CHANGED_DURING_RECONCILIATION")
         outcome = "RECONCILED_DELIVERED" if proven else "STILL_UNKNOWN"
         db.execute("INSERT INTO reconciliation_attempts VALUES (?,?,?,?,?,?)",
-                   (str(uuid.uuid4()), row["id"], outcome, "NATIVE_TURN_EVIDENCE" if proven else receipt.get("code"), json.dumps(receipt), now))
+                   (str(uuid.uuid4()), row["id"], outcome, "NATIVE_TURN_EVIDENCE" if proven else receipt.get("code"), json.dumps({**receipt, **diagnostic}), now))
         if proven:
             db.execute("UPDATE operations SET status='SENT',reason='RECONCILED_FROM_NATIVE_EVIDENCE',result=?,updated_at=? WHERE id=?",
                        (json.dumps(receipt), now, row["id"]))
@@ -3765,13 +3772,14 @@ def main():
                 authorize_control(db, project=row["project"])
                 if row["local_owner"]:
                     local_caller(row["caller_ref"], json.loads(row["local_owner"]))
-            value = native_call(native_operation_payload(row, "cancel" if command == "native-cancel" else "read"))
+            diagnostic = {}
+            value = native_call(native_operation_payload(row, "cancel" if command == "native-cancel" else "read"), diagnostic)
             if command == "native-cancel":
                 if value.get("ok") and not value.get("cancelled"):
-                    observed = native_call(native_operation_payload(row, "read"))
+                    observed = native_call(native_operation_payload(row, "read"), diagnostic)
                     value["cancelled"] = bool(observed.get("ok") and observed.get("turnStatus") == "interrupted" and observed.get("turnId") == value.get("turnId"))
                 prior = json.loads(row["result"]) if row["result"] else {}
-                prior["cancelReceipt"] = value
+                prior["cancelReceipt"] = {**value, **diagnostic}
                 db.execute("UPDATE operations SET result=?,updated_at=? WHERE id=?", (json.dumps(prior), stamp(), row["id"]))
                 if value.get("cancelled"):
                     db.execute("UPDATE operations SET status='CANCELLED',reason='NATIVE_TURN_INTERRUPTED' WHERE id=?", (row["id"],))
