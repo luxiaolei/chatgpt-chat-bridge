@@ -98,6 +98,72 @@ test('a legacy bubble without a content target preserves its authored heading an
 });
 
 const snapshot=messages=>observe(messages,page=>state(page,true));
+test('evidence window reports only loaded rendered containers, ordered IDs and identity gaps',async()=>{
+  const messages=[
+    element({'data-message-author-role':'user','data-message-id':'u1'},'authored body'),
+    element({'data-message-author-role':'assistant','data-message-id':'a1'},'reply'),
+    element({'data-message-author-role':'user'},''),
+    element({'data-message-author-role':'user','data-message-id':'u1'},'duplicate container'),
+    element({'data-message-author-role':'user','data-message-id':'hidden',hidden:''},'hidden clone'),
+  ];
+  const result=await snapshot(messages),window=result.evidenceWindow;
+  assert.equal(window.historyComplete,'unknown');
+  assert.equal(window.authoredBodyCompleteness,'unknown');
+  assert.deepEqual(window.nodes.map(n=>n.messageIds),[['u1'],['a1'],[],['u1']]);
+  assert.deepEqual(window.roleNodeCounts,{user:3,assistant:1});
+  assert.deepEqual(window.firstIdentifiedMessageIds,['u1']);
+  assert.deepEqual(window.lastIdentifiedMessageIds,['u1']);
+  assert.equal(window.missingIdNodeCount,1);
+  assert.deepEqual(window.duplicateMessageIds,[{role:'user',messageId:'u1',nodeCount:2}]);
+  assert.deepEqual(window.userBodyCounts,{extracted:2,empty:1,ambiguous:0,unavailable:0});
+  assert.equal(JSON.stringify(window).includes('authored body'),false);
+  const ordinary=await observe(messages,page=>state(page,'ids'));
+  assert.equal(ordinary.evidenceWindow,undefined);
+});
+
+test('evidence window distinguishes ambiguous, missing, empty and clipped body observations without claiming completeness',async()=>{
+  for(const [options,status] of [[{ambiguous:true},'ambiguous'],[{duplicateBubble:true},'ambiguous'],[{nested:true},'extracted'],[{clipped:true},'extracted']]) {
+    const result=await snapshot([user('complete authored footer',options)]),window=result.evidenceWindow;
+    assert.equal(window.historyComplete,'unknown');
+    assert.equal(window.authoredBodyCompleteness,'unknown');
+    assert.equal(window.nodes.find(n=>n.messageIds.includes('actual-user')).userBody.status,status);
+    assert.equal(window.nestedNodeCount,1);
+    assert.equal(window.userDisclosureCounts.collapsed,1);
+    if(options.clipped) {
+      assert.notEqual(result.userMessages[0].text,'complete authored footer');
+      assert.equal(evidenceMatches(result,imagePromptHash('complete authored footer'),crypto).length,0);
+    }
+  }
+  const missing=await snapshot([element({'data-chatgpt-search-unit-key':'missing:user'},'unbound body')]);
+  assert.equal(missing.evidenceWindow.userBodyCounts.unavailable,1);
+  const expanded=await snapshot([user('body',{expanded:true})]);
+  assert.equal(expanded.evidenceWindow.userDisclosureCounts.expanded,1);
+});
+
+test('CLI evidence exports the same window without private bodies and leaves undisclosed UI state unknown',async()=>{
+  const body='private authored example footer',message=user(body,{expanded:true});
+  const readAttribute=message.getAttribute;
+  message.getAttribute=name=>name==='data-chatgpt-search-message-ids'?'actual-user second-id':readAttribute(name);
+  const button=message.querySelector('button'),buttonAttribute=button.getAttribute;
+  button.getAttribute=name=>name==='aria-expanded'?null:buttonAttribute(name);
+  const observed=await snapshot([message]);
+  assert.deepEqual(observed.evidenceWindow.firstIdentifiedMessageIds,['actual-user','second-id']);
+  assert.equal(observed.evidenceWindow.userDisclosureCounts.expanded,0);
+  assert.equal(observed.evidenceWindow.userDisclosureCounts.unknown,2);
+  const begin=source.indexOf('    print({ok:true,project:chat.project',evidenceAt);
+  const end=source.indexOf('\n  }\n  if(cmd==="status")',begin);
+  const output=new Function('observed','chat','expected','matches','accountScope','reg','print',source.slice(begin,end));
+  const expected=imagePromptHash(body),matches=evidenceMatches(observed,expected,crypto);
+  let receipt;
+  output(observed,{project:'verified-project',account:'verified-account',id:'verified-session'},expected,matches,
+    ()=> 'verified-account-id',{},value=>{receipt=value;});
+  assert.equal(receipt.evidenceWindow,observed.evidenceWindow);
+  assert.deepEqual(receipt.matches,[{messageId:'actual-user',textHash:expected}]);
+  assert.equal(receipt.project,'verified-project');assert.equal(receipt.accountId,'verified-account-id');
+  assert.equal(receipt.sessionRef,'verified-session');assert.equal(receipt.url,observed.url);
+  assert.equal(JSON.stringify(receipt).includes(body),false);
+});
+
 test('shared send and evidence snapshots exclude disclosure controls and retain the exact authored body',async()=>{
   for(const suffix of ['Show less','Show more','收起','展开']) for(const expanded of [false,true]) for(const legacy of [false,true]) {
     const body='You said: authored heading.\nParagraph and footer '+suffix;
