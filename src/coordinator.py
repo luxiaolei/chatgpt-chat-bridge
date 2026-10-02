@@ -2391,14 +2391,14 @@ def worker_diagnostic(returncode, stderr, phase, error=None, stdout=None):
         if cleanup.get("phase") in ("TERM", "KILL"):
             worker["cleanup"]["phase"] = cleanup["phase"]
         worker["timedOut"] = timed_out is True
-        stdout = getattr(error, "output", None) if stdout is None else stdout
-        if isinstance(stdout, bytes):
-            stdout = stdout.decode("utf-8", errors="replace")
-        receipt = parse_worker_receipt(subprocess.CompletedProcess([], 1, stdout or "", receipt_stderr))
-        if receipt and receipt.get("deliveryStage") in ("PRE_SEND", "SEND_ATTEMPTED"):
-            worker["capturedReceipt"] = {"deliveryStage": receipt["deliveryStage"]}
-            if re.fullmatch(r"[A-Z0-9_]{1,100}", str(receipt.get("code") or "")):
-                worker["capturedReceipt"]["code"] = receipt["code"]
+    stdout = getattr(error, "output", None) if stdout is None else stdout
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8", errors="replace")
+    receipt = parse_worker_receipt(subprocess.CompletedProcess([], 1, stdout or "", receipt_stderr))
+    if receipt and receipt.get("deliveryStage") in ("PRE_SEND", "SEND_ATTEMPTED"):
+        worker["capturedReceipt"] = {"deliveryStage": receipt["deliveryStage"]}
+        if re.fullmatch(r"[A-Z0-9_]{1,100}", str(receipt.get("code") or "")):
+            worker["capturedReceipt"]["code"] = receipt["code"]
     return {"worker": worker}
 
 

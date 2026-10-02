@@ -11,6 +11,7 @@ const cases = [
   'cancelled-claim-commit', 'cancelled-claim-after-commit',
   'timeout-budget-compatibility', 'private-diagnostic-bound', 'stale-claim-budget',
   'private-cleanup-failure', 'private-runner-cleanup-failure', 'private-native-cleanup-failure',
+  'private-captured-timeout-receipt',
   'dispatch-unstructured-diagnostic', 'dispatch-timeout-unknown',
   'evidence-timeout-unknown', 'task-record-timeout', 'task-record-unstructured',
   'structured-receipt-preserved',
