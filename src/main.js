@@ -1011,7 +1011,7 @@ async function state(page, includeUserMessages=false, controlAction=null) {
           node.getAttribute('data-message-id'),node.getAttribute('data-chatgpt-selection-message-id'),
           ...(node.getAttribute('data-chatgpt-search-message-ids')||'').split(/\s+/),
           ...[...node.querySelectorAll('[data-chatgpt-selection-message-id]')]
-            .filter(child=>child.closest(messageSelector)===node).map(child=>child.getAttribute('data-chatgpt-selection-message-id'))
+            .filter(child=>child.closest(messageSelector)===node && renderedMessage(child)).map(child=>child.getAttribute('data-chatgpt-selection-message-id'))
         ].filter(Boolean).map(id=>id.trim()).filter(Boolean))];
         let parent=node.parentElement?.closest(messageSelector);
         while(parent && !['user','assistant'].includes(roleOf(parent))) parent=parent.parentElement?.closest(messageSelector);

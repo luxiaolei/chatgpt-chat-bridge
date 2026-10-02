@@ -121,6 +121,24 @@ test('evidence window reports only loaded rendered containers, ordered IDs and i
   assert.equal(ordinary.evidenceWindow,undefined);
 });
 
+test('owned selection descendants exclude hidden clones while retaining rendered offscreen IDs',async()=>{
+  for(const attributes of [{hidden:''},{'aria-hidden':'true'},{inert:''},{zeroArea:true}]) {
+    const hidden=element({'data-chatgpt-selection-message-id':'hidden-clone-id',...attributes});
+    if(attributes.zeroArea) hidden.getBoundingClientRect=()=>({width:0,height:0});
+    const offscreen=element({'data-chatgpt-selection-message-id':'offscreen-id'});
+    offscreen.getBoundingClientRect=()=>({width:1,height:1,top:-10000,left:-10000});
+    const message=element({'data-message-author-role':'user','data-message-id':'visible-user'},'exact authored body',[hidden,offscreen]);
+    const result=await snapshot([message]);
+    assert.deepEqual(result.evidenceWindow.nodes[0].messageIds,['visible-user','offscreen-id']);
+    assert.deepEqual(result.evidenceWindow.firstIdentifiedMessageIds,['visible-user','offscreen-id']);
+    assert.deepEqual(result.evidenceWindow.lastIdentifiedMessageIds,['visible-user','offscreen-id']);
+    assert.deepEqual(result.evidenceWindow.duplicateMessageIds,[]);
+    assert.equal(result.lastUser,'exact authored body');
+    assert.equal(evidenceMatches(result,imagePromptHash('exact authored body'),crypto).length,1);
+    assert.equal(evidenceMatches(result,imagePromptHash('wrong body'),crypto).length,0);
+  }
+});
+
 test('evidence window distinguishes ambiguous, missing, empty and clipped body observations without claiming completeness',async()=>{
   for(const [options,status] of [[{ambiguous:true},'ambiguous'],[{duplicateBubble:true},'ambiguous'],[{nested:true},'extracted'],[{clipped:true},'extracted']]) {
     const result=await snapshot([user('complete authored footer',options)]),window=result.evidenceWindow;
