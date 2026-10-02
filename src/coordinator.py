@@ -8,13 +8,14 @@ import pathlib
 import sqlite3
 import subprocess
 import signal
+import stat
 import sys
 import time
 import threading
 import uuid
 import fcntl
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone, timedelta
 
 
@@ -220,6 +221,14 @@ def connection(config, state, initialize=True):
     ensure_column(db, "task_results", "owner_project", "TEXT")
     ensure_column(db, "task_results", "owner_account", "TEXT")
     ensure_column(db, "task_results", "workgroup_id", "TEXT")
+    db.execute("""CREATE TABLE IF NOT EXISTS local_result_recoveries (
+        id TEXT PRIMARY KEY, task_id TEXT NOT NULL, result_version TEXT NOT NULL,
+        binding TEXT NOT NULL, binding_hash TEXT NOT NULL, native_proof_hash TEXT NOT NULL,
+        successor_owner TEXT NOT NULL, prepared_by TEXT NOT NULL, created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL, acknowledged_at TEXT,
+        result_ack_status TEXT, result_ack_message TEXT, result_acked_at TEXT,
+        UNIQUE(task_id,result_version)
+    )""")
     db.execute("""CREATE TABLE IF NOT EXISTS session_checkpoints (
         id TEXT PRIMARY KEY, project TEXT NOT NULL, role TEXT NOT NULL, workgroup_id TEXT, session_ref TEXT,
         task_id TEXT, version TEXT NOT NULL, summary TEXT NOT NULL, github TEXT,
@@ -1258,6 +1267,192 @@ def result(db, payload):
             "callbackStatus":callback_status,"acceptanceStatus":None}
 
 
+def local_recovery_native(owner, caller):
+    """Read Codex-owned runtime metadata, never caller-supplied evidence files."""
+    successor = local_caller(caller)
+    if (owner.get("host") != successor["host"] or owner.get("kind") != "codex"
+            or owner.get("transport") != "local-pull" or owner.get("threadId") == successor["threadId"]):
+        raise ValueError("LOCAL_RECOVERY_NATIVE_BINDING_MISMATCH")
+    # ponytail: this deployment's desktop schema only; unsupported releases fail closed.
+    path = pathlib.Path.home() / ".codex" / "state_5.sqlite"
+    try:
+        info = path.stat()
+        if info.st_uid != os.getuid() or not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022:
+            raise ValueError("LOCAL_RECOVERY_NATIVE_PROOF_UNAVAILABLE")
+        with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)) as native:
+            native.row_factory = sqlite3.Row
+            native.execute("PRAGMA query_only=ON")
+            rows = {row["id"]: dict(row) for row in native.execute("""SELECT id,cwd,source,originator,archived,
+                    archived_at,creator_user_id,creator_account_id FROM threads WHERE id IN (?,?)""",
+                    (owner.get("threadId"), successor["threadId"]))}
+    except (OSError, sqlite3.Error) as error:
+        raise ValueError("LOCAL_RECOVERY_NATIVE_PROOF_UNAVAILABLE") from error
+    old, new = rows.get(owner.get("threadId")), rows.get(successor["threadId"])
+    if (not old or not new or old["archived"] != 1 or not old["archived_at"] or new["archived"] != 0
+            or any(row["originator"] != "codex_work_desktop" or row["source"] != "vscode" for row in (old, new))
+            or any(not old[key] or old[key] != new[key] for key in ("creator_user_id", "creator_account_id"))
+            or not owner.get("cwd") or not old["cwd"] or not new["cwd"]
+            or pathlib.Path(old["cwd"]).resolve() != pathlib.Path(owner["cwd"]).resolve()
+            or pathlib.Path(new["cwd"]).resolve() != pathlib.Path(successor["cwd"]).resolve()
+            or pathlib.Path(new["cwd"]).resolve() != pathlib.Path(old["cwd"]).resolve()):
+        raise ValueError("LOCAL_RECOVERY_NATIVE_BINDING_MISMATCH")
+    # The existing local boundary trusts the OS user, not arbitrary claimed thread IDs.
+    proof_hash = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()
+    return successor, proof_hash
+
+
+def local_recovery_binding(db, payload, preview=False):
+    keys = ("taskId", "project", "operationId", "resultVersion", "eventId", "resultDigest", "scope")
+    binding = {key: payload.get(key) for key in keys}
+    if (binding["scope"] != "BRIDGE_TECHNICAL_RESULT" or binding["project"] != "Chat Bridge"
+            or binding["project"] not in (registry(db).get("projects") or {})):
+        raise ValueError("LOCAL_RECOVERY_BINDING_MISMATCH")
+    dispatches = db.execute("SELECT * FROM operations WHERE kind='dispatch' AND task_id=?", (binding["taskId"],)).fetchall()
+    # Results do not store operation IDs; multiple dispatches make their provenance ambiguous.
+    op = dispatches[0] if len(dispatches) == 1 else None
+    if (not op or op["id"] != binding["operationId"] or op["project"] != binding["project"] or not op["local_owner"]):
+        raise ValueError("LOCAL_RECOVERY_BINDING_MISMATCH")
+    owner = json.loads(op["local_owner"])
+    if op["caller_ref"] != "codex:" + str(owner.get("threadId") or ""):
+        raise ValueError("LOCAL_RECOVERY_BINDING_MISMATCH")
+    # Durable insertion order also invalidates grants for equal-time or backwards-clock revisions.
+    latest = db.execute("SELECT * FROM task_results WHERE task_id=? ORDER BY rowid DESC LIMIT 1",
+                        (op["task_id"],)).fetchone()
+    if not latest:
+        return binding, None, op, None
+    row = db.execute("SELECT * FROM task_results WHERE task_id=? AND result_version=?",
+                     (op["task_id"], binding["resultVersion"])).fetchone()
+    if (not row or row["event_id"] != binding["eventId"] or row["owner_ref"] != op["caller_ref"]
+            or row["owner_project"] != op["project"] or (row["owner_account"] is not None and row["owner_account"] != op["account_alias"])
+            or (row["workgroup_id"] or None) != (op["workgroup_id"] or None)):
+        raise ValueError("LOCAL_RECOVERY_BINDING_MISMATCH")
+    if latest["result_version"] != row["result_version"]:
+        raise ValueError("LOCAL_RECOVERY_STALE_RESULT")
+    if binding["resultDigest"] != row["payload_hash"] and (not preview or binding["resultDigest"] is not None):
+        raise ValueError("LOCAL_RECOVERY_BINDING_MISMATCH")
+    binding["resultDigest"] = row["payload_hash"]
+    provenance = {"binding": binding,
+                  "operation": {key: op[key] for key in ("id", "task_id", "project", "caller_ref", "local_owner",
+                                                        "session_ref", "account_id", "workgroup_id", "created_at")},
+                  "result": {key: row[key] for key in ("event_id", "payload_hash", "owner_ref", "owner_project",
+                                                       "owner_account", "workgroup_id", "recorded_at")}}
+    digest = hashlib.sha256(json.dumps(provenance, sort_keys=True).encode()).hexdigest()
+    return binding, digest, op, row
+
+
+def local_recovery_expired(row):
+    try:
+        start, end = (datetime.fromisoformat(row[key]) for key in ("created_at", "expires_at"))
+        now = datetime.now(timezone.utc)
+        return not start <= now < end or end > start + timedelta(minutes=15)
+    except (TypeError, ValueError):
+        return True
+
+
+def local_recovery_response(row):
+    binding = json.loads(row["binding"])
+    return {**binding, "recoveryId": row["id"], "callerRef": row["prepared_by"],
+            "originalOwnerRef": "codex:" + binding["originalThreadId"], "managementAuthorization": "HOST_LOCAL",
+            "successorOwner": json.loads(row["successor_owner"]), "createdAt": row["created_at"],
+            "expiresAt": row["expires_at"], "acknowledgedAt": row["acknowledged_at"],
+            "status": "RESULT_ACKED" if row["result_acked_at"] else ("EXPIRED" if local_recovery_expired(row) else
+                      ("READY" if row["acknowledged_at"] else "PREPARED"))}
+
+
+def local_recovery_event(db, kind, row, extra=None):
+    db.execute("INSERT INTO management_events VALUES (?,?,?,?,?)",
+               (str(uuid.uuid4()), "LOCAL_RESULT_RECOVERY_" + kind, "project:Chat Bridge",
+                json.dumps({**local_recovery_response(row), **(extra or {})}, ensure_ascii=False), stamp()))
+
+
+def local_recovery_current(db, payload, ready=True, expiry=True):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_result_recoveries'").fetchone():
+        raise ValueError("LOCAL_RECOVERY_NOT_REGISTERED")
+    row = db.execute("SELECT * FROM local_result_recoveries WHERE id=?", (payload.get("recoveryId"),)).fetchone()
+    if not row:
+        raise ValueError("LOCAL_RECOVERY_NOT_REGISTERED")
+    saved = json.loads(row["binding"])
+    if (any(payload.get(key) != saved[key] for key in ("taskId", "project", "operationId", "resultVersion", "eventId", "resultDigest", "scope"))
+            or payload.get("callerRef") != row["prepared_by"]):
+        raise ValueError("LOCAL_RECOVERY_BINDING_MISMATCH")
+    _, digest, op, result_row = local_recovery_binding(db, payload)
+    successor, proof_hash = local_recovery_native(json.loads(op["local_owner"]), payload.get("callerRef"))
+    authorize_control(db, payload.get("callerRef"), op["project"])
+    if digest != row["binding_hash"] or successor != json.loads(row["successor_owner"]):
+        raise ValueError("LOCAL_RECOVERY_STALE_BINDING")
+    if proof_hash != row["native_proof_hash"]:
+        raise ValueError("LOCAL_RECOVERY_STALE_NATIVE_PROOF")
+    if expiry and local_recovery_expired(row):
+        raise ValueError("LOCAL_RECOVERY_EXPIRED")
+    if ready and not row["acknowledged_at"]:
+        raise ValueError("LOCAL_RECOVERY_NOT_ACKNOWLEDGED")
+    if result_row["acceptance_status"] and (not row["result_acked_at"]
+            or (result_row["acceptance_status"], result_row["acceptance_message"], result_row["accepted_at"]) !=
+               (row["result_ack_status"], row["result_ack_message"], row["result_acked_at"])):
+        raise ValueError("RESULT_ALREADY_ACKED")
+    return row, op, result_row
+
+
+def local_recovery(db, action, payload):
+    """Explicit authority for one Bridge technical result; never a task-owner migration."""
+    local_caller(payload.get("callerRef"))  # Tunnel hints cannot inherit HOST_LOCAL administration.
+    if action not in {"preview", "prepare", "ack", "status"}:
+        raise ValueError("INVALID_LOCAL_RECOVERY_ACTION")
+    if action in {"prepare", "ack"} and payload.get("confirm") is not True:
+        raise ValueError("LOCAL_RECOVERY_CONFIRM_REQUIRED")
+    if action in {"prepare", "ack"}:
+        begin_immediate(db)
+    try:
+        if action in {"ack", "status"}:
+            row, _, _ = local_recovery_current(db, payload, ready=False, expiry=action != "status")
+            if action == "ack" and not row["acknowledged_at"]:
+                db.execute("UPDATE local_result_recoveries SET acknowledged_at=? WHERE id=?", (stamp(), row["id"]))
+                row = db.execute("SELECT * FROM local_result_recoveries WHERE id=?", (row["id"],)).fetchone()
+                local_recovery_event(db, "ACKNOWLEDGED", row)
+                value = local_recovery_response(row)
+            else:
+                value = {**local_recovery_response(row), "idempotent": True}
+        else:
+            binding, digest, op, result_row = local_recovery_binding(db, payload, preview=action == "preview")
+            successor, proof_hash = local_recovery_native(json.loads(op["local_owner"]), payload.get("callerRef"))
+            authorize_control(db, payload.get("callerRef"), op["project"])
+            if not result_row:
+                value = {**binding, "status": "PENDING", "recoveryPrepared": False}
+            elif result_row["acceptance_status"]:
+                if action == "prepare":
+                    raise ValueError("RESULT_ALREADY_ACKED")
+                value = {**binding, "status": "ALREADY_ACKED", "acceptanceStatus": result_row["acceptance_status"]}
+            elif action == "preview":
+                value = {**binding, "status": "ELIGIBLE"}
+            else:
+                prior = db.execute("SELECT * FROM local_result_recoveries WHERE task_id=? AND result_version=?",
+                                   (op["task_id"], result_row["result_version"])).fetchone()
+                if prior:
+                    if prior["prepared_by"] != payload.get("callerRef") or prior["binding_hash"] != digest:
+                        raise ValueError("LOCAL_RECOVERY_CONFLICT")
+                    row, _, _ = local_recovery_current(db, {**payload, "recoveryId": prior["id"]}, ready=False)
+                    value = {**local_recovery_response(row), "idempotent": True}
+                else:
+                    now = datetime.now(timezone.utc)
+                    recovery_id = str(uuid.uuid4())
+                    saved = {**binding, "originalThreadId": json.loads(op["local_owner"])["threadId"]}
+                    db.execute("""INSERT INTO local_result_recoveries
+                        (id,task_id,result_version,binding,binding_hash,native_proof_hash,successor_owner,prepared_by,created_at,expires_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                        (recovery_id, op["task_id"], result_row["result_version"], json.dumps(saved), digest, proof_hash,
+                         json.dumps(successor), payload["callerRef"], now.isoformat(), (now + timedelta(minutes=15)).isoformat()))
+                    row = db.execute("SELECT * FROM local_result_recoveries WHERE id=?", (recovery_id,)).fetchone()
+                    local_recovery_event(db, "PREPARED", row)
+                    value = local_recovery_response(row)
+        if action in {"prepare", "ack"}:
+            db.commit()
+        return value
+    except Exception:
+        if action in {"prepare", "ack"}:
+            db.rollback()
+        raise
+
+
 def result_ack(db, payload):
     task_id=str(payload.get("taskId") or "").strip()
     version=str(payload.get("resultVersion") or "1").strip()
@@ -1275,14 +1470,21 @@ def result_ack(db, payload):
     reg=registry(db)
     owner_ref=result_row["owner_ref"]
     local_owner = task.get("localOwner")
-    expected = owner_ref if local_owner else (resolve_successor(db, owner_ref) if owner_ref else result_owner(db,reg,task)[1])
+    recovery_id = payload.get("recoveryId")
+    if recovery_id:
+        if not local_owner:
+            raise ValueError("LOCAL_RECOVERY_BINDING_MISMATCH")
+        local_caller(caller)
+        expected = caller
+    else:
+        expected = owner_ref if local_owner else (resolve_successor(db, owner_ref) if owner_ref else result_owner(db,reg,task)[1])
     if not expected:
         raise ValueError("RESULT_ACK_OWNER_UNAVAILABLE")
     if caller!=expected:
         raise ValueError("RESULT_ACK_TARGET_MISMATCH")
-    if local_owner:
+    if local_owner and not recovery_id:
         local_caller(caller, local_owner)
-    else:
+    elif not local_owner:
         chat=(reg.get("chats") or {}).get(expected)
         if not chat or chat.get("status", "active") != "active" or chat.get("project") != task.get("project"):
             raise ValueError("RESULT_ACK_OWNER_UNAVAILABLE")
@@ -1295,6 +1497,7 @@ def result_ack(db, payload):
     now=stamp()
     begin_immediate(db)
     try:
+        recovery = local_recovery_current(db, payload)[0] if recovery_id else None
         current=db.execute("SELECT acceptance_status,acceptance_message,accepted_at FROM task_results WHERE task_id=? AND result_version=?",
                            (task_id,version)).fetchone()
         if current and current["acceptance_status"]:
@@ -1302,7 +1505,8 @@ def result_ack(db, payload):
                 raise ValueError("RESULT_ALREADY_ACKED")
             db.commit()
             return {"taskId":task_id,"resultVersion":version,"status":status,"callerRef":expected,"message":message,
-                    "acceptedAt":current["accepted_at"],"idempotent":True}
+                    "acceptedAt":current["accepted_at"],"idempotent":True,
+                    **({"recoveryId": recovery_id, "scope": "BRIDGE_TECHNICAL_RESULT"} if recovery else {})}
         latest=db.execute("""SELECT result_version,recorded_at FROM task_results
                             WHERE task_id=? ORDER BY recorded_at DESC,event_id DESC LIMIT 1""",(task_id,)).fetchone()
         if latest and latest["result_version"]!=version and latest["recorded_at"]>result_row["recorded_at"]:
@@ -1314,6 +1518,12 @@ def result_ack(db, payload):
         if local_owner:
             db.execute("""UPDATE task_results SET callback_status='RECEIVED_LOCAL',callback_delivered_at=?
                           WHERE task_id=? AND result_version=?""", (now, task_id, version))
+        if recovery:
+            db.execute("""UPDATE local_result_recoveries SET result_ack_status=?,result_ack_message=?,result_acked_at=?
+                          WHERE id=? AND result_acked_at IS NULL""", (status, message, now, recovery_id))
+            updated = db.execute("SELECT * FROM local_result_recoveries WHERE id=?", (recovery_id,)).fetchone()
+            local_recovery_event(db, "RESULT_ACK", updated, {"resultAckStatus": status, "resultAckMessage": message,
+                                                          "resultAckedAt": now})
         row=db.execute("SELECT payload FROM documents WHERE kind='runtime'").fetchone()
         rt=json.loads(row[0])
         live=(rt.get("tasks") or {}).get(task_id)
@@ -1335,7 +1545,16 @@ def result_ack(db, payload):
     except Exception:
         db.rollback()
         raise
-    return {"taskId":task_id,"resultVersion":version,"status":status,"callerRef":expected,"message":message}
+    return {"taskId":task_id,"resultVersion":version,"status":status,"callerRef":expected,"message":message,
+            **({"recoveryId": recovery_id, "scope": "BRIDGE_TECHNICAL_RESULT"} if recovery else {})}
+
+
+def local_result_response(row, owner, caller):
+    return {"status": "RESULT_AVAILABLE", "transport": "local-pull", "taskId": row["task_id"],
+            "owner": owner, "callerRef": caller, "eventId": row["event_id"],
+            "resultVersion": row["result_version"], "reportedStatus": row["status"],
+            "summary": row["summary"], "github": row["github"], "next": row["next_text"],
+            "callbackStatus": row["callback_status"], "acceptanceStatus": row["acceptance_status"]}
 
 
 def receive_local_result(db, payload):
@@ -1345,6 +1564,21 @@ def receive_local_result(db, payload):
     wait = float(payload.get("waitSeconds") or 0)
     if not 0 <= wait <= 55:
         raise ValueError("WAIT_SECONDS_MUST_BE_0_TO_55")
+    if payload.get("recoveryId"):
+        local_caller(caller)
+        if wait:
+            raise ValueError("LOCAL_RECOVERY_WAIT_FORBIDDEN")
+        begin_immediate(db)
+        try:
+            recovery, operation, row = local_recovery_current(db, payload)
+            value = {**local_result_response(row, json.loads(operation["local_owner"]), caller),
+                     "recoveryId": recovery["id"], "scope": "BRIDGE_TECHNICAL_RESULT",
+                     "recoveredCaller": json.loads(recovery["successor_owner"])}
+            db.commit()
+            return value
+        except Exception:
+            db.rollback()
+            raise
     task = task_contract(db, task_id)
     if not task or not task.get("localOwner") or caller != task.get("replyToSessionRef"):
         raise ValueError("LOCAL_RESULT_OWNER_MISMATCH")
@@ -1356,11 +1590,7 @@ def receive_local_result(db, payload):
         if row:
             if row["owner_ref"] != caller or row["owner_project"] != task["project"]:
                 raise ValueError("LOCAL_RESULT_OWNER_MISMATCH")
-            return {"status": "RESULT_AVAILABLE", "transport": "local-pull", "taskId": task_id,
-                    "owner": task["localOwner"], "callerRef": caller, "eventId": row["event_id"],
-                    "resultVersion": row["result_version"], "reportedStatus": row["status"],
-                    "summary": row["summary"], "github": row["github"], "next": row["next_text"],
-                    "callbackStatus": row["callback_status"], "acceptanceStatus": row["acceptance_status"]}
+            return local_result_response(row, task["localOwner"], caller)
         operation = db.execute("""SELECT * FROM operations WHERE task_id=? AND kind='dispatch'
                                   ORDER BY created_at DESC LIMIT 1""", (task_id,)).fetchone()
         if time.monotonic() >= deadline or operation["status"] in {"CANCELLED", "FAILED_PRE_SEND", "DELIVERY_UNKNOWN"}:
@@ -3707,7 +3937,10 @@ def main():
     if command in {"image-session-occupancy", "image-io-admission", "image-output-io-admission", "image-delivery-io-admission", "image-delivery-receipt"}:
         print(json.dumps(image_local_read(config, state, command, json.load(sys.stdin))))
         return
-    if command in {"admission-check", "local-owner-contract"} and (state / "bridge.sqlite3").exists():
+    if command in {"local-recovery-preview", "local-recovery-status"}:
+        db = connection(config, state, initialize=False)
+        db.execute("PRAGMA query_only=ON")
+    elif command in {"admission-check", "local-owner-contract"} and (state / "bridge.sqlite3").exists():
         db = connection(config, state, initialize=False)
         db.execute("PRAGMA query_only=ON")
         table = "control_state" if command == "admission-check" else "operations"
@@ -3799,9 +4032,13 @@ def main():
             value = callback(db, json.load(sys.stdin))
         elif command == "local-owner-contract":
             value = local_owner_contract(db, json.load(sys.stdin))
+        elif command in {"local-recovery-preview", "local-recovery-prepare", "local-recovery-ack", "local-recovery-status"}:
+            value = local_recovery(db, command.removeprefix("local-recovery-"), json.load(sys.stdin))
         elif command == "receive":
             if args:
-                names = {"--task": "taskId", "--caller-ref": "callerRef", "--wait-seconds": "waitSeconds"}
+                names = {"--task": "taskId", "--caller-ref": "callerRef", "--wait-seconds": "waitSeconds",
+                         "--recovery-id": "recoveryId", "--project": "project", "--operation-id": "operationId",
+                         "--result-version": "resultVersion", "--event-id": "eventId", "--result-digest": "resultDigest", "--scope": "scope"}
                 if len(args) % 2 or any(args[i] not in names for i in range(0, len(args), 2)):
                     raise ValueError("receive options must be name/value pairs")
                 payload = {names[args[i]]: args[i + 1] for i in range(0, len(args), 2)}
@@ -3821,7 +4058,9 @@ def main():
         elif command == "ack":
             if args:
                 names = {"--task": "taskId", "--result-version": "resultVersion", "--caller-ref": "callerRef",
-                         "--status": "status", "--message": "message"}
+                         "--status": "status", "--message": "message", "--recovery-id": "recoveryId",
+                         "--project": "project", "--operation-id": "operationId", "--event-id": "eventId",
+                         "--result-digest": "resultDigest", "--scope": "scope"}
                 if len(args) % 2 or any(args[i] not in names for i in range(0, len(args), 2)):
                     raise ValueError("ack options must be name/value pairs")
                 payload = {names[args[i]]: args[i + 1] for i in range(0, len(args), 2)}

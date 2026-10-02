@@ -6,6 +6,14 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 
+test('native local recovery binds one unACKed technical result without rewriting its owner',()=>{
+  const result=spawnSync('python3',[path.resolve('tests/local-owner-recovery-check.py')],{
+    encoding:'utf8',timeout:30000,env:{...process.env,PYTHONDONTWRITEBYTECODE:'1'}
+  });
+  assert.equal(result.status,0,result.stderr||result.error?.message);
+  assert.equal(JSON.parse(result.stdout).ok,true);
+});
+
 test('local Codex owner survives restart, receives replayable results and alone can ACK', async()=>{
   const root=await mkdtemp(path.join(tmpdir(),'bridge-local-owner-'));
   const config=path.join(root,'config'), state=path.join(root,'state');
