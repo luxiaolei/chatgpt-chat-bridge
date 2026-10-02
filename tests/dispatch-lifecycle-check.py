@@ -326,6 +326,54 @@ def temporary_queue(coordinator, fakes, *, existing=True, worker_body):
 
 
 def integration_case(case, coordinator, runner, runner_path, fakes):
+    if case == 'private-captured-timeout-receipt':
+        for stage in ('PRE_SEND', 'SEND_ATTEMPTED'):
+            payload = json.dumps({'ok': False, 'deliveryStage': stage, 'code': 'SYNTHETIC_FAILURE',
+                                  'message': 'PRIVATE_BODY', 'accountId': 'PRIVATE_ACCOUNT', 'token': 'PRIVATE_TOKEN'})
+            assert coordinator.parse_worker_receipt(subprocess.CompletedProcess([], 1, payload, ''))['deliveryStage'] == stage
+            for cleanup in (False, True):
+                for output in (payload, payload.encode()):
+                    error = subprocess.TimeoutExpired('synthetic-worker', 240, output=output, stderr=b'synthetic tail')
+                    if cleanup:
+                        error.cleanup = {'phase': 'TERM', 'errno': 1, 'leaderPid': 123, 'groupId': 123, 'leaderReturnCode': None}
+                    worker = coordinator.worker_diagnostic(None, error.stderr, 'dispatch', error=error)['worker']
+                    assert worker['capturedReceipt'] == {'deliveryStage': stage, 'code': 'SYNTHETIC_FAILURE'}
+                    assert worker['stderrTail'] == 'synthetic tail'
+                    assert worker['phase'] == 'dispatch' and worker['exitCode'] is None
+                    assert ('cleanup' in worker) is cleanup and ('timedOut' in worker) is cleanup
+                    if cleanup:
+                        assert worker['cleanup'] == error.cleanup and worker['timedOut'] is True
+                    assert not any(private in json.dumps(worker) for private in ('PRIVATE_BODY', 'PRIVATE_ACCOUNT', 'PRIVATE_TOKEN'))
+        pre_send = json.dumps({'ok': False, 'deliveryStage': 'PRE_SEND', 'code': 'SYNTHETIC_FAILURE'})
+        attempted = json.dumps({'ok': False, 'deliveryStage': 'SEND_ATTEMPTED', 'code': 'SYNTHETIC_FAILURE'})
+        for output, stderr in ((None, ''), ('', ''), (pre_send + '\n' + attempted, ''), (pre_send, attempted),
+                               ('{"ok":"false","deliveryStage":"PRE_SEND","code":"BAD"}', ''),
+                               ('{"ok":false,"delivered":true,"deliveryStage":"PRE_SEND","code":"BAD"}', ''),
+                               ('{"ok":false,"deliveryStage":"POST_SEND","code":"BAD"}', ''),
+                               ('{"ok":false,"deliveryStage":"PRE_SEND","code":{}}', ''),
+                               ('{"ok":false,"ok":true,"deliveryStage":"PRE_SEND","code":"BAD"}', ''),
+                               ('{"ok":false', '')):
+            error = subprocess.TimeoutExpired('synthetic-worker', 240, output=output, stderr=stderr)
+            assert 'capturedReceipt' not in coordinator.worker_diagnostic(None, stderr, 'dispatch', error=error)['worker']
+        sensitive_code = json.dumps({'ok': False, 'deliveryStage': 'PRE_SEND', 'code': 'private bearer token/body'})
+        for phase in ('dispatch', 'evidence', 'native', 'task-record'):
+            worker = coordinator.worker_diagnostic(1, b'x' * 5000, phase, stdout=sensitive_code.encode())['worker']
+            assert worker['capturedReceipt'] == {'deliveryStage': 'PRE_SEND'}
+            assert len(worker['stderrTail']) == 2048 and worker['exitCode'] == 1 and worker['phase'] == phase
+            assert 'cleanup' not in worker and 'timedOut' not in worker
+        db, op, config, state = temporary_queue(coordinator, fakes, worker_body="raise AssertionError('must not start worker')\n")
+        try:
+            error = subprocess.TimeoutExpired('synthetic-worker', 240, output=pre_send, stderr='synthetic tail')
+            with patch.object(coordinator, 'run_bridge', side_effect=error):
+                response = coordinator.work_one(db)
+            saved = db.execute('SELECT status,attempts,pre_send_failures,result FROM operations WHERE id=?', (op['operationId'],)).fetchone()
+            assert tuple(saved[:3]) == ('DELIVERY_UNKNOWN', 1, 0)
+            assert json.loads(saved['result'])['worker']['capturedReceipt'] == {'deliveryStage': 'PRE_SEND', 'code': 'SYNTHETIC_FAILURE'}
+            assert 'worker' not in response and 'capturedReceipt' not in json.dumps(response)
+            assert coordinator.work_one(db)['status'] == 'IDLE', 'captured diagnostic authorized a retry'
+        finally:
+            db.close()
+        return
     if case == 'private-native-cleanup-failure':
         error = PermissionError(errno.EPERM, 'synthetic cleanup denied')
         error.cleanup = {'errno': errno.EPERM, 'phase': 'TERM', 'leaderPid': 424242, 'groupId': 424242, 'leaderReturnCode': 0}
