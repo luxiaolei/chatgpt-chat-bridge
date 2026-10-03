@@ -18,8 +18,8 @@ function fixture(stale = false) {
     click: () => { clicked++; },
   };
   const context = { getComputedStyle: () => ({ visibility: 'visible', display: 'block' }), document: {
-    querySelectorAll: selector => selector === 'button' ? [button] : selector.includes('menuitemradio') ? (clicked ? [button] : []) : (marked ? [button] : []),
-    querySelector: () => marked ? button : null,
+    querySelectorAll: selector => selector === 'button' ? [button] : selector.includes('menuitemradio') ? (clicked ? [button] : []) : selector.includes("data-chat-bridge-model-button") ? (marked ? [button] : []) : [],
+    querySelector: selector => selector.includes("data-chat-bridge-model-button") && marked ? button : null,
   } };
   const evaluate = fn => vm.runInNewContext(`(${fn.toString()})()`, context);
   return { clicked: () => clicked, page: {
