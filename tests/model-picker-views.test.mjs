@@ -64,11 +64,11 @@ function fixture(options={}) {
  const evaluate=(fn,arg)=>vm.runInNewContext('('+fn.toString()+')(arg)',{document,arg,getComputedStyle:()=>({display:'block',visibility:'visible'})});
  const page={evaluate:async(fn,arg)=>evaluate(fn,arg),waitForFunction:async(fn,arg)=>{for(let i=0;i<4;i++){if(evaluate(fn,arg))return;}throw Error('isolated UI readiness timeout');},
   waitForTimeout:async ms=>calls.waits.push(ms),
-  focus:async selector=>{focused=document.querySelector(selector);assert.ok(focused);assert.equal(focused.closest('[inert]'),null);},
+  focus:async selector=>{focused=document.querySelector(selector);assert.ok(focused);assert.equal(focused.closest('[inert]'),null);assert.equal(focused,power,'Only the actual Power keyboard control may receive focus');},
   mouse:{click:async()=>document.querySelector('[data-chat-bridge-model-option="1"]').click()},
-  click:async selector=>{if(selector.includes('model-button')){assert.equal(opened,false);opened=true;switchView('simple');}else{const node=document.querySelector(selector);assert.ok(node);assert.equal(node.closest('[inert]'),null);node.click();}},
+  click:async selector=>{if(selector.includes('model-button')){if(options.interceptOnce){options.interceptOnce=false;throw Error('pointer intercepted by overlay');}assert.equal(opened,false);opened=true;switchView('simple');}else{const node=document.querySelector(selector);assert.ok(node);assert.equal(node.closest('[inert]'),null);node.click();}},
   keyboard:{press:async key=>{
-   assert.ok(['Escape','Home','End','ArrowLeft','ArrowRight'].includes(key));if(key==='Escape'){opened=false;if(!options.displayMismatch)mode=['Instant','Medium','High','Extra High','Pro'][current];return;}
+   assert.ok(['Escape','ArrowLeft','ArrowRight'].includes(key),'Native Power accepts only observed arrow keys');if(key!=='Escape')assert.equal(focused,power);if(key==='Escape'){opened=false;if(!options.displayMismatch)mode=['Instant','Medium','High','Extra High','Pro'][current];return;}
    if(key==='ArrowLeft')current--;if(key==='ArrowRight')current++;if(key==='Home')current=0;if(key==='End')current=4;
    slider.attrs['aria-valuenow']=String(current);
   }},
@@ -108,4 +108,15 @@ test('native range cannot silently downgrade Extra High and final displayed mism
  const g=fixture({displayMismatch:true});
  await assert.rejects(g.api.setEffort(g.page,'Extra High'),/not confirmed by the UI/);
  assert.equal(g.calls.send,0);
+});
+
+
+test('closed modern picker behind an overlay is classified after fallback and reset by native pointer',async()=>{
+ const f=fixture({advanced:true,interceptOnce:true});await f.api.setEffort(f.page,'Extra High');
+ assert.equal(f.slider.getAttribute('aria-valuenow'),'3');assert.equal(f.calls.send,0);
+});
+test('invalid native range never moves Power',async()=>{
+ const f=fixture();f.slider.attrs['aria-valuemin']='invalid';
+ await assert.rejects(f.api.setEffort(f.page,'Extra High'),/Thinking effort slider not available/);
+ assert.equal(f.slider.getAttribute('aria-valuenow'),'2');
 });

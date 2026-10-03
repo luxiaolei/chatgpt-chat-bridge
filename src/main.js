@@ -1459,7 +1459,7 @@ async function openModelMenu(page, purpose="model") {
   if(!menuState.view && !menuState.legacyOpen) {
     try { await page.click('[data-chat-bridge-model-button="1"]'); }
     catch(error) {
-      // Legacy overlay compatibility; native two-view menus require native pointer opening.
+      // Classify after overlay fallback; a newly mounted native picker must be reset by native pointer.
       if(menuState.native || !/intercept|hidden|none can receive input/i.test(String(error?.message||error))) throw error;
       const fallback=await page.evaluate(()=>{
         const items=[...document.querySelectorAll('[data-chat-bridge-model-button="1"]')];
@@ -1468,6 +1468,13 @@ async function openModelMenu(page, purpose="model") {
         items[0].click();return true;
       });
       if(!fallback) throw new Error("Model/effort button disappeared before menu open");
+      const nativeFallback=await page.evaluate(()=>document.querySelectorAll('[data-model-picker-view]').length>0);
+      if(nativeFallback) {
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(()=>![...document.querySelectorAll('[data-model-picker-view]')].some(e=>
+          e.getClientRects().length>0 && getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]')),undefined,{timeout:5000});
+        await page.click('[data-chat-bridge-model-button="1"]');
+      }
     }
   }
   await page.waitForFunction(()=>{
