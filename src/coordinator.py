@@ -2779,7 +2779,8 @@ def work_one(db):
                 return finish(db, row, "QUEUED", f"PRE_SEND_RETRY_{row['pre_send_failures'] + 1}_{code}", retry_after, pre_send_failure=True)
             return finish(db, row, "FAILED_PRE_SEND", "PRE_SEND_" + str(receipt.get("code") or "ERROR")[:200], pre_send_failure=True)
         if receipt and receipt.get("deliveryStage") == "SEND_ATTEMPTED":
-            return finish(db, row, "DELIVERY_UNKNOWN", "SEND_ATTEMPTED_" + str(receipt.get("code") or "ERROR")[:200])
+            return finish(db, row, "DELIVERY_UNKNOWN", "SEND_ATTEMPTED_" + str(receipt.get("code") or "ERROR")[:200],
+                          result={"nativeWitness": receipt.get("nativeWitness")} if receipt.get("nativeWitness") else None)
         return finish(db, row, "DELIVERY_UNKNOWN", "WORKER_EXIT_" + str(completed.returncode),
                       result=worker_diagnostic(completed.returncode, completed.stderr, "dispatch", stdout=completed.stdout))
     if receipt is None:
@@ -2824,6 +2825,9 @@ def work_one(db):
     if row["kind"] == "dispatch":
         clear_capacity_wait(db, row["task_id"])
     result_payload = {"delivered": True, "modelSelection": receipt.get("modelSelection")}
+    delivery = receipt.get("delivery")
+    if isinstance(delivery, dict) and delivery.get("nativeWitness"):
+        result_payload["nativeWitness"] = delivery["nativeWitness"]
     return finish(db, row, "SENT", result=result_payload, session_ref=target)
 
 
