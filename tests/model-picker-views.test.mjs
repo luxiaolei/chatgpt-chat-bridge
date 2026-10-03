@@ -40,14 +40,16 @@ function parse(html) {
 }
 function fixture(options={}) {
  const root=parse(fixtures[options.advanced?1:0]),picker=root.querySelector('[data-model-picker-view]');
+ const content=picker.closest('[role="menu"]');
  const tracks=picker.children.filter(n=>n.attrs['aria-hidden']!==undefined);
  const radios=root.querySelectorAll('[role="menuitemradio"]'),slider=root.querySelector('[role="slider"]'),toggle=root.querySelector('[data-model-picker-view-toggle="true"]'),power=root.querySelector('[data-reasoning-slider="true"]');
  assert.equal(radios.length,3);assert.equal(slider.getAttribute('aria-hidden'),'true');
  if(options.initialModel)radios.forEach(r=>r.attrs['aria-checked']=String(r.innerText===options.initialModel));
  let pointerReady=!options.transitioning,animationReady=!options.transitioning,pendingCommit=null,blockedPolls=0;
  let opened=false,current=options.value??2,mode='High',focused=null,pendingSimpleReset=0,effortPolls=0,pickerClock=0;
- let effortReady=!options.effortTransitioning;
- const calls={inactiveClicks:0,modelClicks:0,modelAttempts:0,ineffectiveClicks:0,pointerChecks:0,commitChecks:0,toggles:0,send:0,waits:[],opens:0,viewPolls:0,effortFocus:0,earlyEffortFocus:0,arrows:0,effortPointerChecks:0};
+ let effortReady=!options.effortTransitioning,closing=null,replacement=null;
+ const lifecycle=options.closeResidualMs!==undefined;
+ const calls={inactiveClicks:0,modelClicks:0,modelAttempts:0,ineffectiveClicks:0,pointerChecks:0,commitChecks:0,toggles:0,send:0,waits:[],opens:0,viewPolls:0,effortFocus:0,earlyEffortFocus:0,arrows:0,effortPointerChecks:0,thinkingPolls:0,powerPolls:0,closePolls:[],closeCompleted:[],openEvents:[]};
  const switchView=view=>{
   picker.attrs['data-model-picker-view']=view;
   if(options.noTransitionAttribute)delete picker.attrs['data-transitions-ready'];
@@ -62,42 +64,72 @@ function fixture(options={}) {
    if(!pointerReady||!animationReady){calls.ineffectiveClicks++;return;}
    calls.modelClicks++;const commit=()=>{radios.forEach(x=>x.attrs['aria-checked']=String(x===r));switchView('simple');};
    if(options.delayedCommit)pendingCommit=commit;else commit();});
- const trigger={innerText:'High',attrs:{'aria-label':'Select ChatGPT model'},isConnected:true,
+ const trigger={innerText:'High',attrs:{'aria-label':'Select ChatGPT model','id':content.getAttribute('aria-labelledby'),'aria-controls':options.unownedContent?'unrelated-menu':content.getAttribute('id'),'aria-expanded':'false','data-state':'closed'},isConnected:true,
   getClientRects:()=>[{}],closest:()=>null,getAttribute:n=>trigger.attrs[n]??null,setAttribute:(n,v)=>trigger.attrs[n]=v,removeAttribute:n=>delete trigger.attrs[n],
   click:()=>opened=true};
+ const connect=value=>{const walk=n=>{n.isConnected=value;n.children.forEach(walk);};walk(content);};
+ const advance=ms=>{
+  pickerClock+=ms;
+  if(closing&&!options.neverCloses&&pickerClock>=closing.deadline) {
+   calls.closeCompleted.push({at:pickerClock,view:closing.view});closing=null;connect(false);switchView('simple');
+   if(options.replacementOnClose){
+    replacement=parse('<div id="replacement-menu" aria-hidden="true"><div data-model-picker-view="advanced"></div></div>').children[0];
+    replacement.parentElement=root;root.children.push(replacement);trigger.attrs['aria-controls']='replacement-menu';
+   }
+  }
+ };
+ const step=()=>{if(lifecycle)advance(1);};
+ const mounted=()=>opened||closing!==null||replacement!==null;
+ if(options.noControls)delete trigger.attrs['aria-controls'];
+ if(options.duplicateTriggerId){const duplicate=parse('<div id="'+trigger.getAttribute('id')+'"></div>').children[0];duplicate.parentElement=root;root.children.push(duplicate);}
+ if(options.duplicateContentId){const duplicate=parse('<div id="'+content.getAttribute('id')+'"></div>').children[0];duplicate.parentElement=root;root.children.push(duplicate);}
+
  const document={
   querySelectorAll(selector){if(selector==='button')return [trigger];if(selector.includes('data-chat-bridge-model-button'))return trigger.attrs['data-chat-bridge-model-button']?[trigger]:[];
-   return opened?root.querySelectorAll(selector):[];},
+   if(selector==='[id]')return [trigger,...(mounted()?root.querySelectorAll(selector).filter(n=>n.isConnected):[])];
+   return mounted()?root.querySelectorAll(selector).filter(n=>n.isConnected):[];},
+  getElementById(id){return this.querySelectorAll('[id]').find(n=>n.getAttribute('id')===id)||null;},
   querySelector(selector){return this.querySelectorAll(selector)[0]||null;},
    elementFromPoint(){calls.pointerChecks++;const option=this.querySelector('[data-chat-bridge-model-option="1"]');if(option&&!option.closest('[inert],[aria-hidden="true"],[data-active="false"]'))return pointerReady?(option.querySelector('span')||option):power;calls.effortPointerChecks++;return effortReady?power:trigger;}
  };
- const evaluate=(fn,arg)=>vm.runInNewContext('('+fn.toString()+')(arg)',{document,arg,getComputedStyle:()=>({display:'block',visibility:'visible',transform:pointerReady?'none':'translateX(24px)'})});
- const page={evaluate:async(fn,arg)=>{if(fn.toString().includes('const picker=pickers[0]')&&arg===(options.selectorPurpose||'model')){if(options.selectorError)throw options.selectorError;if(options.selectorResult)return options.selectorResult;}try{return evaluate(fn,arg);}catch(error){if(!options.wrapEvaluationErrors)throw error;throw Error('JavaScript evaluation failed: '+error.message);}},waitForFunction:async(fn,arg)=>{for(let i=0;i<6;i++){if(evaluate(fn,arg))return;
+ const evaluate=(fn,arg)=>{step();const text=fn.toString();
+  if(text.includes('const transitions=pickers[0]'))calls.thinkingPolls++;
+  if(text.includes("const controls=[...document.querySelectorAll('[data-chat-bridge-effort-control"))calls.powerPolls++;
+  if(arg&&arg.contentId&&text.includes('contentId'))calls.closePolls.push({at:pickerClock,present:!!document.getElementById(arg.contentId),hidden:!!closing&&!options.closingVisible,replacement:!!replacement});
+  return vm.runInNewContext('('+fn.toString()+')(arg)',{document,arg,getComputedStyle:e=>({display:closing&&!options.closingVisible&&content.contains(e)?'none':'block',visibility:'visible',transform:pointerReady?'none':'translateX(24px)'})});};
+ const page={evaluate:async(fn,arg)=>{if(fn.toString().includes('const picker=pickers[0]')&&arg===(options.selectorPurpose||'model')){if(options.selectorError)throw options.selectorError;if(options.selectorResult)return options.selectorResult;}try{return evaluate(fn,arg);}catch(error){if(!options.wrapEvaluationErrors)throw error;throw Error('JavaScript evaluation failed: '+error.message);}},waitForFunction:async(fn,arg,waitOptions={})=>{const rounds=lifecycle?Math.ceil((waitOptions.timeout||5000)/100):6;for(let i=0;i<rounds;i++){if(evaluate(fn,arg))return;
     if(pendingSimpleReset){calls.viewPolls++;if(--pendingSimpleReset===0)switchView('simple');}
     if(options.effortTransitioning&&calls.opens>=3&&!options.effortBlockedForever){effortPolls++;if(effortPolls>=1)picker.attrs['data-transitions-ready']='true';if(effortPolls>=2)effortReady=true;}
     if(document.querySelector('[data-chat-bridge-model-option="1"]')&&options.transitioning&&!options.pointerBlockedForever){
      blockedPolls++;if(blockedPolls>=1){animationReady=true;if(!options.noTransitionAttribute)picker.attrs['data-transitions-ready']='true';}if(blockedPolls>=2)pointerReady=true;
     }
     if(pendingCommit){calls.commitChecks++;if(!options.commitNever&&calls.commitChecks>=2){pendingCommit();pendingCommit=null;}}
+   if(lifecycle)advance(100);
    }throw Error('isolated UI readiness timeout');},
-  waitForTimeout:async ms=>{calls.waits.push(ms);pickerClock+=ms;
+  waitForTimeout:async ms=>{calls.waits.push(ms);advance(ms);
    if(pendingSimpleReset){calls.viewPolls++;if(--pendingSimpleReset===0)switchView('simple');}
    if(options.effortTransitioning&&calls.opens>=3&&!options.effortBlockedForever){effortPolls++;if(effortPolls>=1)picker.attrs['data-transitions-ready']='true';if(effortPolls>=2)effortReady=true;}
   },
   focus:async selector=>{focused=document.querySelector(selector);calls.effortFocus++;if(!effortReady)calls.earlyEffortFocus++;assert.ok(focused);assert.equal(focused.closest('[inert]'),null);assert.equal(focused,power,'Only the actual Power keyboard control may receive focus');},
   mouse:{click:async()=>document.querySelector('[data-chat-bridge-model-option="1"]').click()},
-  click:async selector=>{if(selector.includes('model-button')){if(options.interceptOnce){options.interceptOnce=false;throw Error('pointer intercepted by overlay');}assert.equal(opened,false);opened=true;calls.opens++;switchView(options.modelOpenView||'simple');
+  click:async selector=>{if(selector.includes('model-button')){if(options.interceptOnce){options.interceptOnce=false;throw Error('pointer intercepted by overlay');}step();assert.equal(opened,false);const interrupted=closing;
+    calls.openEvents.push({at:pickerClock,interrupted:!!interrupted,lastClose:calls.closeCompleted.at(-1)||null});
+    closing=null;opened=true;connect(true);trigger.attrs['aria-expanded']='true';trigger.attrs['data-state']='open';content.attrs['data-state']='open';calls.opens++;
+    switchView(interrupted?interrupted.view:(options.modelOpenView||'simple'));
     if(options.reopenView&&calls.opens>=3){switchView('advanced');if(options.reopenView==='delayed'||(options.reopenView==='native-reopen'&&calls.opens>=4))pendingSimpleReset=2;}
     if(options.effortTransitioning&&calls.opens>=3)picker.attrs['data-transitions-ready']=String(effortPolls>=1);}else{const node=document.querySelector(selector);assert.ok(node);assert.equal(node.closest('[inert]'),null);node.click();}},
   keyboard:{press:async key=>{
-   assert.ok(['Escape','ArrowLeft','ArrowRight'].includes(key),'Native Power accepts only observed arrow keys');if(key!=='Escape')assert.equal(focused,power);if(key==='Escape'){opened=false;if(!options.displayMismatch)mode=['Instant','Medium','High','Extra High','Pro'][current];return;}
+   assert.ok(['Escape','ArrowLeft','ArrowRight'].includes(key),'Native Power accepts only observed arrow keys');if(key!=='Escape')assert.equal(focused,power);if(key==='Escape'){step();
+    if(lifecycle&&opened){closing={view:picker.getAttribute('data-model-picker-view'),deadline:pickerClock+options.closeResidualMs};content.attrs['data-state']='closed';}
+    opened=false;trigger.attrs['aria-expanded']=options.ownerOpenOnClose?'true':'false';trigger.attrs['data-state']=options.ownerOpenOnClose?'open':'closed';
+    if(!options.displayMismatch)mode=['Instant','Medium','High','Extra High','Pro'][current];return;}
    calls.arrows++;if(key==='ArrowLeft')current--;if(key==='ArrowRight')current++;if(key==='Home')current=0;if(key==='End')current=4;
    slider.attrs['aria-valuenow']=String(current);
   }},
  };
- const api=new Function('detectWebRateLimit','state','observedModel','selectModelLabel','modelPreset','Date',body+';return {setModel,setEffort,applyModelSpec};')(
+ const api=new Function('detectWebRateLimit','state','observedModel','selectModelLabel','modelPreset','Date',body+';return {setModel,setEffort,applyModelSpec,openModelMenu};')(
   async()=>{},async()=>({mode}),globalThis.__CHAT_BRIDGE_MODEL_POLICY__.observedModel,globalThis.__CHAT_BRIDGE_MODEL_POLICY__.selectModelLabel,globalThis.__CHAT_BRIDGE_MODEL_POLICY__.modelPreset,{now:()=>pickerClock});
- return {api,page,calls,root,picker,slider,power,radios,toggle,switchView};
+ return {api,page,calls,root,picker,slider,power,radios,toggle,switchView,content,trigger};
 }
 test('captured simple view never uses inactive model radios to select Latest',async()=>{
  const f=fixture();await f.api.setModel(f.page,'Latest');assert.equal(f.calls.inactiveClicks,0);assert.ok(f.calls.modelClicks>0);
@@ -262,4 +294,60 @@ test('trusted effort readiness result is validated in Node before any Power inpu
  const f=fixture({selectorPurpose:'effort',selectorResult:{tag:'MODEL_PICKER_READINESS',code:'EFFORT_SELECTOR_NOT_READY'},wrapEvaluationErrors:true});
  await assert.rejects(f.api.setEffort(f.page,'Extra High'),error=>error.code==='EFFORT_SELECTOR_NOT_READY'&&error.message==='EFFORT_SELECTOR_NOT_READY');
  assert.equal(f.calls.effortFocus,0);assert.equal(f.calls.arrows,0);assert.equal(f.calls.send,0);
+});
+
+for(const residualMs of [50,100,200]) {
+ test('owned native close completes before the effort reopen with '+residualMs+'ms hidden residual',async()=>{
+  const f=fixture({closeResidualMs:residualMs});
+  const result=await f.api.applyModelSpec(f.page,'Latest','Extra High');
+  assert.equal(result.effort,'Extra High');
+  assert.equal(f.radios.find(r=>r.innerText==='Latest').getAttribute('aria-checked'),'true');
+  assert.equal(f.slider.getAttribute('aria-valuenow'),'3');assert.equal(f.calls.arrows,1);
+  assert.equal(f.calls.inactiveClicks,0);assert.equal(f.calls.send,0);
+  const reopen=f.calls.openEvents.at(-1);
+  assert.equal(reopen.interrupted,false);assert.equal(reopen.lastClose.view,'advanced');
+  assert.ok(reopen.at>=reopen.lastClose.at);
+  assert.ok(f.calls.closePolls.some(p=>p.present&&p.hidden));assert.ok(f.calls.closePolls.some(p=>!p.present));
+ });
+}
+test('already advanced native effort menu waits for its owned outgoing content',async()=>{
+ const f=fixture({closeResidualMs:100});
+ await f.page.click('[data-chat-bridge-model-button="1"]');f.switchView('advanced');
+ await f.api.openModelMenu(f.page,'effort');
+ assert.equal(f.picker.getAttribute('data-model-picker-view'),'simple');
+ assert.equal(f.calls.openEvents.at(-1).interrupted,false);assert.equal(f.calls.send,0);
+});
+test('native outgoing content that never unmounts has a bounded failure before reopening or input',async()=>{
+ const f=fixture({closeResidualMs:100,neverCloses:true});
+ await assert.rejects(f.api.applyModelSpec(f.page,'Latest','Extra High'),/isolated UI readiness timeout/);
+ assert.equal(f.calls.opens,3);assert.equal(f.calls.effortFocus,0);assert.equal(f.calls.arrows,0);assert.equal(f.calls.send,0);
+ assert.ok(f.calls.closePolls.length>0&&f.calls.closePolls.length<=50);
+});
+test('known advanced native content requires unique trigger ownership before Escape',async()=>{
+ for(const option of [{unownedContent:true},{noControls:true},{duplicateContentId:true},{duplicateTriggerId:true}]) {
+  const f=fixture({closeResidualMs:100,...option});
+  await assert.rejects(f.api.applyModelSpec(f.page,'Latest','Extra High'),e=>e.code==='EFFORT_SELECTOR_NOT_READY'&&e.message===e.code);
+  assert.equal(f.calls.opens,3);assert.equal(f.calls.closePolls.length,0);
+  assert.equal(f.calls.effortFocus,0);assert.equal(f.calls.arrows,0);assert.equal(f.calls.send,0);
+ }
+});
+test('owned content disappearance cannot override an open trigger',async()=>{
+ const f=fixture({closeResidualMs:100,ownerOpenOnClose:true});
+ await assert.rejects(f.api.applyModelSpec(f.page,'Latest','Extra High'),/isolated UI readiness timeout/);
+ assert.ok(f.calls.closePolls.some(p=>!p.present));assert.equal(f.calls.opens,3);
+ assert.equal(f.calls.effortFocus,0);assert.equal(f.calls.arrows,0);assert.equal(f.calls.send,0);
+});
+test('owned closure observation errors propagate without extra reopening or effort input',async()=>{
+ const f=fixture({closeResidualMs:100}),error=new Error('unknown closure transport error');error.code='UNRELATED';
+ const wait=f.page.waitForFunction;f.page.waitForFunction=async(fn,arg,opts)=>{if(arg?.contentId)throw error;return wait(fn,arg,opts);};
+ await assert.rejects(f.api.applyModelSpec(f.page,'Latest','Extra High'),e=>e===error);
+ assert.equal(f.calls.opens,3);assert.equal(f.calls.effortFocus,0);assert.equal(f.calls.arrows,0);assert.equal(f.calls.send,0);
+});
+
+test('a hidden replacement owned by the same trigger blocks closure after the captured content unmounts',async()=>{
+ const f=fixture({closeResidualMs:100,replacementOnClose:true});
+ await assert.rejects(f.api.applyModelSpec(f.page,'Latest','Extra High'),/isolated UI readiness timeout/);
+ assert.ok(f.calls.closePolls.some(p=>!p.present&&p.replacement));
+ assert.equal(f.trigger.getAttribute('aria-controls'),'replacement-menu');
+ assert.equal(f.calls.opens,3);assert.equal(f.calls.effortFocus,0);assert.equal(f.calls.arrows,0);assert.equal(f.calls.send,0);
 });

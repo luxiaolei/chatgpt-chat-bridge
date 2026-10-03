@@ -1456,6 +1456,30 @@ async function waitForModelPicker(page, predicate) {
   return false;
 }
 
+async function waitForNativeModelMenuClosed(page, owner) {
+  await page.waitForFunction(({contentId,buttonId})=>{
+    const buttons=[...document.querySelectorAll('[data-chat-bridge-model-button="1"]')];
+    if(buttons.length!==1) return false;
+    const button=buttons[0],style=getComputedStyle(button);
+    if(!button.isConnected || !button.getClientRects().length || style.display==="none" || style.visibility==="hidden" ||
+      button.closest('[inert], [data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]') ||
+      button.getAttribute('id')!==buttonId) return false;
+    const identified=[...document.querySelectorAll('[id]')];
+    if(identified.filter(e=>e.getAttribute('id')===buttonId).length!==1) return false;
+    const expanded=button.getAttribute('aria-expanded'),state=button.getAttribute('data-state');
+    if((expanded!==null && expanded!=="false") || (state!==null && state!=="closed") ||
+      (expanded!=="false" && state!=="closed")) return false;
+    // Closed/hidden can describe an exiting portal. Wait for the owned content to unmount.
+    if(identified.some(e=>e.getAttribute('id')===contentId)) return false;
+    const controls=(button.getAttribute('aria-controls')||"").trim().split(/\s+/).filter(Boolean);
+    if(identified.some(e=>controls.includes(e.getAttribute('id')) &&
+      (e.matches('[data-model-picker-view]') || e.querySelector('[data-model-picker-view]')))) return false;
+    return ![...document.querySelectorAll('[data-model-picker-view]')].some(e=>
+      e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
+      getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]'));
+  },owner,{timeout:5000});
+}
+
 async function openModelMenu(page, purpose="model") {
   const selectorNotReady=code=>{
     if(!["MODEL_SELECTOR_NOT_READY","EFFORT_SELECTOR_NOT_READY"].includes(code)) throw new Error("MODEL_PICKER_RESULT_INVALID");
@@ -1500,20 +1524,36 @@ async function openModelMenu(page, purpose="model") {
   });
   if(!opened) throw new Error("Model/effort button disappeared before menu open");
 
-  const menuState=await page.evaluate(()=>{
+  const readMenuState=captureCloseOwner=>{
     const visible=e=>e.getClientRects().length>0 && getComputedStyle(e).display!=="none" &&
       getComputedStyle(e).visibility!=="hidden" && !e.closest('[inert],[aria-hidden="true"]');
     const all=[...document.querySelectorAll('[data-model-picker-view]')];
     const active=all.filter(visible);
     if(active.length>1) throw new Error("MODEL_MENU_AMBIGUOUS");
-    return {native:all.length>0,view:active[0]?.getAttribute('data-model-picker-view')||null,
+    const view=active[0]?.getAttribute('data-model-picker-view')||null;
+    let closeOwner=null;
+    if(captureCloseOwner && view==="advanced") {
+      const buttons=[...document.querySelectorAll('[data-chat-bridge-model-button="1"]')];
+      if(buttons.length===1 && buttons[0].isConnected && visible(buttons[0]) &&
+        !buttons[0].closest('[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]')) {
+        const button=buttons[0],buttonId=button.getAttribute('id');
+        const ids=(button.getAttribute('aria-controls')||"").trim().split(/\s+/).filter(Boolean);
+        const identified=[...document.querySelectorAll('[id]')];
+        const contents=ids.length===1?identified.filter(e=>e.getAttribute('id')===ids[0]):[];
+        if(buttonId && identified.filter(e=>e.getAttribute('id')===buttonId).length===1 &&
+          contents.length===1 && (contents[0]===active[0] || contents[0].contains(active[0]))) {
+          closeOwner={contentId:ids[0],buttonId};
+        }
+      }
+    }
+    return {native:all.length>0,view,closeOwner,
       legacyOpen:[...document.querySelectorAll('[role="menuitemradio"]')].some(visible)};
-  });
+  };
+  const menuState=await page.evaluate(readMenuState,purpose==="effort");
   if(purpose==="effort" && menuState.view==="advanced") {
+    if(!menuState.closeOwner) throw selectorNotReady("EFFORT_SELECTOR_NOT_READY");
     await page.keyboard.press("Escape");
-    await page.waitForFunction(()=>![...document.querySelectorAll('[data-model-picker-view]')].some(e=>
-      e.getClientRects().length>0 && getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]')),
-      undefined,{timeout:5000});
+    await waitForNativeModelMenuClosed(page,menuState.closeOwner);
     menuState.view=null;menuState.legacyOpen=false;
   }
   if(!menuState.view && !menuState.legacyOpen) {
@@ -1554,18 +1594,11 @@ async function openModelMenu(page, purpose="model") {
     });
     let ready=await thinkingReady();
     if(!ready) {
-      const advanced=await page.evaluate(()=>{
-        const active=e=>e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
-          getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]');
-        const pickers=[...document.querySelectorAll('[data-model-picker-view]')].filter(active);
-        if(pickers.length>1) throw new Error("MODEL_MENU_AMBIGUOUS");
-        return pickers.length===1 && pickers[0].getAttribute('data-model-picker-view')==="advanced";
-      });
-      if(advanced) {
+      const advanced=await page.evaluate(readMenuState,true);
+      if(advanced.view==="advanced") {
+        if(!advanced.closeOwner) throw selectorNotReady("EFFORT_SELECTOR_NOT_READY");
         await page.keyboard.press("Escape");
-        await page.waitForFunction(()=>![...document.querySelectorAll('[data-model-picker-view]')].some(e=>
-          e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
-          getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]')),undefined,{timeout:5000});
+        await waitForNativeModelMenuClosed(page,advanced.closeOwner);
         await page.click('[data-chat-bridge-model-button="1"]');
         ready=await thinkingReady();
       }
