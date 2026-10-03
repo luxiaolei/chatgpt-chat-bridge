@@ -8,6 +8,21 @@ import '../src/model-policy.js';
 const source=await readFile(new URL('../src/main.js',import.meta.url),'utf8');
 const body=source.slice(source.indexOf('async function waitForModelPicker('),source.indexOf('\nasync function modelSelectorAvailable('));
 const fixtures=await Promise.all(['simple','full'].map(n=>readFile(new URL('./fixtures/model-menu-'+n+'.html',import.meta.url),'utf8')));
+// Preserve evaluate arity at the transport boundary; explicit undefined is not JSON.
+function serializableEvaluate(callback) {
+ return async(...args)=>{
+  if(args.length>1) {
+   let serialized;
+   try {serialized=JSON.stringify(args[1]);} catch {}
+   if(serialized===undefined)throw new Error('page.evaluate argument must be JSON-serializable');
+  }
+  return callback(...args);
+ };
+}
+function pickerPolling(clock) {
+ const polling=body.slice(0,body.indexOf('\nasync function waitForNativeModelMenuClosed('));
+ return new Function('Date',polling+';return waitForModelPicker;')({now:()=>clock.now});
+}
 function parse(html) {
  const root={tag:'ROOT',attrs:{},children:[],parentElement:null,text:''};let stack=[root];
  for(const token of html.match(/<!--[\s\S]*?-->|<\/?[^>]+>|[^<]+/g)||[]) {
@@ -110,7 +125,7 @@ function fixture(options={}) {
   if(text.includes("const controls=[...document.querySelectorAll('[data-chat-bridge-effort-control"))calls.powerPolls++;
   if(arg&&arg.contentId&&text.includes('contentId'))calls.closePolls.push({at:pickerClock,present:!!document.getElementById(arg.contentId),hidden:!!closing&&!options.closingVisible,replacement:!!replacement});
   return vm.runInNewContext('('+fn.toString()+')(arg)',{document,arg,getComputedStyle:e=>({display:e._hidden||closing&&!options.closingVisible&&content.contains(e)?'none':'block',visibility:e._hidden?'hidden':'visible',transform:pointerReady?'none':'translateX(24px)'})});};
- const page={evaluate:async(fn,arg)=>{if(fn.toString().includes('const picker=pickers[0]')&&arg===(options.selectorPurpose||'model')){if(options.selectorError)throw options.selectorError;if(options.selectorResult)return options.selectorResult;}try{return evaluate(fn,arg);}catch(error){if(!options.wrapEvaluationErrors)throw error;throw Error('JavaScript evaluation failed: '+error.message);}},waitForFunction:async(fn,arg,waitOptions={})=>{const rounds=lifecycle?Math.ceil((waitOptions.timeout||5000)/100):6;for(let i=0;i<rounds;i++){if(evaluate(fn,arg))return;
+ const page={evaluate:serializableEvaluate(async(...args)=>{const [fn,arg]=args;if(fn.toString().includes('const picker=pickers[0]')&&arg===(options.selectorPurpose||'model')){if(options.selectorError)throw options.selectorError;if(options.selectorResult)return options.selectorResult;}try{return evaluate(fn,arg);}catch(error){if(!options.wrapEvaluationErrors)throw error;throw Error('JavaScript evaluation failed: '+error.message);}}),waitForFunction:async(fn,arg,waitOptions={})=>{const rounds=lifecycle?Math.ceil((waitOptions.timeout||5000)/100):6;for(let i=0;i<rounds;i++){if(evaluate(fn,arg))return;
     if(pendingSimpleReset){calls.viewPolls++;if(--pendingSimpleReset===0)switchView('simple');}
     if(options.effortTransitioning&&calls.opens>=3&&!options.effortBlockedForever){effortPolls++;if(effortPolls>=1)picker.attrs['data-transitions-ready']='true';if(effortPolls>=2)effortReady=true;}
     if(document.querySelector('[data-chat-bridge-model-option="1"]')&&options.transitioning&&!options.pointerBlockedForever){
@@ -147,6 +162,51 @@ function fixture(options={}) {
   async()=>{},async()=>({mode}),globalThis.__CHAT_BRIDGE_MODEL_POLICY__.observedModel,globalThis.__CHAT_BRIDGE_MODEL_POLICY__.selectModelLabel,globalThis.__CHAT_BRIDGE_MODEL_POLICY__.modelPreset,{now:()=>pickerClock});
  return {api,page,calls,root,picker,slider,power,radios,toggle,switchView,content,trigger};
 }
+
+test('argumentless model picker polling omits the transport argument',async()=>{
+ const predicate=()=>true,clock={now:0},wait=pickerPolling(clock),calls=[];
+ const page={evaluate:serializableEvaluate(async(...args)=>{calls.push(args);return true;}),waitForTimeout:async()=>assert.fail('ready predicate must not wait')};
+ await assert.rejects(page.evaluate(predicate,undefined),/page.evaluate argument must be JSON-serializable/);
+ assert.equal(calls.length,0);
+ assert.equal(await wait(page,predicate),true);
+ assert.equal(await wait(page,predicate,undefined),true);
+ assert.equal(calls.length,2);
+ for(const args of calls){assert.equal(args.length,1);assert.equal(args[0],predicate);}
+});
+test('defined model picker polling arguments retain their arity and value after false polls',async()=>{
+ const owner={model:'Latest',buttonId:'native-button',contentId:'native-content'};
+ for(const arg of [null,false,0,'','Latest',owner]) {
+  const clock={now:0},wait=pickerPolling(clock),predicate=value=>!!value,calls=[],waits=[];
+  const page={evaluate:serializableEvaluate(async(...args)=>{calls.push(args);return calls.length===2;}),waitForTimeout:async ms=>{waits.push(ms);clock.now+=ms;}};
+  assert.equal(await wait(page,predicate,arg),true);
+  assert.deepEqual(waits,[100]);
+  for(const args of calls){assert.equal(args.length,2);assert.equal(args[0],predicate);assert.equal(args[1],arg);}
+ }
+});
+test('false model picker polling stops at the existing five-second deadline',async()=>{
+ const clock={now:0},wait=pickerPolling(clock),waits=[];let polls=0;
+ const page={evaluate:serializableEvaluate(async(...args)=>{assert.equal(args.length,1);polls++;return false;}),waitForTimeout:async ms=>{waits.push(ms);clock.now+=ms;}};
+ assert.equal(await wait(page,()=>false),false);
+ assert.equal(clock.now,5000);assert.equal(polls,50);assert.deepEqual(waits,Array(50).fill(100));
+});
+test('model picker polling preserves transport errors without extra polls or waits',async()=>{
+ for(const arg of [undefined,{model:'Latest',buttonId:'native-button',contentId:'native-content'}]) {
+  const clock={now:0},wait=pickerPolling(clock),original=new Error('native observation failed'),waits=[];original.code='UNRELATED';let polls=0;
+  const page={evaluate:serializableEvaluate(async(...args)=>{assert.equal(args.length,arg===undefined?1:2);if(++polls===2)throw original;return false;}),waitForTimeout:async ms=>{waits.push(ms);clock.now+=ms;}};
+  await assert.rejects(wait(page,()=>false,arg),error=>error===original&&error.code==='UNRELATED');
+  assert.equal(polls,2);assert.deepEqual(waits,[100]);
+ }
+});
+test('model picker polling keeps invalid defined arguments subject to JSON validation',async()=>{
+ const cyclic={};cyclic.self=cyclic;
+ for(const arg of [1n,cyclic]) {
+  const clock={now:0},wait=pickerPolling(clock);let evaluations=0,waits=0;
+  const page={evaluate:serializableEvaluate(async()=>{evaluations++;return true;}),waitForTimeout:async()=>{waits++;}};
+  await assert.rejects(wait(page,()=>true,arg),/page.evaluate argument must be JSON-serializable/);
+  assert.equal(evaluations,0);assert.equal(waits,0);
+ }
+});
+
 test('captured simple view never uses inactive model radios to select Latest',async()=>{
  const f=fixture();await f.api.setModel(f.page,'Latest');assert.equal(f.calls.inactiveClicks,0);assert.ok(f.calls.modelClicks>0);
 });
@@ -288,7 +348,7 @@ test('final receipt keeps readiness code and diagnostic while the producer send 
 
 test('unknown native readiness observation errors are never recoded or retried as selector readiness',async()=>{
  const f=fixture();const original=new Error('JavaScript evaluation failed: unrelated read failure');original.code='UNRELATED';
- const evaluate=f.page.evaluate;f.page.evaluate=async(fn,arg)=>{if(fn.toString().includes('const transitions=pickers[0]'))throw original;return evaluate(fn,arg);};
+ const evaluate=f.page.evaluate;f.page.evaluate=async(...args)=>{const [fn]=args;if(fn.toString().includes('const transitions=pickers[0]'))throw original;return evaluate(...args);};
  await assert.rejects(f.api.applyModelSpec(f.page,'Latest','Extra High'),error=>error===original&&error.code==='UNRELATED');
  assert.equal(f.calls.opens,3);assert.equal(f.calls.arrows,0);assert.equal(f.calls.send,0);
 });
@@ -420,7 +480,7 @@ for(const point of ['evaluate','click']) {
 test('recommit owner result is validated before any native return selection',async()=>{
  for(const result of [null,true,{tag:'OTHER',buttonId:'button',contentId:'content'},{tag:'NATIVE_MODEL_THINKING_COMMIT',buttonId:'',contentId:'content'},{tag:'NATIVE_MODEL_THINKING_COMMIT',buttonId:'button',contentId:'content',extra:true}]) {
   const f=fixture({closeResidualMs:0});const evaluate=f.page.evaluate;
-  f.page.evaluate=async(fn,arg)=>fn.toString().includes('NATIVE_MODEL_THINKING_COMMIT')&&arg?.prepare?result:evaluate(fn,arg);
+  f.page.evaluate=async(...args)=>{const [fn,arg]=args;return fn.toString().includes('NATIVE_MODEL_THINKING_COMMIT')&&arg?.prepare?result:evaluate(...args);};
   await assert.rejects(f.api.applyModelSpec(f.page,'Latest','Extra High'),/MODEL_PICKER_RESULT_INVALID/);
   assert.deepEqual(f.calls.modelLabels,['Latest']);assert.equal(f.calls.recommitClicks,0);assert.equal(f.calls.effortFocus,0);assert.equal(f.calls.arrows,0);assert.equal(f.calls.send,0);
  }

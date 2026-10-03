@@ -1450,7 +1450,7 @@ async function streamMessage(page, msg, {requestId, turnId, timeout=180000, targ
 async function waitForModelPicker(page, predicate, arg=undefined) {
   const deadline=Date.now()+5000;
   do {
-    if(await page.evaluate(predicate,arg)) return true;
+    if(await (arg===undefined?page.evaluate(predicate):page.evaluate(predicate,arg))) return true;
     await page.waitForTimeout(100);
   } while(Date.now()<deadline);
   return false;
