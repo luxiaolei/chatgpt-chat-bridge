@@ -1447,13 +1447,37 @@ async function streamMessage(page, msg, {requestId, turnId, timeout=180000, targ
   const error=new Error("STREAM_TIMEOUT"); error.code="STREAM_TIMEOUT"; throw error;
 }
 
-async function waitForModelPicker(page, predicate) {
+async function waitForModelPicker(page, predicate, arg=undefined) {
   const deadline=Date.now()+5000;
   do {
-    if(await page.evaluate(predicate)) return true;
+    if(await page.evaluate(predicate,arg)) return true;
     await page.waitForTimeout(100);
   } while(Date.now()<deadline);
   return false;
+}
+
+async function waitForNativeModelMenuClosed(page, owner) {
+  await page.waitForFunction(({contentId,buttonId})=>{
+    const buttons=[...document.querySelectorAll('[data-chat-bridge-model-button="1"]')];
+    if(buttons.length!==1) return false;
+    const button=buttons[0],style=getComputedStyle(button);
+    if(!button.isConnected || !button.getClientRects().length || style.display==="none" || style.visibility==="hidden" ||
+      button.closest('[inert], [data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]') ||
+      button.getAttribute('id')!==buttonId) return false;
+    const identified=[...document.querySelectorAll('[id]')];
+    if(identified.filter(e=>e.getAttribute('id')===buttonId).length!==1) return false;
+    const expanded=button.getAttribute('aria-expanded'),state=button.getAttribute('data-state');
+    if((expanded!==null && expanded!=="false") || (state!==null && state!=="closed") ||
+      (expanded!=="false" && state!=="closed")) return false;
+    // Closed/hidden can describe an exiting portal. Wait for the owned content to unmount.
+    if(identified.some(e=>e.getAttribute('id')===contentId)) return false;
+    const controls=(button.getAttribute('aria-controls')||"").trim().split(/\s+/).filter(Boolean);
+    if(identified.some(e=>controls.includes(e.getAttribute('id')) &&
+      (e.matches('[data-model-picker-view]') || e.querySelector('[data-model-picker-view]')))) return false;
+    return ![...document.querySelectorAll('[data-model-picker-view]')].some(e=>
+      e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
+      getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]'));
+  },owner,{timeout:5000});
 }
 
 async function openModelMenu(page, purpose="model") {
@@ -1500,20 +1524,36 @@ async function openModelMenu(page, purpose="model") {
   });
   if(!opened) throw new Error("Model/effort button disappeared before menu open");
 
-  const menuState=await page.evaluate(()=>{
+  const readMenuState=captureCloseOwner=>{
     const visible=e=>e.getClientRects().length>0 && getComputedStyle(e).display!=="none" &&
       getComputedStyle(e).visibility!=="hidden" && !e.closest('[inert],[aria-hidden="true"]');
     const all=[...document.querySelectorAll('[data-model-picker-view]')];
     const active=all.filter(visible);
     if(active.length>1) throw new Error("MODEL_MENU_AMBIGUOUS");
-    return {native:all.length>0,view:active[0]?.getAttribute('data-model-picker-view')||null,
+    const view=active[0]?.getAttribute('data-model-picker-view')||null;
+    let closeOwner=null;
+    if(captureCloseOwner && view==="advanced") {
+      const buttons=[...document.querySelectorAll('[data-chat-bridge-model-button="1"]')];
+      if(buttons.length===1 && buttons[0].isConnected && visible(buttons[0]) &&
+        !buttons[0].closest('[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]')) {
+        const button=buttons[0],buttonId=button.getAttribute('id');
+        const ids=(button.getAttribute('aria-controls')||"").trim().split(/\s+/).filter(Boolean);
+        const identified=[...document.querySelectorAll('[id]')];
+        const contents=ids.length===1?identified.filter(e=>e.getAttribute('id')===ids[0]):[];
+        if(buttonId && identified.filter(e=>e.getAttribute('id')===buttonId).length===1 &&
+          contents.length===1 && (contents[0]===active[0] || contents[0].contains(active[0]))) {
+          closeOwner={contentId:ids[0],buttonId};
+        }
+      }
+    }
+    return {native:all.length>0,view,closeOwner,
       legacyOpen:[...document.querySelectorAll('[role="menuitemradio"]')].some(visible)};
-  });
+  };
+  const menuState=await page.evaluate(readMenuState,purpose==="effort");
   if(purpose==="effort" && menuState.view==="advanced") {
+    if(!menuState.closeOwner) throw selectorNotReady("EFFORT_SELECTOR_NOT_READY");
     await page.keyboard.press("Escape");
-    await page.waitForFunction(()=>![...document.querySelectorAll('[data-model-picker-view]')].some(e=>
-      e.getClientRects().length>0 && getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]')),
-      undefined,{timeout:5000});
+    await waitForNativeModelMenuClosed(page,menuState.closeOwner);
     menuState.view=null;menuState.legacyOpen=false;
   }
   if(!menuState.view && !menuState.legacyOpen) {
@@ -1554,18 +1594,11 @@ async function openModelMenu(page, purpose="model") {
     });
     let ready=await thinkingReady();
     if(!ready) {
-      const advanced=await page.evaluate(()=>{
-        const active=e=>e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
-          getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]');
-        const pickers=[...document.querySelectorAll('[data-model-picker-view]')].filter(active);
-        if(pickers.length>1) throw new Error("MODEL_MENU_AMBIGUOUS");
-        return pickers.length===1 && pickers[0].getAttribute('data-model-picker-view')==="advanced";
-      });
-      if(advanced) {
+      const advanced=await page.evaluate(readMenuState,true);
+      if(advanced.view==="advanced") {
+        if(!advanced.closeOwner) throw selectorNotReady("EFFORT_SELECTOR_NOT_READY");
         await page.keyboard.press("Escape");
-        await page.waitForFunction(()=>![...document.querySelectorAll('[data-model-picker-view]')].some(e=>
-          e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
-          getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]')),undefined,{timeout:5000});
+        await waitForNativeModelMenuClosed(page,advanced.closeOwner);
         await page.click('[data-chat-bridge-model-button="1"]');
         ready=await thinkingReady();
       }
@@ -1608,7 +1641,68 @@ async function openModelMenu(page, purpose="model") {
   },purpose,{timeout:5000});
 
 }
-async function setModel(page, model) {
+function nativeModelThinkingCommit({model,prepare=false,buttonId=null,contentId=null}) {
+  const active=e=>{
+    const style=getComputedStyle(e);
+    return e.isConnected && e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
+      !e.closest('[inert],[aria-hidden="true"],[data-active="false"]');
+  };
+  const pickers=[...document.querySelectorAll('[data-model-picker-view]')].filter(active);
+  const marked=[...document.querySelectorAll('[data-chat-bridge-model-picker="1"]')];
+  if(pickers.length!==1 || marked.length!==1 || marked[0]!==pickers[0]) return false;
+  const picker=pickers[0],transitions=picker.getAttribute('data-transitions-ready');
+  if(picker.getAttribute('data-model-picker-view')!==(prepare?"advanced":"simple") ||
+    (transitions!==null && transitions!=="true")) return false;
+  const buttons=[...document.querySelectorAll('[data-chat-bridge-model-button="1"]')];
+  if(buttons.length!==1 || !active(buttons[0]) ||
+    !/select chatgpt model/i.test(buttons[0].getAttribute('aria-label')||"") ||
+    buttons[0].closest('[data-message-author-role],[data-content-search-unit-key],[data-chatgpt-search-unit-key]')) return false;
+  const button=buttons[0],currentButtonId=button.getAttribute('id');
+  const controls=(button.getAttribute('aria-controls')||"").trim().split(/\s+/).filter(Boolean);
+  const ids=[...document.querySelectorAll('[id]')];
+  if(!currentButtonId || controls.length!==1 || (buttonId && buttonId!==currentButtonId) ||
+    (contentId && contentId!==controls[0]) || ids.filter(e=>e.getAttribute('id')===currentButtonId).length!==1) return false;
+  const contents=ids.filter(e=>e.getAttribute('id')===controls[0]);
+  if(contents.length!==1 || contents[0].getAttribute('role')!=="menu" || !active(contents[0]) ||
+    !contents[0].contains(picker)) return false;
+  const expanded=button.getAttribute('aria-expanded'),state=button.getAttribute('data-state');
+  if((expanded!==null && expanded!=="true") || (state!==null && state!=="open") ||
+    (expanded!=="true" && state!=="open")) return false;
+  const radios=[...picker.querySelectorAll('[role="menuitemradio"]')];
+  const matches=radios.filter(e=>(e.innerText||"").trim().toLowerCase()===model.toLowerCase());
+  const checked=radios.filter(e=>e.getAttribute('aria-checked')==="true");
+  if(matches.length!==1 || checked.length!==1 || matches[0]!==checked[0]) return false;
+  const target=matches[0];
+  if(!target.isConnected) return false;
+  if(prepare) {
+    if(!active(target) || target.hasAttribute('disabled') || target.getAttribute('aria-disabled')==="true" ||
+      target.hasAttribute('data-disabled')) return false;
+    const rect=target.getBoundingClientRect();
+    if(!(rect.width>0 && rect.height>0)) return false;
+    const hit=document.elementFromPoint(rect.left+rect.width/2,rect.top+rect.height/2);
+    if(!hit || (hit!==target && !target.contains(hit))) return false;
+    document.querySelectorAll('[data-chat-bridge-model-option]').forEach(e=>e.removeAttribute('data-chat-bridge-model-option'));
+    target.setAttribute('data-chat-bridge-model-option','1');
+    return {tag:"NATIVE_MODEL_THINKING_COMMIT",buttonId:currentButtonId,contentId:controls[0]};
+  }
+  const options=[...document.querySelectorAll('[data-chat-bridge-model-option="1"]')];
+  return options.length===1 && options[0]===target;
+}
+
+async function commitVerifiedModelToThinking(page, model) {
+  const notReady=()=>{const error=new Error("EFFORT_SELECTOR_NOT_READY");error.code=error.message;return error;};
+  const owner=await page.evaluate(nativeModelThinkingCommit,{model,prepare:true});
+  if(owner===false) throw notReady();
+  if(!owner || owner.tag!=="NATIVE_MODEL_THINKING_COMMIT" || Object.keys(owner).length!==3 ||
+    typeof owner.buttonId!=="string" || !owner.buttonId || typeof owner.contentId!=="string" || !owner.contentId)
+    throw new Error("MODEL_PICKER_RESULT_INVALID");
+  // Use the established native model-option selector; reselect only the exact checked model.
+  await page.click('[data-chat-bridge-model-option="1"]');
+  if(!await waitForModelPicker(page,nativeModelThinkingCommit,{model,buttonId:owner.buttonId,contentId:owner.contentId}))
+    throw notReady();
+}
+
+async function setModel(page, model, returnToThinking=false) {
   await page.keyboard.press("Escape");
   await openModelMenu(page);
   const labels=await page.evaluate(()=>[...(document.querySelector('[data-chat-bridge-model-picker="1"]')||document).querySelectorAll('[role="menuitemradio"]')].filter(e=>{
@@ -1680,6 +1774,7 @@ async function setModel(page, model) {
     return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
       !e.closest('[inert],[aria-hidden="true"],[data-active="false"]');
   }).some(e=>(e.innerText||"").trim().toLowerCase()===model.toLowerCase() && e.getAttribute("aria-checked")==="true"), model);
+  if(checked && result.native && returnToThinking) await commitVerifiedModelToThinking(page,model);
   await page.keyboard.press("Escape");
   if(!checked) throw new Error("Model selection was not confirmed: "+model);
   return model;
@@ -1756,8 +1851,8 @@ async function setEffort(page, effort) {
 
 async function applyModelSpec(page, spec, explicitEffort=null) {
   const preset=modelPreset(spec);
-  const selected=await setModel(page,preset.radio);
   const effort=explicitEffort || preset.effort;
+  const selected=await setModel(page,preset.radio,!!effort);
   if(effort) await setEffort(page,effort);
   const observed=observedModel((await state(page)).mode);
   return {model:selected,effort:observed.effort||effort,observed};

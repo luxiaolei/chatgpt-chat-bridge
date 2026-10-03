@@ -115,7 +115,7 @@ def process_case(case, coordinator, runner, runner_path, fakes):
         closed = case != 'outer-exited-leader'
         leader, leaf_file, leader_file = fakes.tree(closed=closed, early=early)
         # Allow nested fake Python startup before testing timeout teardown.
-        timeout = 3 if case in {'outer-closed-pipes', 'outer-exited-leader'} else .8
+        timeout = 3
         try:
             completed = coordinator.run_bridge([sys.executable, str(leader)], timeout=timeout)
             assert case == 'outer-normal-residual', 'timed-out wrapper was reported successful'
@@ -610,7 +610,27 @@ def integration_case(case, coordinator, runner, runner_path, fakes):
             except ValueError:
                 pass
         fake = fakes.script('timeout-client', "import sys\nsys.stdin.buffer.read()\nprint('ok')\n")
-        for value in ('1', '600'):
+        # Validate the legal lower bound without depending on interpreter startup.
+        with patch.object(sys, 'argv', [str(runner_path), str(fake), '1']), \
+             patch.object(sys, 'stdin') as input_stream, \
+             patch.object(sys, 'stderr', io.StringIO()) as diagnostic, \
+             patch.object(runner.subprocess, 'Popen') as spawn, \
+             patch.object(runner, 'stop_client', return_value=(b'', b'')) as stop:
+            input_stream.buffer.read.return_value = b'synthetic payload'
+            client = spawn.return_value
+            client.returncode = 0
+            client.communicate.return_value = (b'ok\n', b'')
+            assert runner.main() == 0
+            spawn.assert_called_once_with([str(fake), 'nodejs'], stdin=subprocess.PIPE,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            client.communicate.assert_called_once_with(b'synthetic payload', timeout=1.0)
+            stop.assert_called_once_with(client)
+            client.communicate.side_effect = subprocess.TimeoutExpired('synthetic-client', 1.0)
+            assert runner.main() == 124, 'timeout at the legal lower bound was accepted as success'
+            receipt = json.loads(diagnostic.getvalue())
+            assert receipt == {'ok': False, 'status': 'EGO_CLIENT_TIMEOUT', 'timeoutSec': 1.0}
+            assert stop.call_count == 2
+        for value in ('3', '600'):
             result = subprocess.run([sys.executable, str(runner_path), str(fake), value],
                                     input='synthetic payload', capture_output=True, text=True, timeout=4)
             assert result.returncode == 0, result.stderr
