@@ -1401,7 +1401,7 @@ async function streamMessage(page, msg, {requestId, turnId, timeout=180000, targ
   const error=new Error("STREAM_TIMEOUT"); error.code="STREAM_TIMEOUT"; throw error;
 }
 
-async function openModelMenu(page) {
+async function openModelMenu(page, purpose="model") {
   await detectWebRateLimit(page,"model-menu");
   const ready=await page.waitForFunction(() => {
     const visible=x=>{
@@ -1436,32 +1436,95 @@ async function openModelMenu(page) {
     const button=items[0], style=getComputedStyle(button);
     if(!button.isConnected || !button.getClientRects().length || style.visibility==="hidden" || style.display==="none" ||
       button.closest('[inert], [data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]')) return false;
-    button.click();
     return true;
   });
   if(!opened) throw new Error("Model/effort button disappeared before menu open");
-  await page.waitForFunction(()=>[...document.querySelectorAll('[role="menuitemradio"]')].some(e=>{
-    const style=getComputedStyle(e);
-    return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none";
-  }),undefined,{timeout:5000});
-  await page.waitForTimeout(100);
+
+  const menuState=await page.evaluate(()=>{
+    const visible=e=>e.getClientRects().length>0 && getComputedStyle(e).display!=="none" &&
+      getComputedStyle(e).visibility!=="hidden" && !e.closest('[inert],[aria-hidden="true"]');
+    const all=[...document.querySelectorAll('[data-model-picker-view]')];
+    const active=all.filter(visible);
+    if(active.length>1) throw new Error("MODEL_MENU_AMBIGUOUS");
+    return {native:all.length>0,view:active[0]?.getAttribute('data-model-picker-view')||null,
+      legacyOpen:[...document.querySelectorAll('[role="menuitemradio"]')].some(visible)};
+  });
+  if(purpose==="effort" && menuState.view==="advanced") {
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(()=>![...document.querySelectorAll('[data-model-picker-view]')].some(e=>
+      e.getClientRects().length>0 && getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]')),
+      undefined,{timeout:5000});
+    menuState.view=null;menuState.legacyOpen=false;
+  }
+  if(!menuState.view && !menuState.legacyOpen) {
+    try { await page.click('[data-chat-bridge-model-button="1"]'); }
+    catch(error) {
+      // Legacy overlay compatibility; native two-view menus require native pointer opening.
+      if(menuState.native || !/intercept|hidden|none can receive input/i.test(String(error?.message||error))) throw error;
+      const fallback=await page.evaluate(()=>{
+        const items=[...document.querySelectorAll('[data-chat-bridge-model-button="1"]')];
+        if(items.length!==1 || !items[0].isConnected || !items[0].getClientRects().length ||
+          items[0].closest('[inert],[aria-hidden="true"]')) return false;
+        items[0].click();return true;
+      });
+      if(!fallback) throw new Error("Model/effort button disappeared before menu open");
+    }
+  }
+  await page.waitForFunction(()=>{
+    const active=e=>e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
+      getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]');
+    return [...document.querySelectorAll('[data-model-picker-view], [role="menuitemradio"], [role="slider"]')].some(active);
+  },undefined,{timeout:5000});
+  const toggle=await page.evaluate(purpose=>{
+    const active=e=>e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
+      getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]');
+    document.querySelectorAll('[data-chat-bridge-model-picker], [data-chat-bridge-model-toggle]').forEach(e=>{
+      e.removeAttribute('data-chat-bridge-model-picker');e.removeAttribute('data-chat-bridge-model-toggle');
+    });
+    const pickers=[...document.querySelectorAll('[data-model-picker-view]')].filter(active);
+    if(pickers.length>1) throw new Error("MODEL_MENU_AMBIGUOUS");
+    if(!pickers.length) return false;
+    const picker=pickers[0];picker.setAttribute('data-chat-bridge-model-picker','1');
+    if(purpose==="effort") {
+      if(picker.getAttribute('data-model-picker-view')!=="simple") throw new Error("EFFORT_SELECTOR_NOT_READY");
+      return false;
+    }
+    if(picker.getAttribute('data-model-picker-view')==="advanced") return false;
+    if(picker.getAttribute('data-model-picker-view')!=="simple") throw new Error("MODEL_SELECTOR_NOT_READY");
+    const toggles=[...picker.querySelectorAll('[data-model-picker-view-toggle="true"]')].filter(active);
+    if(toggles.length!==1 || toggles[0].getAttribute('aria-label')!=="Select model") throw new Error("MODEL_VIEW_TOGGLE_AMBIGUOUS");
+    toggles[0].setAttribute('data-chat-bridge-model-toggle','1');return true;
+  },purpose);
+  if(toggle) await page.click('[data-chat-bridge-model-toggle="1"]');
+  await page.waitForFunction(purpose=>{
+    const root=document.querySelector('[data-chat-bridge-model-picker="1"]')||document;
+    const controls=[...root.querySelectorAll(purpose==="effort"?'[role="slider"]':'[role="menuitemradio"]')];
+    return controls.some(e=>e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
+      getComputedStyle(e).display!=="none" && !e.closest('[inert]') &&
+      !(purpose==="effort"?e.parentElement:e)?.closest('[aria-hidden="true"],[data-active="false"]'));
+  },purpose,{timeout:5000});
+
 }
 async function setModel(page, model) {
   await page.keyboard.press("Escape");
   await openModelMenu(page);
-  const labels=await page.evaluate(()=>[...document.querySelectorAll('[role="menuitemradio"]')].filter(e=>{
+  const labels=await page.evaluate(()=>[...(document.querySelector('[data-chat-bridge-model-picker="1"]')||document).querySelectorAll('[role="menuitemradio"]')].filter(e=>{
     const style=getComputedStyle(e);
-    return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none";
+    return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
+      !e.closest('[inert],[aria-hidden="true"],[data-active="false"]');
   }).map(e=>(e.innerText||"").trim()));
   try { model=selectModelLabel(labels,model); }
   catch(error){ await page.keyboard.press("Escape"); throw error; }
   const result=await page.evaluate((model)=>{
     document.querySelectorAll("[data-chat-bridge-model-option]").forEach(e=>e.removeAttribute("data-chat-bridge-model-option"));
-    const items=[...document.querySelectorAll('[role="menuitemradio"]')].filter(e=>{
+    const items=[...(document.querySelector('[data-chat-bridge-model-picker="1"]')||document).querySelectorAll('[role="menuitemradio"]')].filter(e=>{
       const style=getComputedStyle(e);
-      return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none";
+      return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
+      !e.closest('[inert],[aria-hidden="true"],[data-active="false"]');
     });
-    const x=items.find(e=>(e.innerText||"").trim().toLowerCase()===model.toLowerCase());
+    const matches=items.filter(e=>(e.innerText||"").trim().toLowerCase()===model.toLowerCase());
+    if(matches.length>1) throw new Error("MODEL_OPTION_AMBIGUOUS");
+    const x=matches[0];
     if(!x) return {ok:false,available:items.map(e=>(e.innerText||"").trim())};
     x.setAttribute("data-chat-bridge-model-option","1");
     const r=x.getBoundingClientRect();
@@ -1471,13 +1534,14 @@ async function setModel(page, model) {
     await page.keyboard.press("Escape");
     throw new Error("Model not found: "+model+"; available="+result.available.join(", "));
   }
-  await page.mouse.click(result.x,result.y,{label:"select model"});
+  await page.click('[data-chat-bridge-model-option="1"]');
   await page.waitForTimeout(250);
   await page.keyboard.press("Escape");
   await openModelMenu(page);
-  const checked=await page.evaluate((model)=>[...document.querySelectorAll('[role="menuitemradio"]')].filter(e=>{
+  const checked=await page.evaluate((model)=>[...(document.querySelector('[data-chat-bridge-model-picker="1"]')||document).querySelectorAll('[role="menuitemradio"]')].filter(e=>{
     const style=getComputedStyle(e);
-    return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none";
+    return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
+      !e.closest('[inert],[aria-hidden="true"],[data-active="false"]');
   }).some(e=>(e.innerText||"").trim().toLowerCase()===model.toLowerCase() && e.getAttribute("aria-checked")==="true"), model);
   await page.keyboard.press("Escape");
   if(!checked) throw new Error("Model selection was not confirmed: "+model);
@@ -1490,29 +1554,40 @@ async function setEffort(page, effort) {
   const observed=observedModel((await state(page)).mode);
   if(observed.effort?.toLowerCase()===key) return true;
   await page.keyboard.press("Escape");
-  await openModelMenu(page);
+  await openModelMenu(page,"effort");
   const bounds=await page.evaluate(()=>{
-    for(const e of document.querySelectorAll('[data-chat-bridge-effort-slider="1"]')) e.removeAttribute('data-chat-bridge-effort-slider');
-    const sliders=[...document.querySelectorAll('[role="slider"]')].filter(e=>{
+    for(const e of document.querySelectorAll('[data-chat-bridge-effort-slider], [data-chat-bridge-effort-control]')) {e.removeAttribute('data-chat-bridge-effort-slider');e.removeAttribute('data-chat-bridge-effort-control');}
+    const picker=document.querySelector('[data-chat-bridge-model-picker="1"]');
+    const sliders=[...(picker||document).querySelectorAll('[role="slider"]')].filter(e=>{
       const style=getComputedStyle(e);
       return e.getClientRects().length>0 && style.visibility!=="hidden" && style.display!=="none" &&
         !e.hasAttribute("disabled") && e.getAttribute("aria-disabled")!=="true" &&
-        !e.hasAttribute("inert") && !e.closest("[inert]");
+        !e.hasAttribute("inert") && !e.closest("[inert]") &&
+        !e.parentElement?.closest('[aria-hidden="true"],[data-active="false"]');
     });
+    if(sliders.length>1) throw new Error("EFFORT_SELECTOR_AMBIGUOUS");
     const s=sliders[0];
     if(!s) return null;
     s.setAttribute('data-chat-bridge-effort-slider','1');
-    return {min:Number(s.getAttribute('aria-valuemin')??0),max:Number(s.getAttribute('aria-valuemax'))};
+    const power=s.closest?.('[data-reasoning-slider="true"]');
+    if(picker && (!power || power.getAttribute('aria-label')!=="Power" || power.getAttribute('aria-disabled')==="true" || power.closest('[inert],[aria-hidden="true"]'))) return null;
+    const control=power||s;control.setAttribute('data-chat-bridge-effort-control','1');
+    return {min:Number(s.getAttribute('aria-valuemin')??0),max:Number(s.getAttribute('aria-valuemax')),current:Number(s.getAttribute('aria-valuenow')),native:!!power};
   });
-  if(!bounds || !Number.isFinite(bounds.max) || bounds.max<=bounds.min){
+  if(!bounds || !Number.isFinite(bounds.min) || !Number.isFinite(bounds.max) || bounds.max<=bounds.min){
     await page.keyboard.press("Escape");
     throw new Error("Thinking effort slider not available");
   }
   const target=key==="pro"?bounds.max:bounds.min+levels[key];
   if(target>bounds.max){ await page.keyboard.press("Escape"); throw new Error("Requested thinking level is unavailable"); }
-  await page.focus('[data-chat-bridge-effort-slider="1"]');
-  await page.keyboard.press(key==="pro"?"End":"Home");
-  if(key!=="pro") for(let i=0;i<levels[key];i++) await page.keyboard.press("ArrowRight");
+  await page.focus(bounds.native?'[data-chat-bridge-effort-control="1"]':'[data-chat-bridge-effort-slider="1"]');
+  if(bounds.native) {
+    if(!Number.isInteger(bounds.current) || bounds.current<bounds.min || bounds.current>bounds.max || !Number.isInteger(target) || Math.abs(target-bounds.current)>10) throw new Error("EFFORT_VALUE_UNAVAILABLE");
+    for(let i=0;i<Math.abs(target-bounds.current);i++) await page.keyboard.press(target>bounds.current?"ArrowRight":"ArrowLeft");
+  } else {
+    await page.keyboard.press(key==="pro"?"End":"Home");
+    if(key!=="pro") for(let i=0;i<levels[key];i++) await page.keyboard.press("ArrowRight");
+  }
   const now=await page.evaluate(()=>Number(document.querySelector('[data-chat-bridge-effort-slider="1"]')?.getAttribute("aria-valuenow")));
   await page.keyboard.press("Escape");
   if(now!==target) throw new Error("Effort selection was not confirmed");
