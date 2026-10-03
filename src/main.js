@@ -1535,14 +1535,48 @@ async function setModel(page, model) {
     if(!x) return {ok:false,available:items.map(e=>(e.innerText||"").trim())};
     x.setAttribute("data-chat-bridge-model-option","1");
     const r=x.getBoundingClientRect();
-    return {ok:true,x:r.left+r.width/2,y:r.top+r.height/2};
+    return {ok:true,native:!!document.querySelector('[data-chat-bridge-model-picker="1"]'),x:r.left+r.width/2,y:r.top+r.height/2};
   }, model);
   if(!result.ok){
     await page.keyboard.press("Escape");
     throw new Error("Model not found: "+model+"; available="+result.available.join(", "));
   }
+  if(result.native) {
+    const pointerReady=await page.waitForFunction(()=>{
+      const picker=document.querySelector('[data-chat-bridge-model-picker="1"]');
+      const items=[...document.querySelectorAll('[data-chat-bridge-model-option="1"]')];
+      if(!picker || !picker.isConnected || picker.getAttribute('data-model-picker-view')!=="advanced" || items.length!==1) return false;
+      const transitions=picker.getAttribute('data-transitions-ready');
+      if(transitions!==null && transitions!=="true") return false;
+      const target=items[0],style=getComputedStyle(target);
+      if(!picker.contains(target) || !target.isConnected || !target.getClientRects().length ||
+        style.visibility==="hidden" || style.display==="none" || target.getAttribute('aria-disabled')==="true" ||
+        target.hasAttribute('disabled') || target.closest('[inert],[aria-hidden="true"],[data-active="false"]')) return false;
+      const rect=target.getBoundingClientRect();
+      if(!(rect.width>0 && rect.height>0)) return false;
+      const hit=document.elementFromPoint(rect.left+rect.width/2,rect.top+rect.height/2);
+      return !!hit && (hit===target || target.contains(hit));
+    },undefined,{timeout:5000}).then(()=>true).catch(()=>false);
+    if(!pointerReady) {
+      await page.keyboard.press("Escape");
+      throw new Error("MODEL_OPTION_NOT_READY: "+model);
+    }
+  }
   await page.click('[data-chat-bridge-model-option="1"]');
-  await page.waitForTimeout(250);
+  if(result.native) {
+    // Observe the selection commit before closing; final active-view confirmation remains required below.
+    const committed=await page.waitForFunction(model=>{
+      const picker=document.querySelector('[data-chat-bridge-model-picker="1"]');
+      if(!picker || !picker.isConnected) return false;
+      const matches=[...picker.querySelectorAll('[role="menuitemradio"]')].filter(e=>
+        (e.innerText||"").trim().toLowerCase()===model.toLowerCase());
+      return matches.length===1 && matches[0].getAttribute('aria-checked')==="true";
+    },model,{timeout:5000}).then(()=>true).catch(()=>false);
+    if(!committed) {
+      await page.keyboard.press("Escape");
+      throw new Error("Model selection was not confirmed: "+model);
+    }
+  } else await page.waitForTimeout(250);
   await page.keyboard.press("Escape");
   await openModelMenu(page);
   const checked=await page.evaluate((model)=>[...(document.querySelector('[data-chat-bridge-model-picker="1"]')||document).querySelectorAll('[role="menuitemradio"]')].filter(e=>{
