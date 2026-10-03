@@ -56,13 +56,17 @@ const persistedFormat=JSON.parse(await readFile(new URL('./native-submission-per
 function inspectPersisted(change=()=>{}) {
  return inspect(context=>{
   const {doc,editor,host}=context;
-  Object.assign(editor,new Function('x','return {'+persistedFormat.getter+'};')({f:value=>{
-   assert.equal(value,doc);return {content:fixture.request};
-  }}));
-  editor.hasMarkdownFormatting=({document})=>{assert.equal(document,doc);return true;};
-  editor.getPersistedText=value=>{assert.equal(value,doc);return fixture.body;};
+  const native={formatted:true,persistedBody:fixture.body,plainBody:fixture.request};
+  doc.descendants=()=>{};
+  const x={f:value=>{
+   assert.equal(value,doc);if(native.error)throw native.error;return {content:native.plainBody};
+  },d:value=>{assert.equal(value,doc);return native.formatted;},b:()=>null};
+  Object.assign(editor,new Function('x','E','return {'+[
+   persistedFormat.getter,persistedFormat.hasMarkdownFormatting,persistedFormat.getPersistedText
+  ].join(',')+'};')(x,{c:()=>false}));
+  editor.markdownEditor.serialize=value=>{assert.equal(value,doc);return native.persistedBody;};
   host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+persistedFormat.submit)();
-  change(context);
+  change({...context,native});
  });
 }
 
@@ -76,13 +80,13 @@ test('captured persisted-text native format produces a witness and deduplicates 
 });
 
 test('persisted native getter preserves its plain, entity-only and trailing-space branches',async()=>{
- const plain=await inspectPersisted(({editor})=>editor.hasMarkdownFormatting=()=>false);
+ const plain=await inspectPersisted(({native})=>native.formatted=false);
  assert.equal(plain.body,fixture.request);
- const empty=await inspectPersisted(({editor})=>editor.getPersistedText=()=>'&#x20;');
+ const empty=await inspectPersisted(({native})=>native.persistedBody='&#x20;');
  assert.equal(empty.body,fixture.request);
- const spaced=await inspectPersisted(({doc,editor})=>{
+ const spaced=await inspectPersisted(({doc,native})=>{
   doc.lastChild={textContent:'native trailing '};
-  editor.getPersistedText=()=>fixture.body+'&#x20;';
+  native.persistedBody=fixture.body+'&#x20;';
  });
  assert.equal(spaced.body,fixture.body+' ');
 });
@@ -90,8 +94,10 @@ test('persisted native getter preserves its plain, entity-only and trailing-spac
 test('persisted native format rejects uncharacterized pairs and broken identity, document or method binding',async()=>{
  for(const change of [
   ({env})=>env.email='other@example.test',
+  ({env})=>env.identity=null,
   ({host})=>host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return e=>{eg(j.getText(),e)}')(),
   ({host})=>host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return e=>{ev(OTHER.getText(),e)}')(),
+  ({editor})=>editor.getText=new Function('T','return {'+getter+'};')({g:()=>fixture.body}).getText,
   ({editor})=>editor.getText=new Function('x','return {'+persistedFormat.getter.replace('endsWith(" ")','endsWith("\\n")')+'};')({f:()=>({content:fixture.request})}).getText,
   ({editor})=>editor.view.dom={},
   ({editor})=>editor.view.state.doc={},
@@ -102,4 +108,33 @@ test('persisted native format rejects uncharacterized pairs and broken identity,
   ({editor})=>editor.getPersistedText=null,
   ({host,editor})=>host.__reactFiber$fixture.memoizedState.memoizedState.deps.push({...editor}),
  ]) await assert.rejects(inspectPersisted(change),/NATIVE_SUBMISSION_UNVERIFIED/);
+});
+
+test('persisted native format rejects unknown or mixed dependency implementations',async()=>{
+ for(const method of ['hasMarkdownFormatting','getPersistedText'])
+  await assert.rejects(inspectPersisted(({editor})=>{
+   const native=editor[method];
+   editor[method]=function(...args){return native.apply(this,args);};
+  }),/NATIVE_SUBMISSION_UNVERIFIED/);
+ for(const change of [
+  ({editor})=>editor.getPersistedText=()=>'UNCHARACTERIZED-BODY',
+  ({editor})=>editor.hasMarkdownFormatting=editor.getPersistedText,
+  ({editor})=>editor.getPersistedText=editor.hasMarkdownFormatting,
+ ]) await assert.rejects(inspectPersisted(change),/NATIVE_SUBMISSION_UNVERIFIED/);
+});
+
+test('persisted getter rejects changed document and empty, non-string or throwing native output',async()=>{
+ for(const switchDoc of [
+  ({editor})=>editor.dictation.document={},
+  ({editor})=>editor.view.state.doc={},
+  ({composer})=>composer.pmViewDesc.node={},
+ ]) await assert.rejects(inspectPersisted(context=>{
+  context.editor.markdownEditor.serialize=()=>{switchDoc(context);return fixture.body;};
+ }),/NATIVE_SUBMISSION_UNVERIFIED/);
+ for(const body of ['',42]) await assert.rejects(inspectPersisted(({native})=>{
+  native.formatted=false;native.plainBody=body;
+ }),/NATIVE_SUBMISSION_UNVERIFIED/);
+ await assert.rejects(inspectPersisted(({native})=>{
+  native.formatted=false;native.error=new Error('native getter failed');
+ }),/native getter failed/);
 });

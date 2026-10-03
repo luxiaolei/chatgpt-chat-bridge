@@ -22,7 +22,7 @@ async function harness(f={}) {
     detectWebRateLimit=async()=>{};
     state=async(_page,mode)=>{f.calls.push(['state',mode]);return f.snapshots.shift()||f.latest||f.snapshots.at(-1);};
     expandEvidenceMessages=async()=>{};
-    nativeSubmissionWitness=async()=>f.witness||null;
+    nativeSubmissionWitness=async()=>{if(f.witnessError)throw f.witnessError;return f.witness||null;};
     if(f.shortWait) waitForDelivery=async()=>f.latest;
     return {deliveryObserved,waitForDelivery,triggerSend,sendMessage,attempted:()=>sendAttempted};
   `)(f);
@@ -126,4 +126,17 @@ test('native forward witness confirms actual S1 and rejects altered body, identi
  for(const change of [{requestHash:'0'.repeat(64)},{bodyHash:'0'.repeat(64)},{accountIdentity:null},{accountIdentity:'other@example.test'},{format:'unknown'},{observedAt:new Date(Date.now()-60000).toISOString()}])
  assert.equal(deliveryObserved({...original,nativeWitness:{...nativeWitness,...change}},observed,fixture.request),false);
  assert.equal(deliveryObserved(original,observed,fixture.request+' changed footer'),false);
+});
+
+test('native verification failure and getter exception stop before any Send action',async()=>{
+ for(const failure of ['NATIVE_SUBMISSION_UNVERIFIED','native getter failed']) {
+  const f={witnessError:new Error(failure)},api=await harness(f);
+  const page={fill:async()=>f.calls.push(['fill']),waitForTimeout:async()=>{},
+   evaluate:async()=>true,click:async()=>f.calls.push(['click']),press:async()=>f.calls.push(['enter'])};
+  await assert.rejects(api.sendMessage(page,message,url,'verified@example.test'),error=>
+   error.message===failure&&error.deliveryStage==='PRE_SEND');
+  assert.equal(f.calls.filter(([kind])=>kind==='fill').length,1);
+  assert.equal(f.calls.some(([kind])=>kind==='click'||kind==='enter'),false);
+  assert.equal(api.attempted(),false);
+ }
 });

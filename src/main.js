@@ -1257,7 +1257,7 @@ async function nativeSubmissionWitness(page, request, expectedIdentity) {
     // Pin the characterized native submit format; an unsupported format fails before Send.
     const formats=[
       {submit:"e=>{eg(j.getText(),e)}",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,T.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}"},
-      {submit:"e=>{ev(H.getText(),e)}",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;if(null==this.markdownEditor||!this.hasMarkdownFormatting({document:e}))return(0,x.f)(e).content;let t=this.getPersistedText(e);return\"\"===t.replace(/&#(?:x[\\da-f]+|\\d+);/gi,\"\").trim()?(0,x.f)(e).content:e.lastChild?.textContent.endsWith(\" \")?t.replace(/&#x20;$/,\" \"):t}",persistedText:true},
+      {submit:"e=>{ev(H.getText(),e)}",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;if(null==this.markdownEditor||!this.hasMarkdownFormatting({document:e}))return(0,x.f)(e).content;let t=this.getPersistedText(e);return\"\"===t.replace(/&#(?:x[\\da-f]+|\\d+);/gi,\"\").trim()?(0,x.f)(e).content:e.lastChild?.textContent.endsWith(\" \")?t.replace(/&#x20;$/,\" \"):t}",hasMarkdownFormatting:"hasMarkdownFormatting(){let{document:e=this.dictation.document,includeLinks:t=!0}=arguments.length>0&&void 0!==arguments[0]?arguments[0]:{};if(null==this.markdownEditor||this.plainTextMode)return!1;let n=(0,x.d)(e,{includeLinks:t});return n||e.descendants(e=>!(n=n||null!=(0,x.b)(e)&&(t||\"richLink\"!==e.type.name)||t&&e.isTextblock&&(0,E.c)(e.textBetween(0,e.content.size,\"\\n\",\"\\n\")))),n}",getPersistedText:"getPersistedText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return null==this.markdownEditor||this.plainTextMode?(0,x.f)(e,{preserveTextLinkMarks:!0}).content:this.markdownEditor.serialize(e)}",persistedText:true},
     ];
     for(let i=0;fiber&&i<16;i++,fiber=fiber.return) {
       const format=formats.find(value=>String(fiber.memoizedProps?.onSubmit)===value.submit);
@@ -1270,7 +1270,9 @@ async function nativeSubmissionWitness(page, request, expectedIdentity) {
           typeof editor.getText==='function' && String(editor.getText)===format.getter &&
           editor.plainTextMode===false && typeof editor.markdownEditor?.serialize==='function' &&
           (!format.persistedText || (typeof editor.hasMarkdownFormatting==='function' &&
-            typeof editor.getPersistedText==='function'))) candidates.add(editor);
+            String(editor.hasMarkdownFormatting)===format.hasMarkdownFormatting &&
+            typeof editor.getPersistedText==='function' &&
+            String(editor.getPersistedText)===format.getPersistedText))) candidates.add(editor);
       }
     }
     if(candidates.size!==1 || typeof doc.textBetween!=='function' ||
