@@ -9,6 +9,19 @@ import {imageCli,createHostImageArtifacts} from '../src/capabilities/image/chatg
 import {imageReceiptStorageKey} from '../src/capabilities/image/manifest.js';
 import {sha256} from '../src/capabilities/image/verifier.js';
 import {normalizeImageBatch} from '../src/capabilities/image/batch.js';
+import {normalizeOutputDeliveryGrant} from '../src/capabilities/image/contract.js';
+
+// Seed expiry only in this fixture's private SQLite store after positive admission.
+function expireFixtureGrant(f,grantId) {
+  assert.match(grantId,/^[a-z0-9-]+$/);
+  const [payload,revoked]=f.sql(`select payload,revoked_at from image_grants where grant_id='${grantId}'`)[0];
+  assert.equal(revoked,null);
+  const before=JSON.parse(payload),expiresAt='2000-01-01T00:00:00.000Z';
+  f.sql(`update image_grants set payload=json_set(payload,'$.expiresAt','${expiresAt}') where grant_id='${grantId}'`);
+  const [after,revokedAfter]=f.sql(`select payload,revoked_at from image_grants where grant_id='${grantId}'`)[0];
+  assert.deepEqual(JSON.parse(after),{...before,expiresAt});
+  assert.equal(revokedAfter,null);
+}
 
 async function original(f,{id='image-1',color=1,exported=true,late=false}={}) {
   const r=f.request({jobId:id}),g=f.grant(r,`grant-${id}`);
@@ -74,7 +87,10 @@ test('new delivery uses its own bounded current authority, original SQLite creat
   const f=await fixture();try {
     const s=await original(f),g=delivery(f,s);f.call('image-revoke',{issuerRef:f.owner,grantId:s.g.grantId});
     authorize(f,g);assert.equal(f.call('image-delivery-io-admission',query(s,g)).allowed,true);
-    for(const patch of [{expiresAt:new Date(Date.now()-1).toISOString()},{expiresAt:new Date(Date.now()+3601000).toISOString()}])
+    const at='2030-01-01T00:00:00.000Z',expires=ms=>new Date(Date.parse(at)+ms).toISOString();
+    assert.equal(normalizeOutputDeliveryGrant({...g,expiresAt:expires(3600000)},at).expiresAt,expires(3600000));
+    for(const ms of [0,3600001])assert.throws(()=>normalizeOutputDeliveryGrant({...g,expiresAt:expires(ms)},at),/DELIVERY_EXPIRY/);
+    for(const patch of [{expiresAt:new Date(Date.now()-1).toISOString()},{expiresAt:new Date(Date.now()+7200000).toISOString()}])
       f.fail('image-authorize',{issuerRef:f.owner,grant:{...g,grantId:'bad-time',...patch}},/DELIVERY_EXPIRY/);
     f.control('pause');f.fail('image-delivery-io-admission',query(s,g),/ADMISSION_PAUSED/);f.control('resume');
     f.putRuntime({tasks:{[f.op.taskId]:{watchdogPausedForUserControl:true}}});f.fail('image-delivery-io-admission',query(s,g),/USER_CONTROL_PAUSED/);f.putRuntime({tasks:{}});
@@ -149,8 +165,9 @@ test('concurrent owner grants cannot race into two destinations; expiry blocks r
     const s=await original(f),a=delivery(f,s,{grantId:'race-a'}),b={...a,grantId:'race-b',destinationRef:'store:other'};
     const outcomes=await Promise.all([a,b].map(grant=>f.callAsync('image-authorize',{issuerRef:f.owner,grant})));
     assert.deepEqual(outcomes.map(r=>r.code).sort(),[0,2]);assert.match(outcomes.find(r=>r.code===2).err,/DESTINATION_CONFLICT/);
-    const winner=[a,b][outcomes.findIndex(r=>r.code===0)],short={...winner,grantId:'short-delivery',expiresAt:new Date(Date.now()+1800).toISOString()};
-    authorize(f,short);await new Promise(resolve=>setTimeout(resolve,Math.max(0,Date.parse(short.expiresAt)-Date.now()+20)));
+    const winner=[a,b][outcomes.findIndex(r=>r.code===0)],short={...winner,grantId:'short-delivery',expiresAt:new Date(Date.now()+600000).toISOString()};
+    authorize(f,short);assert.equal(f.call('image-delivery-io-admission',query(s,short)).allowed,true);
+    expireFixtureGrant(f,short.grantId);
     f.fail('image-delivery-io-admission',query(s,short),/EXPIRED_OR_REVOKED/);
     assert.equal(historical(f,s,short).deliveries[0].reason,'RECEIVER_STORE_MISSING');
     const before=f.api.inspect(s.key);

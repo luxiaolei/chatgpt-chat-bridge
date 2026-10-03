@@ -6,14 +6,26 @@ import {readFile,writeFile,realpath} from 'node:fs/promises';
 import {fixture} from './image-persistence-fixtures.mjs';
 import {png,fixtureDecode,MAGICK} from './image-artifacts-fixtures.mjs';
 import {imageCli,createHostImageArtifacts,imageCallerEnvironment} from '../src/capabilities/image/chatgpt-ego.cli.js';
-import {imageJobKey,normalizeImageRequest} from '../src/capabilities/image/contract.js';
+import {imageJobKey,normalizeImageRequest,normalizeOutputRecoveryGrant} from '../src/capabilities/image/contract.js';
 import {imageExecutionPrompt,imagePromptHash} from '../src/capabilities/image/chatgpt-ego.js';
 
+// Seed expiry only in this fixture's private SQLite store after positive admission.
+function expireFixtureGrant(f,grantId) {
+  assert.match(grantId,/^[a-z0-9-]+$/);
+  const [payload,revoked]=f.sql(`select payload,revoked_at from image_grants where grant_id='${grantId}'`)[0];
+  assert.equal(revoked,null);
+  const before=JSON.parse(payload),expiresAt='2000-01-01T00:00:00.000Z';
+  f.sql(`update image_grants set payload=json_set(payload,'$.expiresAt','${expiresAt}') where grant_id='${grantId}'`);
+  const [after,revokedAfter]=f.sql(`select payload,revoked_at from image_grants where grant_id='${grantId}'`)[0];
+  assert.deepEqual(JSON.parse(after),{...before,expiresAt});
+  assert.equal(revokedAfter,null);
+}
+
 async function setup(f,{expiry=false,route}={}) {
-  const r=f.request({...(route?{route}:{}),...(expiry?{budget:{...f.request().budget,deadlineAt:new Date(Date.now()+2200).toISOString()}}:{})}),g=f.grant(r);
+  const r=f.request(route?{route}:{}),g=f.grant(r);
   for(const name of ['generate','export'])g.capabilities.features[name].mode='ASSISTED';
   const s=f.setup(r,g);s.job=f.begin(s.key,s.job);
-  if(expiry)await new Promise(resolve=>setTimeout(resolve,Math.max(0,Date.parse(r.budget.deadlineAt)-Date.now()+20)));
+  if(expiry)expireFixtureGrant(f,g.grantId);
   else f.call('image-revoke',{grantId:g.grantId,issuerRef:f.owner});
   const grant={kind:'OUTPUT_RECOVERY',grantId:'recover-1',controllerOperationId:f.op.operationId,controllerTaskId:f.op.taskId,
     key:s.key,requestDigest:r.requestDigest,attemptId:'attempt-1',route:r.route,userMessageId:'new-user',turnId:'new-assistant',
@@ -35,7 +47,10 @@ test('recovery is owner-issued, immutable, bounded and cannot grant ordinary eff
       {attemptId:'other'},{route:{...s.r.route,conversationId:'other'}},{userMessageId:'old-user'},
       {targetRef:'store:other'},{key:{...s.key,jobId:'other'}}])f.fail('image-authorize',{issuerRef:f.owner,grant:{...s.grant,...patch}},/ACCESS_DENIED|RECOVERY_BINDING|TURN_BINDING/);
     f.fail('image-authorize',{issuerRef:f.owner,grant:{...s.grant,expiresAt:new Date(Date.now()-1).toISOString()}},/RECOVERY_EXPIRY/);
-    f.fail('image-authorize',{issuerRef:f.owner,grant:{...s.grant,expiresAt:new Date(Date.now()+3601000).toISOString()}},/RECOVERY_EXPIRY/);
+    const at='2030-01-01T00:00:00.000Z',expires=ms=>new Date(Date.parse(at)+ms).toISOString();
+    assert.equal(normalizeOutputRecoveryGrant({...s.grant,expiresAt:expires(3600000)},at).expiresAt,expires(3600000));
+    for(const ms of [0,3600001])assert.throws(()=>normalizeOutputRecoveryGrant({...s.grant,expiresAt:expires(ms)},at),/RECOVERY_EXPIRY/);
+    f.fail('image-authorize',{issuerRef:f.owner,grant:{...s.grant,expiresAt:new Date(Date.now()+7200000).toISOString()}},/RECOVERY_EXPIRY/);
     assert.equal(authorize(f,s).idempotent,false);assert.equal(authorize(f,s).idempotent,true);
     f.fail('image-authorize',{issuerRef:f.owner,grant:{...s.grant,consumerRef:'other'}},/GRANT_CONFLICT/);
     const wrongKey={...s.key,grantId:s.grant.grantId};
@@ -69,14 +84,14 @@ test('query-only recovery admission rechecks exact binding, authenticated owner,
 
 test('recovery expiry and unsupported native attempts stay explicit; prepare pins recovery without ordinary authority',async()=>{
   const f=await fixture();try {
-    const s=await setup(f);s.grant.expiresAt=new Date(Date.now()+2200).toISOString();authorize(f,s);
+    const s=await setup(f);authorize(f,s);
     const prepared=await imageCli('prepare',{key:s.key,recovery:s.recovery},{coordinated:f.call,liveAction:'characterize',callerEnv:f.env});
     assert.deepEqual(prepared.callerContext.recovery,s.recovery);
     assert.equal(imageCallerEnvironment(prepared,'image-output-io-admission',query(s),{}).CODEX_THREAD_ID,f.env.CODEX_THREAD_ID);
     assert.throws(()=>imageCallerEnvironment(prepared,'image-output-io-admission',query(s,{turnId:'other'}),{}),/SCOPE_MISMATCH/);
     assert.throws(()=>imageCallerEnvironment(prepared,'image-apply',{...s.key,event:observation(s)},{}),/SCOPE_MISMATCH/);
     await assert.rejects(imageCli('prepare',{key:s.key,recovery:s.recovery},{coordinated:f.call,liveAction:'download-original',callerEnv:f.env}),/RECOVERY_EFFECT_FORBIDDEN/);
-    await new Promise(resolve=>setTimeout(resolve,Math.max(0,Date.parse(s.grant.expiresAt)-Date.now()+20)));
+    expireFixtureGrant(f,s.grant.grantId);
     f.fail('image-output-io-admission',query(s),/RECOVERY_EXPIRED_OR_REVOKED/);
     f.generated(s.key,s.job); // Positive synthetic completion frees only this fixture's session.
     const native=f.request({jobId:'native'}),n=f.setup(native,f.grant(native,'native-grant'));f.begin(n.key,n.job);
