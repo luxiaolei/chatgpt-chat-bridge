@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 
 for(const file of ['control-routing','page-pool','liveness-policy','task-policy','lifecycle-policy','web-policy','model-policy','session-policy'])
@@ -21,6 +22,7 @@ async function harness(f={}) {
     detectWebRateLimit=async()=>{};
     state=async(_page,mode)=>{f.calls.push(['state',mode]);return f.snapshots.shift()||f.latest||f.snapshots.at(-1);};
     expandEvidenceMessages=async()=>{};
+    nativeSubmissionWitness=async()=>f.witness||null;
     if(f.shortWait) waitForDelivery=async()=>f.latest;
     return {deliveryObserved,waitForDelivery,triggerSend,sendMessage,attempted:()=>sendAttempted};
   `)(f);
@@ -104,4 +106,24 @@ test('an unacknowledged click or Enter never falls back to another send action',
     assert.deepEqual(f.calls,[[hasSend?'click':'enter']]);
     assert.equal(api.attempted(),true);
   }
+});
+
+test('native forward witness confirms actual S1 and rejects altered body, identity, scope and stale evidence',async()=>{
+ const fixture=JSON.parse(await readFile(new URL('./native-submission-fixture.json',import.meta.url),'utf8'));
+ const {deliveryObserved}=await harness();
+ const nativeWitness={format:'chatgpt-native-getText-v1',body:fixture.body,url,accountIdentity:'verified@example.test',observedAt:new Date().toISOString(),
+ requestHash:crypto.createHash('sha256').update(fixture.request.replace(/\s+/g,' ').trim()).digest('hex'),bodyHash:crypto.createHash('sha256').update(fixture.body).digest('hex')};
+ const original={...before,expectedMessage:fixture.request,expectedIdentity:'verified@example.test',nativeWitness};
+ const observed={...after,lastUser:'rendered body differs',lastUserSource:{text:fixture.body,messageId:after.lastUserId,conversationId:conversation}};
+ assert.equal(deliveryObserved(before,observed,fixture.request),false);
+ assert.equal(deliveryObserved(original,observed,fixture.request),true);
+ for(const text of [fixture.body.slice(0,-1),fixture.body+' changed footer',fixture.body.replace(String.fromCharCode(92,96),String.fromCharCode(96)),fixture.body.replace('](https://','](https://wrong.example/'),fixture.body.replace('[https://','[changed label https://')])
+ assert.equal(deliveryObserved(original,{...observed,lastUserSource:{...observed.lastUserSource,text}},fixture.request),false);
+ for(const bad of [{...observed,lastUserSource:null},{...observed,lastUserId:'old-user'},{...observed,url:url.replace(project,otherProject)},
+ {...observed,url:url.replace(conversation,'22222222-2222-4222-8222-222222222222')},
+ {...observed,lastUserSource:{...observed.lastUserSource,messageId:'wrong'}},{...observed,lastUserSource:{...observed.lastUserSource,conversationId:'wrong'}}])
+ assert.equal(deliveryObserved(original,bad,fixture.request),false);
+ for(const change of [{requestHash:'0'.repeat(64)},{bodyHash:'0'.repeat(64)},{accountIdentity:null},{accountIdentity:'other@example.test'},{format:'unknown'},{observedAt:new Date(Date.now()-60000).toISOString()}])
+ assert.equal(deliveryObserved({...original,nativeWitness:{...nativeWitness,...change}},observed,fixture.request),false);
+ assert.equal(deliveryObserved(original,observed,fixture.request+' changed footer'),false);
 });

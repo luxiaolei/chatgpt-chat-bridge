@@ -152,3 +152,15 @@ test('the CLI evidence caller hashes complete authored suffixes and rejects anot
     assert.equal(evidenceMatches(result,hash('bounded request'),crypto).length,0);
   }
 });
+
+test('native user source requires one explicit full source with both message and conversation IDs',async()=>{
+ const fixture=JSON.parse(await readFile(new URL('./native-submission-fixture.json',import.meta.url),'utf8'));
+ const props={copyPlainTextFromSource:true,message:fixture.body,messageId:'actual-user',conversationId:'11111111-1111-1111-1111-111111111111'};
+ const make=(p=props,duplicate=false,options={})=>{
+ const message=user('rendered text',{expanded:true,...options});
+ message.querySelector('[data-search-result-target]').__reactFiber$fixture={memoizedProps:p,return:duplicate?{memoizedProps:p}:null};
+ return message;};
+ assert.equal((await snapshot([make()])).lastUserSource.text,fixture.body);
+ for(const message of [make({...props,messageId:'wrong'}),make({...props,conversationId:'wrong'}),make({...props,copyPlainTextFromSource:false}),make(props,true),make(props,false,{ambiguous:true}),make(props,false,{duplicateBubble:true})])
+ assert.equal((await snapshot([message])).lastUserSource,null);
+});
