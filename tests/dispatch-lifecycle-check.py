@@ -236,6 +236,24 @@ c.subprocess.Popen=inject
             if db is not None:
                 db.close()
     elif case == 'group-probe-denied':
+        # Make cleanup probe progression independent of host scheduling; child lifetime stays real.
+        class CleanupClock:
+            def __init__(self):
+                self.now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, seconds):
+                self.now += seconds
+                time.sleep(0)
+
+        original_stop_bridge = coordinator.stop_bridge
+
+        def controlled_stop_bridge(process):
+            with patch.object(coordinator, "time", CleanupClock()):
+                return original_stop_bridge(process)
+
         original = os.killpg
         probes = 0
         kills = 0
@@ -252,7 +270,8 @@ c.subprocess.Popen=inject
             os.killpg = inconclusive
             leader, leaf_file, _ = fakes.tree(closed=True)
             try:
-                coordinator.run_bridge([sys.executable,str(leader)],timeout=.8)
+                with patch.object(coordinator, "stop_bridge", controlled_stop_bridge):
+                    coordinator.run_bridge([sys.executable,str(leader)],timeout=.8)
                 raise AssertionError('expected timeout')
             except subprocess.TimeoutExpired:
                 pass
@@ -262,7 +281,8 @@ c.subprocess.Popen=inject
             leader, leaf_file, _ = fakes.tree(closed=True,early=True)
             process=fakes.popen([sys.executable,str(leader)],stdout=subprocess.PIPE,stderr=subprocess.PIPE)
             process.communicate(timeout=4)
-            runner.stop_client(process)
+            with patch.object(runner, "time", CleanupClock()):
+                runner.stop_client(process)
             wait_stopped(wait_file(leaf_file))
             assert probes > 2 and kills == 2
         finally:
