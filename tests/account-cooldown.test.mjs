@@ -120,8 +120,8 @@ import json, pathlib, runpy, sys
 m=runpy.run_path(sys.argv[1])
 m['time'].sleep=lambda _: pathlib.Path(sys.argv[3], 'runtime.json').write_text(sys.argv[5])
 m['run']('loop', pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), [sys.argv[4], 'watch', '--loop', '--iterations', '2', '--account', 'b'])
-`,path.join(root,"src/web-preflight.py"),config,state,path.join(root,"bin/chat-bridge"),JSON.stringify({tasks})],{env,encoding:"utf8",timeout:5000});
-    assert.equal(loop.status,0,loop.stderr);
+`,path.join(root,"src/web-preflight.py"),config,state,path.join(root,"bin/chat-bridge"),JSON.stringify({tasks})],{env,encoding:"utf8",timeout:30000});
+    assert.equal(loop.status,0,JSON.stringify({stderr:loop.stderr,signal:loop.signal,errorCode:loop.error?.code,error:loop.error?.message}));
     assert.equal(loop.stdout.trim(),"browser-entered");
     await writeFile(path.join(state,"web-cooldowns",scope("user-two")+".json"),"broken json");
     assert.equal(run("watch",["watch","--account","b"]).status,2);
