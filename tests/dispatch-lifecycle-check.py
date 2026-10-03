@@ -115,7 +115,7 @@ def process_case(case, coordinator, runner, runner_path, fakes):
         closed = case != 'outer-exited-leader'
         leader, leaf_file, leader_file = fakes.tree(closed=closed, early=early)
         # Allow nested fake Python startup before testing timeout teardown.
-        timeout = 3 if case in {'outer-closed-pipes', 'outer-exited-leader'} else .8
+        timeout = 3
         try:
             completed = coordinator.run_bridge([sys.executable, str(leader)], timeout=timeout)
             assert case == 'outer-normal-residual', 'timed-out wrapper was reported successful'
