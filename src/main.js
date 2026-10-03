@@ -1079,7 +1079,7 @@ async function state(page, includeUserMessages=false, controlAction=null) {
     const lastUserMsg=[...ms].reverse().find(x=>x.role==='user')||null;
     const lastAssistant=lastAssistantMsg?.text||null, lastUser=lastUserMsg?.text||null;
     return {
-      url:location.href,title:document.title,mode,
+      url:location.href,title:document.title,mode,observedAt:new Date().toISOString(),
       generating:!!stop,stopAvailable:!!stop,
       sendAvailable:!!send && !send.disabled && send.getAttribute('aria-disabled')!=='true',
       inputReady:composer && !stop,composerPresent:composer,composerText,recoveryControls,
@@ -1157,45 +1157,53 @@ async function observeSession(chat,page,task=null) {
   return hb;
 }
 
-function deliveryObserved(before, after, message=before?.expectedMessage) {
+function deliveryObserved(before, after, message=before?.expectedMessage, rejection=null) {
+  const reject=condition=>{if(rejection) rejection.condition=condition;return false;};
   const witness=before?.nativeWitness;
-  if(witness && (witness.format!=='chatgpt-native-getText-v1' ||
-    witness.requestHash!==crypto.createHash('sha256').update(normalizedEvidenceText(message)).digest('hex') ||
-    witness.bodyHash!==crypto.createHash('sha256').update(witness.body).digest('hex') ||
-    witness.url!==before.url || !before.expectedIdentity || witness.accountIdentity!==before.expectedIdentity || !witness.observedAt ||
-    Date.now()-Date.parse(witness.observedAt)>15000 || Date.parse(witness.observedAt)>Date.now() || !Number.isFinite(Date.parse(witness.observedAt)) ||
-    after?.lastUserSource?.messageId!==after.lastUserId ||
-    after.lastUserSource.conversationId!==convId(after.url) ||
-    after.lastUserSource.text!==witness.body)) return false;
+  if(witness) {
+    if(witness.format!=='chatgpt-native-getText-v1') return reject('NATIVE_FORMAT_UNSUPPORTED');
+    if(witness.requestHash!==crypto.createHash('sha256').update(normalizedEvidenceText(message)).digest('hex')) return reject('NATIVE_REQUEST_HASH_MISMATCH');
+    if(witness.bodyHash!==crypto.createHash('sha256').update(witness.body).digest('hex')) return reject('NATIVE_BODY_HASH_MISMATCH');
+    if(witness.url!==before.url) return reject('NATIVE_WITNESS_URL_MISMATCH');
+    if(!before.expectedIdentity || witness.accountIdentity!==before.expectedIdentity) return reject('NATIVE_IDENTITY_MISMATCH');
+    if(!witness.observedAt || !Number.isFinite(Date.parse(witness.observedAt))) return reject('NATIVE_WITNESS_TIME_INVALID');
+    if(Date.now()-Date.parse(witness.observedAt)>15000 || Date.parse(witness.observedAt)>Date.now()) return reject('NATIVE_WITNESS_NOT_FRESH');
+    if(!after?.lastUserSource?.messageId) return reject('NATIVE_SOURCE_MESSAGE_ID_MISSING');
+    if(after.lastUserSource.messageId!==after.lastUserId) return reject('NATIVE_SOURCE_MESSAGE_ID_MISMATCH');
+    if(after.lastUserSource.conversationId!==convId(after.url)) return reject('NATIVE_SOURCE_CONVERSATION_MISMATCH');
+    if(after.lastUserSource.text!==witness.body) return reject('NATIVE_SOURCE_BODY_MISMATCH');
+  }
   const expected=String(message||"").replace(/\s+/g," ").trim();
-  if(!before || !after?.lastUserId || !expected ||
-    (!witness && String(after.lastUser||"").replace(/\s+/g," ").trim()!==expected) ||
-    after.lastUserId===before.lastUserId || (before.userMessageIds||[]).includes(after.lastUserId)) return false;
+  if(!before || !after?.lastUserId || !expected) return reject('USER_MESSAGE_EVIDENCE_MISSING');
+  if(!witness && String(after.lastUser||"").replace(/\s+/g," ").trim()!==expected) return reject('USER_TEXT_MISMATCH');
+  if(after.lastUserId===before.lastUserId || (before.userMessageIds||[]).includes(after.lastUserId)) return reject('USER_MESSAGE_ID_NOT_FRESH');
   const target=before.targetUrl||before.url;
   if(sameConversationUrl(after.url,target)) return true;
-  if(!sameConversationUrl(after.url,after.url)) return false;
+  if(!sameConversationUrl(after.url,after.url)) return reject('OBSERVED_CONVERSATION_URL_INVALID');
   try {
     const start=new URL(target);
-    if(start.origin!=="https://chatgpt.com" || start.username || start.password) return false;
+    if(start.origin!=="https://chatgpt.com" || start.username || start.password) return reject('TARGET_URL_INVALID');
     const project=projectHomeId(target), observedProject=projectKey(projectIdFromUrl(after.url));
-    return (!!project || start.pathname==="/") && (!project || !observedProject || project===observedProject);
-  } catch { return false; }
+    if((!!project || start.pathname==="/") && (!project || !observedProject || project===observedProject)) return true;
+    return reject('TARGET_PROJECT_OR_CONVERSATION_MISMATCH');
+  } catch { return reject('TARGET_URL_INVALID'); }
 }
 
-async function waitForDelivery(page, before, timeout=3000) {
+async function waitForDelivery(page, before, timeout=3000, observation=null) {
   const deadline=Date.now()+timeout;
   let latest=null;
+  const observe=async()=>{const value=await state(page,"ids");if(observation) observation.latest=value;return value;};
   while(Date.now()<deadline) {
     await page.waitForTimeout(150);
-    latest=await state(page,"ids");
+    latest=await observe();
     if(!deliveryObserved(before,latest)) {
       await expandEvidenceMessages(page,true);
-      latest=await state(page,"ids");
+      latest=await observe();
     }
     if(deliveryObserved(before,latest)) return latest;
     await detectWebRateLimit(page,"send-verify");
   }
-  return latest||await state(page,"ids");
+  return latest||await observe();
 }
 
 async function activateComposer(page) {
@@ -1231,13 +1239,37 @@ async function triggerSend(page) {
 }
 
 
-function nativeWitnessReceipt(witness, messageId=null) {
+function nativeWitnessReceipt(witness, messageId=null, postSend=null) {
   if(!witness) return null;
   const sha=value=>crypto.createHash('sha256').update(String(value)).digest('hex');
   return {format:witness.format,requestHash:witness.requestHash,bodyHash:witness.bodyHash,
     normalizedBodyHash:sha(normalizedEvidenceText(witness.body)),url:witness.url,
     accountIdentityHash:sha(witness.accountIdentity),getterHash:sha(witness.getterSource),
-    serializerHash:sha(witness.serializerSource),observedAt:witness.observedAt,messageId};
+    serializerHash:sha(witness.serializerSource),observedAt:witness.observedAt,messageId,...(postSend?{postSend}:{})};
+}
+
+function postSendObservation(before, after, witness, condition=null, observationFailed=false) {
+  const hash=value=>typeof value==='string'?crypto.createHash('sha256').update(value).digest('hex'):null;
+  const length=value=>typeof value==='string'?value.length:null;
+  const id=value=>typeof value==='string'&&/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)?value:null;
+  const route=value=>{
+    try {
+      const url=new URL(value);
+      return url.origin==='https://chatgpt.com'&&!url.username&&!url.password ? url.origin+url.pathname : null;
+    } catch { return null; }
+  };
+  const rejection={};
+  if(!condition && after) deliveryObserved(before,after,before?.expectedMessage,rejection);
+  const observedAt=typeof after?.observedAt==='string'&&Number.isFinite(Date.parse(after.observedAt))?
+    new Date(after.observedAt).toISOString():null;
+  return {phase:'POST_SEND_CONFIRMATION',capturedAt:new Date().toISOString(),observedAt,
+    missingCondition:condition||rejection.condition||(after?'POST_SEND_EXCEPTION':'POST_SEND_STATE_UNAVAILABLE'),
+    snapshotAvailable:!!after,observationFailed,
+    beforeUrl:route(before?.url),targetUrl:route(before?.targetUrl||before?.url),afterUrl:route(after?.url),
+    lastUserId:id(after?.lastUserId),sourceMessageId:id(after?.lastUserSource?.messageId),
+    sourceConversationId:id(after?.lastUserSource?.conversationId),
+    nativeBodyHash:hash(witness.body),nativeBodyLength:length(witness.body),
+    sourceBodyHash:hash(after?.lastUserSource?.text),sourceBodyLength:length(after?.lastUserSource?.text)};
 }
 
 async function nativeSubmissionWitness(page, request, expectedIdentity) {
@@ -1291,12 +1323,12 @@ async function nativeSubmissionWitness(page, request, expectedIdentity) {
 }
 
 async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
-  const attempts=[];
-  let witness=null;
+  const attempts=[], observation={latest:null};
+  let witness=null, before=null;
   try {
     await assertImagePageFree(page);
     await detectWebRateLimit(page,"send-before");
-    const before=await state(page,"ids");
+    before=await state(page,"ids");
     assertComposerSafe(before);
     if(targetUrl && !sameConversationUrl(before.url,targetUrl) &&
       !(projectHomeId(before.url) && projectHomeId(before.url)===projectHomeId(targetUrl))) {
@@ -1320,16 +1352,22 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
       throw new Error('NATIVE_SUBMISSION_TARGET_MISMATCH');
     before.nativeWitness=witness;
     attempts.push(await triggerSend(page));
-    const after=await waitForDelivery(page,before,8000);
+    const after=await waitForDelivery(page,before,8000,observation);
+    observation.latest=after;
     await detectWebRateLimit(page,"send-after");
-    if(!deliveryObserved(before,after)) {
+    const rejection={};
+    if(!deliveryObserved(before,after,undefined,rejection)) {
       const err=new Error(`DELIVERY_UNCONFIRMED: composer=${after.composerPresent?"present":"missing"} text=${String(after.composerText||"").trim()?"nonempty":"empty"} attempts=${attempts.join(",")}`);
-      err.code="DELIVERY_UNCONFIRMED";
+      err.code="DELIVERY_UNCONFIRMED";err.deliveryCondition=rejection.condition;
       throw err;
     }
     return {delivered:true,attempts,lastUserId:after.lastUserId,url:after.url,messageCount:after.messageCount,nativeWitness:nativeWitnessReceipt(witness,after.lastUserId)};
   } catch(error) {
-    if(witness) error.nativeWitness=nativeWitnessReceipt(witness);
+    if(witness) {
+      const postSend=(attempts.length || error.deliveryStage==="SEND_ATTEMPTED")?
+        postSendObservation(before,observation.latest,witness,error.deliveryCondition,error.code!=="DELIVERY_UNCONFIRMED"):null;
+      error.nativeWitness=nativeWitnessReceipt(witness,null,postSend);
+    }
     error.deliveryStage ||= attempts.length?"SEND_ATTEMPTED":"PRE_SEND";
     throw error;
   }
