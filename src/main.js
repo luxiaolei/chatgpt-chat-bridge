@@ -1447,7 +1447,21 @@ async function streamMessage(page, msg, {requestId, turnId, timeout=180000, targ
   const error=new Error("STREAM_TIMEOUT"); error.code="STREAM_TIMEOUT"; throw error;
 }
 
+async function waitForModelPicker(page, predicate) {
+  const deadline=Date.now()+5000;
+  do {
+    if(await page.evaluate(predicate)) return true;
+    await page.waitForTimeout(100);
+  } while(Date.now()<deadline);
+  return false;
+}
+
 async function openModelMenu(page, purpose="model") {
+  const selectorNotReady=code=>{
+    if(!["MODEL_SELECTOR_NOT_READY","EFFORT_SELECTOR_NOT_READY"].includes(code)) throw new Error("MODEL_PICKER_RESULT_INVALID");
+    const error=new Error(code);error.code=code;return error;
+  };
+
   await detectWebRateLimit(page,"model-menu");
   const ready=await page.waitForFunction(() => {
     const visible=x=>{
@@ -1528,6 +1542,36 @@ async function openModelMenu(page, purpose="model") {
       getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]');
     return [...document.querySelectorAll('[data-model-picker-view], [role="menuitemradio"], [role="slider"]')].some(active);
   },undefined,{timeout:5000});
+  if(purpose==="effort") {
+    const thinkingReady=()=>waitForModelPicker(page,()=>{
+      const active=e=>e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
+        getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]');
+      const pickers=[...document.querySelectorAll('[data-model-picker-view]')].filter(active);
+      if(!pickers.length) return true; // Legacy slider readiness is checked below.
+      if(pickers.length!==1 || pickers[0].getAttribute('data-model-picker-view')!=="simple") return false;
+      const transitions=pickers[0].getAttribute('data-transitions-ready');
+      return transitions===null || transitions==="true";
+    });
+    let ready=await thinkingReady();
+    if(!ready) {
+      const advanced=await page.evaluate(()=>{
+        const active=e=>e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
+          getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]');
+        const pickers=[...document.querySelectorAll('[data-model-picker-view]')].filter(active);
+        if(pickers.length>1) throw new Error("MODEL_MENU_AMBIGUOUS");
+        return pickers.length===1 && pickers[0].getAttribute('data-model-picker-view')==="advanced";
+      });
+      if(advanced) {
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(()=>![...document.querySelectorAll('[data-model-picker-view]')].some(e=>
+          e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
+          getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]')),undefined,{timeout:5000});
+        await page.click('[data-chat-bridge-model-button="1"]');
+        ready=await thinkingReady();
+      }
+    }
+    if(!ready) throw selectorNotReady("EFFORT_SELECTOR_NOT_READY");
+  }
   const toggle=await page.evaluate(purpose=>{
     const active=e=>e.getClientRects().length>0 && getComputedStyle(e).visibility!=="hidden" &&
       getComputedStyle(e).display!=="none" && !e.closest('[inert],[aria-hidden="true"]');
@@ -1539,15 +1583,21 @@ async function openModelMenu(page, purpose="model") {
     if(!pickers.length) return false;
     const picker=pickers[0];picker.setAttribute('data-chat-bridge-model-picker','1');
     if(purpose==="effort") {
-      if(picker.getAttribute('data-model-picker-view')!=="simple") throw new Error("EFFORT_SELECTOR_NOT_READY");
+      if(picker.getAttribute('data-model-picker-view')!=="simple") return {tag:"MODEL_PICKER_READINESS",code:"EFFORT_SELECTOR_NOT_READY"};
       return false;
     }
     if(picker.getAttribute('data-model-picker-view')==="advanced") return false;
-    if(picker.getAttribute('data-model-picker-view')!=="simple") throw new Error("MODEL_SELECTOR_NOT_READY");
+    if(picker.getAttribute('data-model-picker-view')!=="simple") return {tag:"MODEL_PICKER_READINESS",code:"MODEL_SELECTOR_NOT_READY"};
     const toggles=[...picker.querySelectorAll('[data-model-picker-view-toggle="true"]')].filter(active);
     if(toggles.length!==1 || toggles[0].getAttribute('aria-label')!=="Select model") throw new Error("MODEL_VIEW_TOGGLE_AMBIGUOUS");
     toggles[0].setAttribute('data-chat-bridge-model-toggle','1');return true;
   },purpose);
+  if(toggle!==true && toggle!==false) {
+    const code=purpose==="effort"?"EFFORT_SELECTOR_NOT_READY":"MODEL_SELECTOR_NOT_READY";
+    if(!toggle || toggle.tag!=="MODEL_PICKER_READINESS" || toggle.code!==code ||
+      Object.keys(toggle).length!==2) throw new Error("MODEL_PICKER_RESULT_INVALID");
+    throw selectorNotReady(toggle.code);
+  }
   if(toggle) await page.click('[data-chat-bridge-model-toggle="1"]');
   await page.waitForFunction(purpose=>{
     const root=document.querySelector('[data-chat-bridge-model-picker="1"]')||document;
@@ -1667,6 +1717,28 @@ async function setEffort(page, effort) {
   }
   const target=key==="pro"?bounds.max:bounds.min+levels[key];
   if(target>bounds.max){ await page.keyboard.press("Escape"); throw new Error("Requested thinking level is unavailable"); }
+  if(bounds.native) {
+    const ready=await waitForModelPicker(page,()=>{
+      const picker=document.querySelector('[data-chat-bridge-model-picker="1"]');
+      const controls=[...document.querySelectorAll('[data-chat-bridge-effort-control="1"]')];
+      if(!picker || !picker.isConnected || picker.getAttribute('data-model-picker-view')!=="simple" || controls.length!==1) return false;
+      const transitions=picker.getAttribute('data-transitions-ready');
+      if(transitions!==null && transitions!=="true") return false;
+      const control=controls[0],style=getComputedStyle(control);
+      if(!picker.contains(control) || !control.isConnected || !control.getClientRects().length ||
+        style.visibility==="hidden" || style.display==="none" || control.getAttribute('aria-label')!=="Power" ||
+        control.getAttribute('aria-disabled')==="true" || control.hasAttribute('disabled') ||
+        control.closest('[inert],[aria-hidden="true"],[data-active="false"]')) return false;
+      const rect=control.getBoundingClientRect();
+      if(!(rect.width>0 && rect.height>0)) return false;
+      const hit=document.elementFromPoint(rect.left+rect.width/2,rect.top+rect.height/2);
+      return !!hit && (hit===control || control.contains(hit));
+    });
+    if(!ready) {
+      await page.keyboard.press("Escape");
+      const error=new Error("EFFORT_SELECTOR_NOT_READY");error.code=error.message;throw error;
+    }
+  }
   await page.focus(bounds.native?'[data-chat-bridge-effort-control="1"]':'[data-chat-bridge-effort-slider="1"]');
   if(bounds.native) {
     if(!Number.isInteger(bounds.current) || bounds.current<bounds.min || bounds.current>bounds.max || !Number.isInteger(target) || Math.abs(target-bounds.current)>10) throw new Error("EFFORT_VALUE_UNAVAILABLE");
