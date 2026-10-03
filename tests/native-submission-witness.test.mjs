@@ -51,3 +51,55 @@ test('persisted/error witness metadata never contains secret body, identity or n
  assert.equal(redact(witness).bodyHash,witness.bodyHash);
  assert.equal(redact(witness,'actual-message').messageId,'actual-message');
 });
+
+const persistedFormat=JSON.parse(await readFile(new URL('./native-submission-persisted-text-fixture.json',import.meta.url),'utf8'));
+function inspectPersisted(change=()=>{}) {
+ return inspect(context=>{
+  const {doc,editor,host}=context;
+  Object.assign(editor,new Function('x','return {'+persistedFormat.getter+'};')({f:value=>{
+   assert.equal(value,doc);return {content:fixture.request};
+  }}));
+  editor.hasMarkdownFormatting=({document})=>{assert.equal(document,doc);return true;};
+  editor.getPersistedText=value=>{assert.equal(value,doc);return fixture.body;};
+  host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+persistedFormat.submit)();
+  change(context);
+ });
+}
+
+test('captured persisted-text native format produces a witness and deduplicates the same editor across hooks',async()=>{
+ const witness=await inspectPersisted(({host,editor})=>{
+  host.__reactFiber$fixture.memoizedState.next={memoizedState:{deps:[editor]}};
+ });
+ assert.equal(witness.body,fixture.body);
+ assert.equal(witness.getterSource,persistedFormat.getter);
+ assert.equal(witness.bodyHash,crypto.createHash('sha256').update(fixture.body).digest('hex'));
+});
+
+test('persisted native getter preserves its plain, entity-only and trailing-space branches',async()=>{
+ const plain=await inspectPersisted(({editor})=>editor.hasMarkdownFormatting=()=>false);
+ assert.equal(plain.body,fixture.request);
+ const empty=await inspectPersisted(({editor})=>editor.getPersistedText=()=>'&#x20;');
+ assert.equal(empty.body,fixture.request);
+ const spaced=await inspectPersisted(({doc,editor})=>{
+  doc.lastChild={textContent:'native trailing '};
+  editor.getPersistedText=()=>fixture.body+'&#x20;';
+ });
+ assert.equal(spaced.body,fixture.body+' ');
+});
+
+test('persisted native format rejects uncharacterized pairs and broken identity, document or method binding',async()=>{
+ for(const change of [
+  ({env})=>env.email='other@example.test',
+  ({host})=>host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return e=>{eg(j.getText(),e)}')(),
+  ({host})=>host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return e=>{ev(OTHER.getText(),e)}')(),
+  ({editor})=>editor.getText=new Function('x','return {'+persistedFormat.getter.replace('endsWith(" ")','endsWith("\\n")')+'};')({f:()=>({content:fixture.request})}).getText,
+  ({editor})=>editor.view.dom={},
+  ({editor})=>editor.view.state.doc={},
+  ({editor})=>editor.dictation.document={},
+  ({editor})=>editor.plainTextMode=true,
+  ({editor})=>editor.markdownEditor.serialize=null,
+  ({editor})=>editor.hasMarkdownFormatting=null,
+  ({editor})=>editor.getPersistedText=null,
+  ({host,editor})=>host.__reactFiber$fixture.memoizedState.memoizedState.deps.push({...editor}),
+ ]) await assert.rejects(inspectPersisted(change),/NATIVE_SUBMISSION_UNVERIFIED/);
+});

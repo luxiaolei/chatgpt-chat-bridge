@@ -1255,16 +1255,22 @@ async function nativeSubmissionWitness(page, request, expectedIdentity) {
       fiber=host[Object.keys(host).find(k=>k.startsWith('__reactFiber'))];
     const candidates=new Set();
     // Pin the characterized native submit format; an unsupported format fails before Send.
-    const getter='getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,T.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}';
+    const formats=[
+      {submit:"e=>{eg(j.getText(),e)}",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,T.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}"},
+      {submit:"e=>{ev(H.getText(),e)}",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;if(null==this.markdownEditor||!this.hasMarkdownFormatting({document:e}))return(0,x.f)(e).content;let t=this.getPersistedText(e);return\"\"===t.replace(/&#(?:x[\\da-f]+|\\d+);/gi,\"\").trim()?(0,x.f)(e).content:e.lastChild?.textContent.endsWith(\" \")?t.replace(/&#x20;$/,\" \"):t}",persistedText:true},
+    ];
     for(let i=0;fiber&&i<16;i++,fiber=fiber.return) {
-      if(String(fiber.memoizedProps?.onSubmit)!=='e=>{eg(j.getText(),e)}') continue;
+      const format=formats.find(value=>String(fiber.memoizedProps?.onSubmit)===value.submit);
+      if(!format) continue;
       for(let hook=fiber.memoizedState,n=0;hook&&n<64;n++,hook=hook.next) {
         const deps=hook.memoizedState?.deps;
         if(!Array.isArray(deps)) continue;
         for(const editor of deps) if(editor?.view?.dom===composer &&
           editor.view.state?.doc===doc && editor.dictation?.document===doc &&
-          typeof editor.getText==='function' && String(editor.getText)===getter &&
-          editor.plainTextMode===false && typeof editor.markdownEditor?.serialize==='function') candidates.add(editor);
+          typeof editor.getText==='function' && String(editor.getText)===format.getter &&
+          editor.plainTextMode===false && typeof editor.markdownEditor?.serialize==='function' &&
+          (!format.persistedText || (typeof editor.hasMarkdownFormatting==='function' &&
+            typeof editor.getPersistedText==='function'))) candidates.add(editor);
       }
     }
     if(candidates.size!==1 || typeof doc.textBetween!=='function' ||
@@ -1273,7 +1279,7 @@ async function nativeSubmissionWitness(page, request, expectedIdentity) {
     if(typeof body!=='string' || !body || editor.view.state.doc!==doc ||
       editor.dictation.document!==doc || composer.pmViewDesc.node!==doc) return fail();
     return {format:'chatgpt-native-getText-v1',body,url:location.href,accountIdentity:expectedIdentity,
-      getterSource:getter,serializerSource:String(editor.markdownEditor.serialize),observedAt:new Date().toISOString()};
+      getterSource:String(editor.getText),serializerSource:String(editor.markdownEditor.serialize),observedAt:new Date().toISOString()};
   },{selector:COMPOSER_SELECTOR,request,expectedIdentity});
   if(witness) {
     witness.requestHash=crypto.createHash('sha256').update(normalizedEvidenceText(request)).digest('hex');
