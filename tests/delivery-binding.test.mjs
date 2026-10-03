@@ -20,7 +20,7 @@ async function harness(f={}) {
     const reg={chats:{}};
     assertImagePageFree=async()=>{};
     detectWebRateLimit=async()=>{};
-    state=async(_page,mode)=>{f.calls.push(['state',mode]);return f.snapshots.shift()||f.latest||f.snapshots.at(-1);};
+    state=async(_page,mode)=>{f.calls.push(['state',mode]);if(f.stateErrorAt===f.calls.filter(([kind])=>kind==='state').length)throw f.stateError;return f.snapshots.shift()||f.latest||f.snapshots.at(-1);};
     expandEvidenceMessages=async()=>{};
     nativeSubmissionWitness=async()=>{if(f.witnessError)throw f.witnessError;return f.witness||null;};
     if(f.shortWait) waitForDelivery=async()=>f.latest;
@@ -139,4 +139,82 @@ test('native verification failure and getter exception stop before any Send acti
   assert.equal(f.calls.some(([kind])=>kind==='click'||kind==='enter'),false);
   assert.equal(api.attempted(),false);
  }
+});
+
+
+const nativeFailureFixture=()=> {
+ const body='SECRET-NATIVE-BODY complete footer',identity='SECRET-VERIFIED-IDENTITY';
+ return {body,identity,witness:{format:'chatgpt-native-getText-v1',body,url,accountIdentity:identity,observedAt:new Date().toISOString(),
+  requestHash:crypto.createHash('sha256').update(message.replace(/\s+/g,' ').trim()).digest('hex'),
+  bodyHash:crypto.createHash('sha256').update(body).digest('hex'),getterSource:'SECRET-GETTER-SOURCE',serializerSource:'SECRET-SERIALIZER-SOURCE'}};
+};
+const failurePage=f=>({fill:async()=>{},waitForTimeout:async()=>{},evaluate:async()=>true,
+ click:async()=>f.calls.push(['click']),press:async()=>f.calls.push(['enter'])});
+
+test('native unconfirmed delivery records the final exact-source mismatch without raw contents or URL tokens',async()=>{
+ const n=nativeFailureFixture(),observedAt=new Date().toISOString(),sourceText='SECRET-OBSERVED-SOURCE changed footer';
+ const latest={...after,url:url+'?token=SECRET-OBSERVED-TOKEN#SECRET-FRAGMENT',observedAt,
+  lastUserId:'33333333-3333-4333-8333-333333333333',lastUserSource:{text:sourceText,messageId:'33333333-3333-4333-8333-333333333333',conversationId:conversation,token:'SECRET-SOURCE-EXTRA'},
+  lastAssistant:'SECRET-ASSISTANT',userMessages:[{text:'SECRET-OTHER-HISTORY'}],token:'SECRET-SNAPSHOT-TOKEN'};
+ const f={witness:n.witness,shortWait:true,latest},api=await harness(f);
+ await assert.rejects(api.sendMessage(failurePage(f),message,url+'?token=SECRET-TARGET-TOKEN',n.identity),error=>{
+  assert.equal(error.code,'DELIVERY_UNCONFIRMED');assert.equal(error.deliveryStage,'SEND_ATTEMPTED');
+  const p=error.nativeWitness?.postSend;assert.ok(p,'final post-send observation must survive the exception');
+  assert.equal(p.phase,'POST_SEND_CONFIRMATION');assert.equal(p.observedAt,observedAt);
+  assert.equal(p.missingCondition,'NATIVE_SOURCE_BODY_MISMATCH');
+  assert.equal(p.beforeUrl,url);assert.equal(p.targetUrl,url);assert.equal(p.afterUrl,url);
+  assert.equal(p.lastUserId,latest.lastUserId);assert.equal(p.sourceMessageId,latest.lastUserId);assert.equal(p.sourceConversationId,conversation);
+  assert.equal(p.sourceBodyHash,crypto.createHash('sha256').update(sourceText).digest('hex'));assert.equal(p.sourceBodyLength,sourceText.length);
+  assert.equal(p.nativeBodyHash,n.witness.bodyHash);assert.equal(p.nativeBodyLength,n.body.length);
+  assert.equal(p.snapshotAvailable,true);assert.equal(p.observationFailed,false);
+  assert.doesNotMatch(JSON.stringify(error.nativeWitness),/SECRET-/);
+  return true;
+ });
+ assert.equal(f.calls.filter(([kind])=>kind==='click').length,1);assert.equal(f.calls.some(([kind])=>kind==='enter'),false);
+});
+
+test('assistant-only new-chat confirmation records the missing bound user ID without accepting delivery',async()=>{
+ const n=nativeFailureFixture(),home='https://chatgpt.com/g/'+project+'/project';
+ const latest={...after,lastUserId:null,lastUser:null,lastUserSource:null,userMessageIds:[],observedAt:new Date().toISOString()};
+ const f={witness:{...n.witness,url:home},snapshots:[{...before,url:home,lastUserId:null,userMessageIds:[]}],shortWait:true,latest},api=await harness(f);
+ await assert.rejects(api.sendMessage(failurePage(f),message,home,n.identity),error=>{
+  const p=error.nativeWitness?.postSend;assert.ok(p);
+  assert.equal(error.code,'DELIVERY_UNCONFIRMED');assert.equal(error.deliveryStage,'SEND_ATTEMPTED');
+  assert.equal(p.missingCondition,'NATIVE_SOURCE_MESSAGE_ID_MISSING');assert.equal(p.lastUserId,null);
+  assert.equal(p.sourceBodyHash,null);assert.equal(p.sourceBodyLength,null);assert.equal(p.snapshotAvailable,true);
+  assert.equal(p.targetUrl,home);assert.equal(p.afterUrl,url);return true;
+ });
+ assert.equal(f.calls.filter(([kind])=>kind==='click').length,1);
+});
+
+test('a later observation exception retains the last poll snapshot as hashes and keeps SEND_ATTEMPTED',async()=>{
+ const n=nativeFailureFixture(),latest={...after,observedAt:new Date().toISOString(),
+  lastUserSource:{text:'SECRET-POLL-SOURCE',messageId:after.lastUserId,conversationId:conversation}};
+ const f={witness:n.witness,snapshots:[before,latest],stateErrorAt:3,stateError:new Error('read transport timed out')},api=await harness(f);
+ await assert.rejects(api.sendMessage(failurePage(f),message,url,n.identity),error=>{
+  assert.equal(error.message,'read transport timed out');assert.equal(error.deliveryStage,'SEND_ATTEMPTED');
+  const p=error.nativeWitness?.postSend;assert.ok(p);
+  assert.equal(p.observedAt,latest.observedAt);assert.equal(p.snapshotAvailable,true);assert.equal(p.observationFailed,true);
+  assert.equal(p.missingCondition,'NATIVE_SOURCE_BODY_MISMATCH');
+  assert.equal(p.sourceBodyHash,crypto.createHash('sha256').update('SECRET-POLL-SOURCE').digest('hex'));
+  assert.doesNotMatch(JSON.stringify(error.nativeWitness),/SECRET-/);return true;
+ });
+ assert.equal(f.calls.filter(([kind])=>kind==='click').length,1);
+});
+
+test('successful and pre-send receipts keep their existing shape; native observation absence is explicit',async()=>{
+ const n=nativeFailureFixture();
+ const latest={...after,lastUserSource:{text:n.body,messageId:after.lastUserId,conversationId:conversation}};
+ const good={witness:n.witness,shortWait:true,latest},success=await harness(good);
+ assert.equal((await success.sendMessage(failurePage(good),message,url,n.identity)).nativeWitness.postSend,undefined);
+ const firstReadFailure={witness:n.witness,snapshots:[before],stateErrorAt:2,stateError:new Error('first observation failed')},missing=await harness(firstReadFailure);
+ await assert.rejects(missing.sendMessage(failurePage(firstReadFailure),message,url,n.identity),error=>{
+  const p=error.nativeWitness?.postSend;assert.ok(p);
+  assert.equal(p.snapshotAvailable,false);assert.equal(p.observedAt,null);
+  assert.equal(p.missingCondition,'POST_SEND_STATE_UNAVAILABLE');assert.equal(p.observationFailed,true);return true;
+ });
+ const pre={witnessError:new Error('NATIVE_SUBMISSION_UNVERIFIED')},preApi=await harness(pre);
+ await assert.rejects(preApi.sendMessage(failurePage(pre),message,url,n.identity),error=>error.deliveryStage==='PRE_SEND'&&!error.nativeWitness);
+ const plain={shortWait:true,latest:{...before}},plainApi=await harness(plain);
+ await assert.rejects(plainApi.sendMessage(failurePage(plain),message,url),error=>error.deliveryStage==='SEND_ATTEMPTED'&&!error.nativeWitness);
 });

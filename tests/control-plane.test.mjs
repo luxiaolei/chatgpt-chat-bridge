@@ -1005,3 +1005,27 @@ test("a task id cannot be dispatched twice, including when prior delivery is unk
     assert.match(r.stderr,/TASK_DELIVERY_UNKNOWN_RECONCILE_REQUIRED/);
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
+
+
+test("native post-send metadata survives the existing coordinator UNKNOWN receipt channel unchanged",async()=>{
+ const f=await fixture();
+ try {
+  const parse=r=>{assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);};
+  const op=parse(f.call("submit",[],{requestId:"native-post-send-metadata",callerRef:"controller",role:"worker",message:"bounded request"}));
+  const nativeWitness={format:"chatgpt-native-getText-v1",requestHash:"a".repeat(64),bodyHash:"b".repeat(64),
+   accountIdentityHash:"c".repeat(64),getterHash:"d".repeat(64),serializerHash:"e".repeat(64),
+   observedAt:"2026-01-01T00:00:00.000Z",messageId:null,
+   postSend:{phase:"POST_SEND_CONFIRMATION",capturedAt:"2026-01-01T00:00:08.000Z",observedAt:"2026-01-01T00:00:07.000Z",
+    missingCondition:"NATIVE_SOURCE_MESSAGE_ID_MISSING",snapshotAvailable:true,observationFailed:false,
+    beforeUrl:"https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project",targetUrl:"https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project",
+    afterUrl:"https://chatgpt.com/c/11111111-1111-4111-8111-111111111111",lastUserId:null,sourceMessageId:null,sourceConversationId:null,
+    nativeBodyHash:"b".repeat(64),nativeBodyLength:100,sourceBodyHash:null,sourceBodyLength:null}};
+  const failed=parse(f.call("work-one",[],null,{CHAT_BRIDGE_TEST_RECEIPT:JSON.stringify({ok:false,deliveryStage:"SEND_ATTEMPTED",code:"DELIVERY_UNCONFIRMED",nativeWitness})}));
+  assert.equal(failed.status,"DELIVERY_UNKNOWN");assert.equal(failed.reason,"SEND_ATTEMPTED_DELIVERY_UNCONFIRMED");
+  const persisted=parse(f.call("status",[op.operationId]));
+  const durable=spawnSync("python3",["-c","import json,sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print(d.execute('SELECT result FROM operations WHERE id=?',(sys.argv[2],)).fetchone()[0])",path.join(f.state,"bridge.sqlite3"),op.operationId],{encoding:"utf8"});
+  assert.equal(durable.status,0,durable.stderr);assert.deepEqual(JSON.parse(durable.stdout).nativeWitness,nativeWitness);assert.equal(persisted.attempts,1);
+  const retry=f.call("retry",["--operation",op.operationId]);assert.equal(retry.status,2);assert.match(retry.stderr,/RETRY_REQUIRES_PROVEN_PRE_SEND_FAILURE/);
+  assert.equal(parse(f.call("work-one")).status,"IDLE");
+ }finally{await rm(f.root,{recursive:true,force:true});}
+});
