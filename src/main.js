@@ -1344,6 +1344,25 @@ function sourceContinuityReceipt(before, after) {
     ...(proof.firstGap?{firstGap:proof.firstGap}:{})};
 }
 
+// A bounded compatibility relation observed on two persistent-conversation sends.
+// This does not rewrite the native body or apply to new-chat/temporary aliases.
+function terminalLfBodyBinding(before, after) {
+  const witness=before?.nativeWitness, source=after?.lastUserSource;
+  if(!witness || typeof witness.body!=='string' || !/[^\s]\n$/.test(witness.body) ||
+    source?.text!==witness.body.slice(0,-1) || after.lastUserSourceCondition!=='BOUND_SOURCE' ||
+    !Array.isArray(before.userMessageIds) ||
+    !sameConversationUrl(before.url,before.targetUrl||before.url) ||
+    !sameConversationUrl(before.url,after.url) || source.conversationId!==convId(after.url) ||
+    !Number.isFinite(Date.parse(after.observedAt)) ||
+    Date.parse(after.observedAt)<Date.parse(witness.observedAt) || Date.parse(after.observedAt)>Date.now()) return null;
+  const sha=value=>crypto.createHash('sha256').update(String(value||'')).digest('hex');
+  if(sha(witness.getterSource)!=='baab60f7b982e273471cb00f9b0a8e23eeaf1c489c9a11d378b67e34d3623413' ||
+    sha(witness.serializerSource)!=='c0b631839d32ce26efa405a63cce38a38346c429ff203089b16bd32b2d82d9d4') return null;
+  return {format:'persistent-single-terminal-lf-v1',nativeBodyHash:witness.bodyHash,
+    sourceBodyHash:sha(source.text),nativeBodyLength:witness.body.length,sourceBodyLength:source.text.length,
+    messageId:source.messageId,conversationId:source.conversationId,observedAt:after.observedAt};
+}
+
 function deliveryObserved(before, after, message=before?.expectedMessage, rejection=null) {
   const reject=condition=>{if(rejection) rejection.condition=condition;return false;};
   const witness=before?.nativeWitness;
@@ -1371,7 +1390,7 @@ function deliveryObserved(before, after, message=before?.expectedMessage, reject
         newConversationProjectMatches(before,after);
       if(!temporaryPending && !mapped) return reject(/^local-chatgpt:/.test(source.conversationId)?(proof?.conflicted?'NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT':'NATIVE_TEMPORARY_SOURCE_PROOF_MISSING'):'NATIVE_SOURCE_CONVERSATION_MISMATCH');
     }
-    if(after.lastUserSource.text!==witness.body) return reject('NATIVE_SOURCE_BODY_MISMATCH');
+    if(after.lastUserSource.text!==witness.body && !terminalLfBodyBinding(before,after)) return reject('NATIVE_SOURCE_BODY_MISMATCH');
   }
   const expected=String(message||"").replace(/\s+/g," ").trim();
   if(!before || !after?.lastUserId || !expected) return reject('USER_MESSAGE_EVIDENCE_MISSING');
@@ -1568,7 +1587,8 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
     }
     const nativeReceipt=nativeWitnessReceipt(witness,after.lastUserId), continuity=sourceContinuityReceipt(before,after);
     if(nativeReceipt) Object.assign(nativeReceipt,{conversationId:convId(after.url),
-      sourceConversationId:after.lastUserSource?.conversationId||null,...(continuity?{sourceBinding:continuity}:{})});
+      sourceConversationId:after.lastUserSource?.conversationId||null,...(continuity?{sourceBinding:continuity}:{}),
+      ...(terminalLfBodyBinding(before,after)?{bodyBinding:terminalLfBodyBinding(before,after)}:{})});
     return {delivered:true,attempts,lastUserId:after.lastUserId,url:after.url,messageCount:after.messageCount,nativeWitness:nativeReceipt};
   } catch(error) {
     if(witness) {

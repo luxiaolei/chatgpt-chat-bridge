@@ -328,3 +328,27 @@ Reserved positive schema, not yet a supported positive capability: {format:"chat
 ASSISTANT_RESPONSE_READY carries assistantTextSha256 (complete observed UTF-8 bytes), assistantTextSource, assistantTextTruncated, assistantTextUtf16Length, assistantTextUtf8Bytes and the same explicit null binding. The journal measures the complete serialized event against its 256 KiB limit. assistantText is always complete or null, never a preview. Complete events retain ASSISTANT_RESPONSE_READY; if additive metadata alone exceeds the old event budget, only those new metadata fields are omitted to preserve the complete legacy event. Missing metadata is unknown, not evidence. Truly oversized bodies produce ASSISTANT_RESPONSE_UNAVAILABLE with assistantText=null, assistantTextTruncated=true and sessionState=RESPONSE_BODY_UNAVAILABLE. Old READY consumers cannot execute this as a partial RPC. assistantTextRef={format,path,sha256} points to a content-addressed local JSON document retaining complete text and exact account/Project/session/assistant metadata. Verify reference digest and complete text hash before use. Text retention does not prove parentage or task authorization.
 
 Canonical conversation URLs with local-chatgpt:* native source remain rejected absent the existing authentic same-send temporary continuity proof. Equal body hashes/current URL cannot manufacture a historical alias anchor. This change does not repair lost historical receipts or introduce a new positive native alias mechanism.
+
+
+### Existing-conversation terminal LF evidence
+
+The native editor body and the message-bound source are distinct representations.
+Two retained send receipts used the same characterized getter/serializer and
+showed the source equal to the native body with exactly its single terminal LF
+removed. The source observer returns the owning message property verbatim; its
+rendered-text fallback does not participate in this native comparison.
+
+For future sends only, `persistent-single-terminal-lf-v1` permits that one exact
+relation when the preceding character is non-whitespace, the getter and serializer
+fingerprints match the captured format, the source is `BOUND_SOURCE`, and the
+before/target/after URLs identify the same existing conversation. The source
+observation must be at or after the native witness. Existing account, request/body
+hash, witness freshness, fresh message ID and conflict checks still apply.
+Receipts retain the original native body hash and record a separate `bodyBinding`
+with the source hash and both lengths. No body is changed, and no generic trim,
+CRLF, repeated LF, other whitespace, new-chat or temporary-alias rule is added.
+
+This is an empirically bounded representation relation, not proof of the platform's
+internal downstream transformation. Saved receipts do not recover an absent
+before-ID baseline; historical UNKNOWN operations remain UNKNOWN. It supplies
+neither assistant-parent evidence nor a reconciliation or resend permission.
