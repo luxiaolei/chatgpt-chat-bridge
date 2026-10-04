@@ -939,26 +939,61 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       return null;
     }
 
+    const userSourceConditions=new Map();
     function userSource(node,id) {
-      if(!id) return null;
+      const fail=condition=>{if(id) userSourceConditions.set(id,condition);return null;};
+      if(!id) return fail('MESSAGE_ID_MISSING');
       const bubbles=node.getAttribute('data-user-message-bubble')==='true'?[node]:[...node.querySelectorAll('[data-user-message-bubble="true"]')];
-      if(bubbles.length!==1) return null;
+      if(bubbles.length!==1) return fail('BUBBLE_AMBIGUOUS');
       const bubble=bubbles[0], targets=[...bubble.querySelectorAll('[data-search-result-target]')];
       const outer=targets.filter(target=>!bubble.contains(target.parentElement?.closest('[data-search-result-target]')));
-      if(outer.length!==1 || outer[0].tagName!=='DIV' || outer[0].querySelector('button, [data-thread-find-skip]')) return null;
-      const conversationId=new URL(location.href).pathname.match(/\/c\/([^/]+)/)?.[1];
-      const matches=[];
+      if(outer.length!==1 || outer[0].tagName!=='DIV') return fail('SOURCE_TARGET_AMBIGUOUS');
+      if(outer[0].querySelector('[data-thread-find-skip]')) return fail('SKIPPED_SOURCE_CONTENT');
+      let conversationId;
+      try { conversationId=decodeURIComponent(new URL(location.href).pathname.match(/\/c\/([^/]+)/)?.[1]||''); } catch { return fail('SOURCE_URL_INVALID'); }
+      const temporary=value=>/^local-chatgpt:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value||'');
+      const foreignOwner=props=>[props.messageId,props['data-message-id'],props['data-chatgpt-selection-message-id']].some(owner=>owner&&owner!==id);
+      let sourceFiber=null, source=null, sourceConversation=null;
       let fiber=outer[0][Object.keys(outer[0]).find(k=>k.startsWith('__reactFiber'))];
       for(let i=0;fiber&&i<32;i++,fiber=fiber.return) {
         const props=fiber.memoizedProps||{};
-        const owner=props.messageId||props['data-message-id']||props['data-chatgpt-selection-message-id'];
-        if(owner && owner!==id) return null;
-        if(props.conversationId && props.conversationId!==conversationId) return null;
-        if(props.copyPlainTextFromSource===true && typeof props.message==='string' &&
-          props.messageId===id && props.conversationId===conversationId)
-          matches.push({text:props.message,messageId:id,conversationId});
+        if(foreignOwner(props)) return fail('FOREIGN_MESSAGE_OWNER');
+        if(props.conversationId) {
+          if(sourceConversation && sourceConversation!==props.conversationId) return fail('SOURCE_CONVERSATION_CONFLICT');
+          sourceConversation=props.conversationId;
+        }
+        // Stop at this message's source owner; parents can own a different turn.
+        if(props.messageId) {
+          if(props.copyPlainTextFromSource!==true || typeof props.message!=='string' ||
+            !props.conversationId || (props.conversationId!==conversationId &&
+              !(temporary(props.conversationId) && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(conversationId)))) return fail('SOURCE_OWNER_TUPLE_UNVERIFIED');
+          sourceFiber=fiber;
+          source={text:props.message,messageId:id,conversationId:props.conversationId};
+          break;
+        }
       }
-      return matches.length===1?matches[0]:null;
+      if(!sourceFiber) return fail('SOURCE_OWNER_NOT_FOUND');
+      for(const button of outer[0].querySelectorAll('button')) {
+        // Characterized code-block Copy chrome must join the exact source fiber.
+        if(button.getAttribute('aria-label')!=='Copy' || (button.innerText||'').trim() ||
+          button.parentElement?.tagName!=='SPAN' || button.closest('pre')) return fail('UNSUPPORTED_SOURCE_CONTROL');
+        let control=button[Object.keys(button).find(k=>k.startsWith('__reactFiber'))], markdownCopy=false, onCopy=false, joined=false;
+        if(control?.memoizedProps?.['aria-label']!=='Copy' || typeof control?.memoizedProps?.onClick!=='function') return fail('UNOWNED_COPY_CONTROL');
+        for(let i=0;control&&i<32;i++,control=control.return) {
+          const props=control.memoizedProps||{};
+          if(foreignOwner(props) || (props.conversationId && props.conversationId!==source.conversationId)) return fail('FOREIGN_COPY_OWNER');
+          if(control===sourceFiber) {
+            joined=markdownCopy&&onCopy&&typeof props.onCopy==='function'&&!!props.copyContentRef&&typeof props.copyContentRef==='object';
+            break;
+          }
+          if(props.messageId) return fail('UNOWNED_COPY_CONTROL');
+          markdownCopy ||= typeof props['data-markdown-copy']==='string';
+          onCopy ||= typeof props.onCopy==='function';
+        }
+        if(!joined) return fail('UNOWNED_COPY_CONTROL');
+      }
+      userSourceConditions.set(id,'BOUND_SOURCE');
+      return source;
     }
     function renderedMessage(node) {
       if(!root.contains(node) || node.closest('[hidden],[aria-hidden="true"],[inert]')) return false;
@@ -1088,6 +1123,7 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,
       lastAssistantTextSource:lastAssistantMsg?.textSource||'rendered-dom',
       lastUserSource:includeUserMessages?lastUserMsg?.userSource||null:null,
+      lastUserSourceCondition:includeUserMessages?userSourceConditions.get(lastUserMsg?.id)||'SOURCE_NOT_OBSERVED':null,
       userMessages:includeUserMessages===true?ms.filter(x=>x.role==='user'):undefined,
       userMessageIds:includeUserMessages?ms.filter(x=>x.role==='user').map(x=>x.id).filter(Boolean):undefined,
       messageCount:ms.length,assistantCount:ms.filter(x=>x.role==='assistant').length,
@@ -1157,9 +1193,51 @@ async function observeSession(chat,page,task=null) {
   return hb;
 }
 
+function temporaryConversationId(value) {
+  try {
+    const url=new URL(value);
+    if(url.origin!=='https://chatgpt.com' || url.username || url.password) return null;
+    const id=decodeURIComponent(url.pathname.match(/\/c\/([^/]+)\/?$/)?.[1]||'');
+    return /^local-chatgpt:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)?id:null;
+  } catch { return null; }
+}
+function newConversationProjectMatches(before, after) {
+  const project=projectHomeId(before?.targetUrl||before?.url);
+  try {
+    const url=new URL(after?.url);
+    return !!project && url.origin==='https://chatgpt.com' && !url.username && !url.password &&
+      project===projectKey(projectIdFromUrl(url.href));
+  } catch { return false; }
+}
+function captureNewConversationSource(before, after) {
+  const rejection={};
+  deliveryObserved(before,after,undefined,rejection);
+  const prior=before.nativeSourceContinuity, source=after?.lastUserSource, witness=before.nativeWitness;
+  if(prior && (!source || source.messageId!==prior.messageId || source.conversationId!==prior.temporaryId ||
+    source.text!==witness?.body || !newConversationProjectMatches(before,after))) prior.conflicted=true;
+  if(rejection.condition!=='NATIVE_TEMPORARY_CONVERSATION_PENDING') return;
+  if(prior) {
+    if(prior.temporaryId!==source.conversationId || prior.messageId!==source.messageId) prior.conflicted=true;
+    return;
+  }
+  before.nativeSourceContinuity={temporaryId:source.conversationId,messageId:source.messageId,
+    bodyHash:witness.bodyHash,requestHash:witness.requestHash,witnessObservedAt:witness.observedAt,
+    targetUrl:before.targetUrl||before.url,temporaryUrl:after.url,observedAt:after.observedAt,conflicted:false};
+}
+function sourceContinuityReceipt(before, after) {
+  const proof=before.nativeSourceContinuity;
+  if(!proof || proof.conflicted || proof.temporaryId!==after?.lastUserSource?.conversationId) return null;
+  const route=value=>{const url=new URL(value);return url.origin+url.pathname;};
+  return {format:'same-send-temporary-conversation-v1',messageId:proof.messageId,
+    sourceConversationId:proof.temporaryId,conversationId:convId(after.url),bodyHash:proof.bodyHash,
+    temporaryUrl:route(proof.temporaryUrl),persistentUrl:route(after.url),
+    witnessObservedAt:proof.witnessObservedAt,temporaryObservedAt:proof.observedAt,persistentObservedAt:after.observedAt};
+}
+
 function deliveryObserved(before, after, message=before?.expectedMessage, rejection=null) {
   const reject=condition=>{if(rejection) rejection.condition=condition;return false;};
   const witness=before?.nativeWitness;
+  let temporaryPending=false;
   if(witness) {
     if(witness.format!=='chatgpt-native-getText-v1') return reject('NATIVE_FORMAT_UNSUPPORTED');
     if(witness.requestHash!==crypto.createHash('sha256').update(normalizedEvidenceText(message)).digest('hex')) return reject('NATIVE_REQUEST_HASH_MISMATCH');
@@ -1170,7 +1248,18 @@ function deliveryObserved(before, after, message=before?.expectedMessage, reject
     if(Date.now()-Date.parse(witness.observedAt)>15000 || Date.parse(witness.observedAt)>Date.now()) return reject('NATIVE_WITNESS_NOT_FRESH');
     if(!after?.lastUserSource?.messageId) return reject('NATIVE_SOURCE_MESSAGE_ID_MISSING');
     if(after.lastUserSource.messageId!==after.lastUserId) return reject('NATIVE_SOURCE_MESSAGE_ID_MISMATCH');
-    if(after.lastUserSource.conversationId!==convId(after.url)) return reject('NATIVE_SOURCE_CONVERSATION_MISMATCH');
+    if(after.lastUserSource.conversationId!==convId(after.url)) {
+      const source=after.lastUserSource, proof=before.nativeSourceContinuity;
+      const temporaryId=temporaryConversationId(after.url);
+      temporaryPending=!!temporaryId && source.conversationId===temporaryId;
+      const mapped=proof && !proof.conflicted && !!proof.temporaryId && temporaryConversationId(proof.temporaryUrl)===proof.temporaryId && proof.temporaryId===source.conversationId &&
+        proof.messageId===source.messageId && proof.bodyHash===witness.bodyHash && proof.requestHash===witness.requestHash &&
+        proof.witnessObservedAt===witness.observedAt && proof.targetUrl===(before.targetUrl||before.url) &&
+        Number.isFinite(Date.parse(proof.observedAt)) && Date.parse(proof.observedAt)>=Date.parse(witness.observedAt) &&
+        Date.parse(after.observedAt)>=Date.parse(proof.observedAt) && sameConversationUrl(after.url,after.url) &&
+        newConversationProjectMatches(before,after);
+      if(!temporaryPending && !mapped) return reject(/^local-chatgpt:/.test(source.conversationId)?(proof?.conflicted?'NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT':'NATIVE_TEMPORARY_SOURCE_PROOF_MISSING'):'NATIVE_SOURCE_CONVERSATION_MISMATCH');
+    }
     if(after.lastUserSource.text!==witness.body) return reject('NATIVE_SOURCE_BODY_MISMATCH');
   }
   const expected=String(message||"").replace(/\s+/g," ").trim();
@@ -1178,6 +1267,7 @@ function deliveryObserved(before, after, message=before?.expectedMessage, reject
   if(!witness && String(after.lastUser||"").replace(/\s+/g," ").trim()!==expected) return reject('USER_TEXT_MISMATCH');
   if(after.lastUserId===before.lastUserId || (before.userMessageIds||[]).includes(after.lastUserId)) return reject('USER_MESSAGE_ID_NOT_FRESH');
   const target=before.targetUrl||before.url;
+  if(temporaryPending) return reject(newConversationProjectMatches(before,after)?'NATIVE_TEMPORARY_CONVERSATION_PENDING':'TARGET_PROJECT_OR_CONVERSATION_MISMATCH');
   if(sameConversationUrl(after.url,target)) return true;
   if(!sameConversationUrl(after.url,after.url)) return reject('OBSERVED_CONVERSATION_URL_INVALID');
   try {
@@ -1192,7 +1282,7 @@ function deliveryObserved(before, after, message=before?.expectedMessage, reject
 async function waitForDelivery(page, before, timeout=3000, observation=null) {
   const deadline=Date.now()+timeout;
   let latest=null;
-  const observe=async()=>{const value=await state(page,"ids");if(observation) observation.latest=value;return value;};
+  const observe=async()=>{const value=await state(page,"ids");captureNewConversationSource(before,value);if(observation) observation.latest=value;return value;};
   while(Date.now()<deadline) {
     await page.waitForTimeout(150);
     latest=await observe();
@@ -1265,9 +1355,11 @@ function postSendObservation(before, after, witness, condition=null, observation
   return {phase:'POST_SEND_CONFIRMATION',capturedAt:new Date().toISOString(),observedAt,
     missingCondition:condition||rejection.condition||(after?'POST_SEND_EXCEPTION':'POST_SEND_STATE_UNAVAILABLE'),
     snapshotAvailable:!!after,observationFailed,
+    sourceCondition:after?.lastUserSourceCondition||null,
+    temporarySourceProof:sourceContinuityReceipt(before,after),
     beforeUrl:route(before?.url),targetUrl:route(before?.targetUrl||before?.url),afterUrl:route(after?.url),
     lastUserId:id(after?.lastUserId),sourceMessageId:id(after?.lastUserSource?.messageId),
-    sourceConversationId:id(after?.lastUserSource?.conversationId),
+    sourceConversationId:id(after?.lastUserSource?.conversationId)||(/^local-chatgpt:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(after?.lastUserSource?.conversationId||'')?after.lastUserSource.conversationId:null),
     nativeBodyHash:hash(witness.body),nativeBodyLength:length(witness.body),
     sourceBodyHash:hash(after?.lastUserSource?.text),sourceBodyLength:length(after?.lastUserSource?.text)};
 }
@@ -1361,7 +1453,10 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
       err.code="DELIVERY_UNCONFIRMED";err.deliveryCondition=rejection.condition;
       throw err;
     }
-    return {delivered:true,attempts,lastUserId:after.lastUserId,url:after.url,messageCount:after.messageCount,nativeWitness:nativeWitnessReceipt(witness,after.lastUserId)};
+    const nativeReceipt=nativeWitnessReceipt(witness,after.lastUserId), continuity=sourceContinuityReceipt(before,after);
+    if(nativeReceipt) Object.assign(nativeReceipt,{conversationId:convId(after.url),
+      sourceConversationId:after.lastUserSource?.conversationId||null,...(continuity?{sourceBinding:continuity}:{})});
+    return {delivered:true,attempts,lastUserId:after.lastUserId,url:after.url,messageCount:after.messageCount,nativeWitness:nativeReceipt};
   } catch(error) {
     if(witness) {
       const postSend=(attempts.length || error.deliveryStage==="SEND_ATTEMPTED")?
@@ -3654,7 +3749,7 @@ else if(cmd==="new"){
   if(conflict&&!args.includes("--allow-duplicate-role")) throw new Error(`Active role already exists: ${role} (${conflict.id})`);
   let {task,binding}=await openBoundTask(reg,p,a);
   const allocation=await newManagedPage(reg,p,a,task,binding,null,{allowOverflow:true});
-  let page=allocation?.page||allocation;
+  let page=allocation?.page||allocation, delivery=null;
   if(allocation?.overflow){ task=allocation.task; binding=allocation.binding; }
   try {
     await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000});
@@ -3670,8 +3765,9 @@ else if(cmd==="new"){
       applied={model,effort:requestedEffort||observed.effort||null,observed,deferredUntilDispatch:true};
     }
     const before=await state(page);
-    const delivery=await sendMessage(page,first,binding.projectUrl,reg.accounts?.[a]?.identity); await page.waitForURL(/\/c\/[0-9a-f-]+/i,{timeout:30000});
+    delivery=await sendMessage(page,first,binding.projectUrl,reg.accounts?.[a]?.identity); await page.waitForURL(/\/c\/[0-9a-f-]+/i,{timeout:30000});
     const url=await page.url(), id=convId(url), projectBase=url.includes("/g/g-p-")?url.replace(/\/c\/[^/]+.*$/,''):binding.projectBase;
+    if(!sameConversationUrl(url,delivery.url)){const error=new Error("NEW_CONVERSATION_CHANGED_BEFORE_REGISTRATION");error.code=error.message;throw error;}
     if(projectBase){binding.projectBase=projectBase;binding.projectUrl=projectBase+"/project";binding.projectId=projectIdFromUrl(projectBase);}
     reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model,effort:requestedEffort||applied.effort||null,affinityKey,workgroupId,
       verifiedModel:applied.model||applied.observed?.model||null,verifiedEffort:applied.effort||applied.observed?.effort||null,
@@ -3687,6 +3783,14 @@ else if(cmd==="new"){
       baselineAssistantHash:hashText(before.lastAssistant||""),baselineAssistantId:before.lastAssistantId||null,
       dispatchedAt:new Date().toISOString()});
   } catch (error) {
+    if(delivery?.nativeWitness && !error.nativeWitness) {
+      const w=delivery.nativeWitness;
+      error.nativeWitness={...w,postSend:{phase:'NEW_SESSION_REGISTRATION',capturedAt:new Date().toISOString(),
+        missingCondition:'NEW_SESSION_REGISTRATION_UNCONFIRMED',beforeUrl:w.url,targetUrl:binding.projectUrl,
+        afterUrl:delivery.url,lastUserId:delivery.lastUserId,sourceMessageId:w.messageId,
+        sourceConversationId:w.sourceConversationId,nativeBodyHash:w.bodyHash,sourceBodyHash:w.bodyHash,sourceCondition:'BOUND_SOURCE'}};
+    }
+    if(error.nativeWitness?.postSend) error.nativeWitness.postSend.newSessionContext={page:page.label||null,spaceId:task.spaceId||null};
     if(!sendAttempted) await page.close().catch(()=>{});
     throw error;
   }
