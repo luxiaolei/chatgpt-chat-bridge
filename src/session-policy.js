@@ -6,7 +6,7 @@
   }
 
   function recoveryRequired(raw = {}) {
-    if (contextExhausted(raw)) return false;
+    if (raw.approvalRequired === true || contextExhausted(raw)) return false;
     if (Array.isArray(raw.errorTexts) && raw.errorTexts.length) return true;
     return (raw.recoveryControls || []).some((control) => {
       if (control?.disabled || control?.historical) return false;

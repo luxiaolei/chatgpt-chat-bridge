@@ -9,8 +9,8 @@ const {normalize,expand}=new Function(source.slice(start,end)+
   ";return {normalize:normalizedEvidenceText,expand:expandEvidenceMessages};")();
 const readyStart=source.indexOf("async function recoverConversationLoadError");
 const readyEnd=source.indexOf("\nasync function waitForProjectReady",readyStart);
-const ready=new Function("detectWebRateLimit","COMPOSER_SELECTOR",source.slice(readyStart,readyEnd)+
-  ";return waitForConversationReady;")(async()=>{},"composer");
+const ready=new Function("detectWebRateLimit","COMPOSER_SELECTOR","state",source.slice(readyStart,readyEnd)+
+  ";return waitForConversationReady;")(async()=>{},"composer",async()=>({approvalRequired:false}));
 
 test("existing conversation waits for message history after composer appears",async()=>{
   let reads=0, waits=0;

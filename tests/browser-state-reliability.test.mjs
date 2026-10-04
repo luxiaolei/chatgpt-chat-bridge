@@ -80,3 +80,43 @@ test("an ancestor wrapping quoted error prose is not platform error UI",async()=
   const snapshot=await withDom({known:[wrapper],messages:[message]},state);
   assert.deepEqual(snapshot.errorTexts,[]);
 });
+
+const approvalFixture=JSON.parse(await readFile(new URL("./fixtures/codex-tasks-approval.json",import.meta.url),"utf8"));
+const approvalText=[...approvalFixture.heading,approvalFixture.description].join("\n");
+
+test("observed Codex Tasks permission card waits without Retry or Stop",async()=>{
+  assert.equal(approvalFixture.messageAncestor,null);
+  assert.deepEqual(approvalFixture.messageDescendants,[]);
+  const card=node(approvalText,{role:approvalFixture.node.role,"aria-atomic":approvalFixture.node.ariaAtomic});
+  const buttons=[node("Retry"),node("Stop generating")];
+  const snapshot=await withDom({errors:[card],buttons},state);
+  assert.equal(snapshot.approvalRequired,true);
+  for(const action of ["retry","stop"]) {
+    await assert.rejects(withDom({errors:[card],buttons},p=>state(p,false,action)),/APPROVAL_REQUIRED/);
+  }
+  assert.equal(buttons.some(b=>b.clicked),false);
+});
+
+test("approval detection excludes hidden, historical, quoted and ordinary error UI",async()=>{
+  const message=node(approvalText,{"data-message-author-role":"assistant"});
+  for(const errors of [
+    [node(approvalText,{}, {hidden:true})],
+    [node(approvalText,{}, {message})],
+    [node(approvalText,{}, {containsMessage:message})],
+    [node("Example: "+approvalText)],
+    [node("Something went wrong")],
+    [node("Allow ChatGPT to use another tool?")]
+  ]) {
+    const snapshot=await withDom({errors,messages:[message]},state);
+    assert.equal(snapshot.approvalRequired,false);
+  }
+  const snapshot=await withDom({},state);
+  assert.equal(snapshot.approvalRequired,false);
+});
+
+test("historical approval UI is excluded from current recovery state",async()=>{
+  const old=node("old",{"data-message-author-role":"assistant"});
+  const current=node("current",{"data-message-author-role":"assistant"});
+  const snapshot=await withDom({messages:[old,current],errors:[node(approvalText,{}, {message:old})]},state);
+  assert.equal(snapshot.approvalRequired,false);
+});

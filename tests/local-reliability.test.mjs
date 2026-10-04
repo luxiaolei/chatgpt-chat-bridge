@@ -30,7 +30,18 @@ async function harness(f={}) {
       waitForConversationReady=async()=>true;
       openConversationFromProject=async()=>false;
     }
-    return {classifySnapshot,gradedRecover,ensurePage,state,nativeRetry};
+
+    if(f.watch) {
+      assertWebAvailable=async()=>{};
+      resolveChat=()=>f.chat;
+      ensurePage=async()=>({page:{}});
+      detectWebRateLimit=async()=>{};
+      if(f.recoveryApprovalRace) nativeRetry=async()=>{throw new Error("APPROVAL_REQUIRED");};
+    }
+    if(f.detach) {
+      openBoundTask=async()=>({task:{page:()=>({close:async()=>f.calls.push("close")}),tabs:async()=>[{label:"p1",active:false,openedBy:"agent"}]}});
+    }
+    return {classifySnapshot,gradedRecover,ensurePage,state,nativeRetry,watchOnce,detachTerminalTaskPages};
   `)(f);
 }
 
@@ -108,4 +119,79 @@ test("a recycled label belonging to a different conversation is never navigated 
   assert.deepEqual(calls,[]);
   assert.equal(f.calls.includes("new-page"),true);
   assert.equal(chat.page,"p2");
+});
+
+test("approval waits outrank errors, offline and completion without budget or notices",async()=>{
+  const t={taskId:"T",project:"P",sessionId:"C",status:"RUNNING",recoveryAttempts:3,totalRecoveryAttempts:8,watchErrorCount:2};
+  const f={runtime:{tasks:{T:t},sessions:{},projects:{}}};
+  const api=await harness(f);
+  const pending={...healthy,approvalRequired:true,generating:false,errorTexts:["permission"],online:false,composerPresent:false};
+  const observed=api.classifySnapshot(pending,{quietForSec:2000},t);
+  assert.equal(observed.sessionState,"WAITING_USER_APPROVAL");
+  assert.equal(observed.recommendation,"WAIT_FOR_USER_APPROVAL");
+  for(let n=0;n<2;n++) {
+    const decision=await api.gradedRecover({}, {id:"C"},{},t,{...pending,...observed},{aggressive:true});
+    assert.equal(decision.action,"DEFERRED");
+    assert.equal(decision.reason,"WAITING_USER_APPROVAL");
+  }
+  assert.deepEqual(f.runtime.tasks.T,t);
+  assert.deepEqual(f.calls,[]);
+  assert.equal(globalThis.__CHAT_BRIDGE_SESSION_POLICY__.recoveryRequired(pending),false);
+  const cleared=api.classifySnapshot({...healthy,approvalRequired:false,errorTexts:["Network error"]},{},t);
+  assert.equal(cleared.sessionState,"ERROR_RECOVERABLE");
+});
+
+test("pending approval prevents composer mutation as a pre-send defer",()=>{
+  const {assertComposerSafe,isPreSendDefer}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;
+  assert.throws(()=>assertComposerSafe({approvalRequired:true,inputReady:true,composerText:""}),error=>{
+    assert.equal(error.message,"APPROVAL_REQUIRED");
+    assert.equal(isPreSendDefer(error),true);
+    return true;
+  });
+});
+
+test("watchdog persists approval observation without changing unfinished status or notice budgets",async()=>{
+  const t={taskId:"T",project:"P",sessionId:"C",status:"RUNNING",recoveryAttempts:3,totalRecoveryAttempts:8,watchErrorCount:2,watchdogPendingNotification:"existing pending receipt"};
+  const f={watch:true,chat:{id:"C",project:"P",account:"a"},runtime:{tasks:{T:t},sessions:{},projects:{}},
+    raw:{...healthy,approvalRequired:true,generating:false,composerText:"",assistantCount:2,lastAssistant:"current",lastAssistantId:"a",assistantChars:7}};
+  const api=await harness(f), reg={chats:{C:f.chat}};
+  for(let n=0;n<2;n++) {
+    const result=await api.watchOnce(reg,null,null,{skipLifecycle:true,aggressive:true});
+    assert.equal(result[0].state,"WAITING_USER_APPROVAL");
+    assert.equal(result[0].recovery.reason,"WAITING_USER_APPROVAL");
+  }
+  const live=f.runtime.tasks.T;
+  for(const key of ["status","recoveryAttempts","totalRecoveryAttempts","watchErrorCount","watchdogPendingNotification"]) assert.equal(live[key],t[key]);
+  assert.equal(live.sessionState,"WAITING_USER_APPROVAL");
+  assert.equal(f.runtime.sessions.C.approvalRequired,true);
+  assert.equal(f.calls.some(x=>["send","stop","notify"].includes(x)),false);
+  f.raw={...f.raw,approvalRequired:false,generating:true};
+  const resumed=await api.watchOnce(reg,null,null,{skipLifecycle:true});
+  assert.equal(resumed[0].state,"RUNNING_ACTIVE");
+  assert.equal(f.runtime.sessions.C.approvalRequired,false);
+});
+
+test("approval appearing at recovery action defers without watch failure accounting",async()=>{
+  const t={taskId:"T",project:"P",sessionId:"C",status:"RUNNING",watchErrorCount:2,recoveryAttempts:0,totalRecoveryAttempts:0};
+  const f={watch:true,recoveryApprovalRace:true,chat:{id:"C",project:"P",account:"a"},runtime:{tasks:{T:t},sessions:{},projects:{}},
+    raw:{...healthy,generating:false,errorTexts:["Network error"],assistantCount:1,lastAssistant:"current",assistantChars:7}};
+  const api=await harness(f);
+  const result=await api.watchOnce({chats:{C:f.chat}},null,null,{skipLifecycle:true});
+  assert.equal(result[0].state,"WAITING_USER_APPROVAL");
+  for(const key of ["status","watchErrorCount","recoveryAttempts","totalRecoveryAttempts"]) assert.equal(f.runtime.tasks.T[key],t[key]);
+  assert.equal(f.calls.some(x=>["send","stop","notify"].includes(x)),false);
+});
+
+test("terminal detach keeps an approval page attached and resumes normal cleanup after gate disappears",async()=>{
+  const chat={id:"C",project:"P",account:"a",status:"active",page:"p1"};
+  const f={detach:true,chat,runtime:{tasks:{T:{taskId:"T",sessionId:"C",status:"BLOCKED",updatedAt:"2020-01-01T00:00:00Z"}},sessions:{},projects:{}},
+    raw:{approvalRequired:true,generating:false,composerText:""}};
+  const api=await harness(f), reg={chats:{C:chat}};
+  assert.deepEqual(await api.detachTerminalTaskPages(reg),[]);
+  assert.equal(chat.page,"p1");
+  assert.equal(f.calls.includes("close"),false);
+  f.raw={...f.raw,approvalRequired:false};
+  assert.equal((await api.detachTerminalTaskPages(reg)).length,1);
+  assert.equal(chat.page,null);
+  assert.equal(f.calls.includes("close"),true);
 });
