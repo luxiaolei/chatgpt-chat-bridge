@@ -306,3 +306,49 @@ Conversation attachment compares the conversation ID, origin, and any available 
 Orphan cleanup does not create an idle-browser wakeup or bypass a cooling account. Cleanup inside a scan is scoped to the admitted account/Project and is not repeated by every per-task child. Terminal tab safety, active generations, drafts, user ownership, and UNKNOWN delivery reconciliation remain protected. This intentionally favors effective completed work over maximum open tabs.
 
 See `docs/local-reliability-20260929.md` for the repair evidence, limitations, and deployment gate.
+
+### Recovery of an already created, unregistered rotation
+
+Host-local commands (Root controls live use):
+
+- `queue observe --operation ID` reads an existing UNKNOWN browser operation using its persisted account, Project and session. It does not require or create a runtime task, reconcile delivery, change attachments, send, or clear a pause/draft. The existing `reattach --task` guard is unchanged.
+- `control rotation-recover --operation ID --candidate CID` reads an explicit existing candidate and returns a preview with `expected`. Commit uses the same arguments plus `--expected DIGEST --confirm`; evidence is read again and exact operation, registry and logical-role snapshots are compared under the write transaction.
+- The recovery accepts only the original native witness, exact rotation nonce/header and handoff hashes, verified login/Project, and one complete native user source bound to persistent candidate CID and message ID. Temporary source identity, competing local role/operation, absent or duplicate matching messages, and changed snapshots fail closed. It preserves prior result/witness and attempts. Missing historical before-user ID/server timestamp remain null. Uniqueness covers the observed candidate message and local registry, not an exhaustive server conversation search.
+- Commit records the original delivery and registers `pending-rotation` only. The original role owner and epoch remain unchanged until the recovered successor invokes `control rotation-ack --rotation ID --caller-ref SUCCESSOR_CID --message VERIFICATION` through its account-authenticated connection. Host-local synthetic ACK is rejected for recovered successors. The transport authenticates the account; caller-ref remains declared session identity, not cryptographic ChatID authentication. ACK compares exact registry/logical/runtime snapshots before switching ownership.
+- Draft/generation readiness is reported separately from historical message proof. Recovery never performs input, Stop, Retry, new-conversation creation or a resend. Observation may open an existing conversation in its verified agent-managed Space, leaving other tabs intact. It does not grant permission for a later input action.
+
+Observation failures retain the parsed worker receipt and bounded stdout/stderr diagnostics in the returned error, without modifying the original operation. observation.outcome separates DEFERRED, IDENTITY_REJECTED and UNKNOWN; the original deliveryStatus stays DELIVERY_UNKNOWN and retryOriginalOperation is false. PRE_SEND inside observation.receipt describes the read worker only. A timeout/reset without trustworthy evidence remains UNKNOWN. Successful reads include online/errorTexts/recoveryControls/recoveryRequired/pageWasDiscarded; observedAt is local UI sampling, never server freshness proof. Rotation recovery requires healthy online, undiscarded UI with no current error/recovery requirement. It rejects retained native source-CID conflicts and temporarySourceFirstConflict even when later source bytes match. Cross-row candidate operation/logical occupancy and rotation uniqueness are checked again inside BEGIN IMMEDIATE before binding.
+
+### Assistant observation and late reply correlation
+
+assistantMessageBinding is explicitly null in the current native adapter; assistantMessageBindingCondition is NATIVE_PARENT_ASSOCIATION_UNAVAILABLE (or ASSISTANT_NOT_OBSERVED without an assistant). The characterized message-bound Markdown source proves the observed assistant ID/conversation/text but supplies no reliable parent-user relation. DOM order, latest user, task metadata and model self-reports never create one. No private conversation endpoint is added.
+
+Reserved positive schema, not yet a supported positive capability: {format:"chatgpt-native-assistant-parent-v1",assistantId,parentUserMessageId,conversationId,account,assistantTextSha256,source}. A future extractor requires independently characterized native ancestry and exact same-assistant complete text, persistent conversation and account evidence. Missing/ambiguous ancestry stays null. Ordinary successful-send ACK handling is unchanged; late recovery consumers must fail closed per task when they need a parent association.
+
+ASSISTANT_RESPONSE_READY carries assistantTextSha256 (complete observed UTF-8 bytes), assistantTextSource, assistantTextTruncated, assistantTextUtf16Length, assistantTextUtf8Bytes and the same explicit null binding. The journal measures the complete serialized event against its 256 KiB limit. assistantText is always complete or null, never a preview. Complete events retain ASSISTANT_RESPONSE_READY; if additive metadata alone exceeds the old event budget, only those new metadata fields are omitted to preserve the complete legacy event. Missing metadata is unknown, not evidence. Truly oversized bodies produce ASSISTANT_RESPONSE_UNAVAILABLE with assistantText=null, assistantTextTruncated=true and sessionState=RESPONSE_BODY_UNAVAILABLE. Old READY consumers cannot execute this as a partial RPC. assistantTextRef={format,path,sha256} points to a content-addressed local JSON document retaining complete text and exact account/Project/session/assistant metadata. Verify reference digest and complete text hash before use. Text retention does not prove parentage or task authorization.
+
+Canonical conversation URLs with local-chatgpt:* native source remain rejected absent the existing authentic same-send temporary continuity proof. Equal body hashes/current URL cannot manufacture a historical alias anchor. This change does not repair lost historical receipts or introduce a new positive native alias mechanism.
+
+
+### Existing-conversation terminal LF evidence
+
+The native editor body and the message-bound source are distinct representations.
+Two retained send receipts used the same characterized getter/serializer and
+showed the source equal to the native body with exactly its single terminal LF
+removed. The source observer returns the owning message property verbatim; its
+rendered-text fallback does not participate in this native comparison.
+
+For future sends only, `persistent-single-terminal-lf-v1` permits that one exact
+relation when the preceding character is non-whitespace, the getter and serializer
+fingerprints match the captured format, the source is `BOUND_SOURCE`, and the
+before/target/after URLs identify the same existing conversation. The source
+observation must be at or after the native witness. Existing account, request/body
+hash, witness freshness, fresh message ID and conflict checks still apply.
+Receipts retain the original native body hash and record a separate `bodyBinding`
+with the source hash and both lengths. No body is changed, and no generic trim,
+CRLF, repeated LF, other whitespace, new-chat or temporary-alias rule is added.
+
+This is an empirically bounded representation relation, not proof of the platform's
+internal downstream transformation. Saved receipts do not recover an absent
+before-ID baseline; historical UNKNOWN operations remain UNKNOWN. It supplies
+neither assistant-parent evidence nor a reconciliation or resend permission.

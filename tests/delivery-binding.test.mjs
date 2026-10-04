@@ -218,3 +218,59 @@ test('successful and pre-send receipts keep their existing shape; native observa
  const plain={shortWait:true,latest:{...before}},plainApi=await harness(plain);
  await assert.rejects(plainApi.sendMessage(failurePage(plain),message,url),error=>error.deliveryStage==='SEND_ATTEMPTED'&&!error.nativeWitness);
 });
+
+
+const terminalLfFormat=JSON.parse(await readFile(new URL('./native-terminal-lf-format.json',import.meta.url),'utf8'));
+const digest=value=>crypto.createHash('sha256').update(value).digest('hex');
+function terminalLfFixture(body='Synthetic management request\nExact footer.\n') {
+ const now=new Date().toISOString(),identity='verified@example.test';
+ const witness={...terminalLfFormat,format:'chatgpt-native-getText-v1',body,url,accountIdentity:identity,
+  observedAt:now,requestHash:digest(body.replace(/\s+/g,' ').trim()),bodyHash:digest(body)};
+ const original={...before,expectedMessage:body,expectedIdentity:identity,nativeWitness:witness};
+ const observed={...after,observedAt:now,lastUserSourceCondition:'BOUND_SOURCE',
+  lastUserSource:{text:body.slice(0,-1),messageId:after.lastUserId,conversationId:conversation}};
+ return {original,observed,body,witness,identity};
+}
+
+test('characterized persistent send binds exactly one terminal LF and retains both raw body hashes',async()=>{
+ const n=terminalLfFixture(),f={witness:n.witness,shortWait:true,latest:n.observed},api=await harness(f);
+ assert.equal(api.deliveryObserved(n.original,n.observed,n.body),true);
+ const result=await api.sendMessage(failurePage(f),n.body,url,n.identity);
+ assert.equal(result.nativeWitness.bodyHash,digest(n.body));
+ assert.equal(result.nativeWitness.bodyBinding.format,'persistent-single-terminal-lf-v1');
+ assert.equal(result.nativeWitness.bodyBinding.nativeBodyHash,digest(n.body));
+ assert.equal(result.nativeWitness.bodyBinding.sourceBodyHash,digest(n.body.slice(0,-1)));
+ assert.equal(result.nativeWitness.bodyBinding.messageId,n.observed.lastUserId);
+ assert.equal(result.nativeWitness.bodyBinding.conversationId,conversation);
+ assert.equal(result.nativeWitness.bodyBinding.nativeBodyLength,n.body.length);
+ assert.equal(result.nativeWitness.bodyBinding.sourceBodyLength,n.body.length-1);
+ assert.equal(f.calls.filter(([kind])=>kind==='click').length,1);
+ assert.equal(JSON.stringify(result.nativeWitness).includes('Synthetic management request'),false);
+});
+
+test('terminal LF compatibility rejects other whitespace, uncharacterized formats and weakened evidence',async()=>{
+ const {deliveryObserved}=await harness(),n=terminalLfFixture();
+ for(const body of ['body\r\n','body\n\n','body \n','body\t\n','body\n \n','body','body ']) {
+  const f=terminalLfFixture(body);
+  assert.equal(deliveryObserved(f.original,f.observed,body),false,JSON.stringify(body));
+ }
+ for(const text of [n.body.slice(0,-2),n.body.trim().replace('\n',' '),' '+n.body.slice(0,-1),n.body.slice(0,-1)+' ','changed\nExact footer.']) {
+  assert.equal(deliveryObserved(n.original,{...n.observed,lastUserSource:{...n.observed.lastUserSource,text}},n.body),false);
+ }
+ for(const change of [{getterSource:'different'},{serializerSource:'different'},{bodyHash:'0'.repeat(64)},
+  {requestHash:'0'.repeat(64)},{accountIdentity:'other@example.test'},{observedAt:new Date(Date.now()-60000).toISOString()}])
+  assert.equal(deliveryObserved({...n.original,nativeWitness:{...n.witness,...change}},n.observed,n.body),false);
+ for(const change of [
+  {lastUserSourceCondition:null},{lastUserSourceCondition:'SOURCE_OWNER_AMBIGUOUS'},
+  {observedAt:null},{observedAt:new Date(Date.parse(n.witness.observedAt)-1).toISOString()},
+  {lastUserId:'old-user',lastUserSource:{...n.observed.lastUserSource,messageId:'old-user'}},
+  {lastUserSource:{...n.observed.lastUserSource,messageId:'foreign'}},
+  {lastUserSource:{...n.observed.lastUserSource,conversationId:'local-chatgpt:'+conversation}},
+  {url:url.replace(project,otherProject)},{url:url.replace('chatgpt.com','untrusted.example')},
+ ]) assert.equal(deliveryObserved(n.original,{...n.observed,...change},n.body),false,JSON.stringify(change));
+ for(const change of [{nativeSourceContinuity:{conflicted:true}},{expectedIdentity:null},
+  {userMessageIds:['new-user']},{userMessageIds:null},{targetUrl:url.replace(conversation,'22222222-2222-4222-8222-222222222222')},
+  {url:'https://chatgpt.com/g/'+project+'/project',nativeWitness:{...n.witness,url:'https://chatgpt.com/g/'+project+'/project'}}])
+  assert.equal(deliveryObserved({...n.original,...change},n.observed,n.body),false,JSON.stringify(change));
+ assert.equal(deliveryObserved(n.original,{...n.observed,lastUserSource:{...n.observed.lastUserSource,text:n.body}},n.body),true);
+});

@@ -215,6 +215,18 @@ async function touchRuntime(project, patch={}) {
   await saveRuntime(rt); return rt;
 }
 
+
+async function assistantResponseEvidence(task, observed) {
+  const text=String(observed.lastAssistant||"");
+  return {assistantId:observed.lastAssistantId,assistantText:text,
+    assistantTextSha256:crypto.createHash("sha256").update(text,"utf8").digest("hex"),
+    assistantTextTruncated:false,assistantTextUtf16Length:text.length,
+    assistantTextUtf8Bytes:Buffer.byteLength(text,"utf8"),assistantTextRef:null,
+    assistantTextSource:observed.lastAssistantTextSource||"rendered-dom",
+    // Current characterized source proves message/text identity, not native ancestry.
+    assistantMessageBinding:null,assistantMessageBindingCondition:"NATIVE_PARENT_ASSOCIATION_UNAVAILABLE"};
+}
+
 async function emitTaskEvent(task, type, data={}) {
   if(!task?.project) return null;
   const account=task.account||DEFAULT_ACCOUNT;
@@ -836,6 +848,64 @@ async function reattachTask(reg, chat, taskId, options={}) {
     messageSent:false,oldTabUntouched:true,resumeWatch:options.resumeWatch===true,observed};
 }
 
+
+async function observeOperation(reg, operationId, candidate=null) {
+  const query={operationId,candidate};
+  const scope=coordinated("observation-context",query);
+  if(opt("project",null)!==scope.project || opt("account",null)!==scope.account)
+    throw new Error("OPERATION_OBSERVATION_ROUTE_MISMATCH");
+  const binding=scope.binding, identity=scope.accountIdentity;
+  const info=(await listTaskSpaces()).find(x=>x.name===binding.spaceName);
+  if(!info || info.ownership!=="agent" || info.createdBy!=="agent" ||
+     !info.name.startsWith("chat-bridge-agent-") || info.profileId!==binding.profileId)
+    throw new Error("OPERATION_OBSERVATION_REQUIRES_MANAGED_SPACE");
+  const runtime=await loadRuntime();
+  if(runtime.sessions?.[scope.sessionRef]?.watchdogPausedForUserControl ||
+     Object.values(runtime.tasks||{}).some(t=>t.sessionId===scope.sessionRef && t.watchdogPausedForUserControl))
+    throw new Error("OPERATION_OBSERVATION_USER_CONTROL_PAUSED");
+  await assertWebAvailable(scope.account);
+  const task=await taskSpace(info.id), tabs=await task.tabs();
+  const prior=taskAccounts.get(Number(task.spaceId));
+  if(prior && accountScope(reg,prior)!==scope.accountId) throw new Error("OPERATION_OBSERVATION_ACCOUNT_CONFLICT");
+  taskAccounts.set(Number(task.spaceId),scope.account);
+  const matching=tabs.filter(x=>x.openedBy==="agent" && sameConversationUrl(x.url,scope.url));
+  let page=matching.length?task.page(matching[0].label):null;
+  if(!page) {
+    // Only open the already identified conversation; never reclaim existing pages.
+    page=await task.newPage();
+    await page.goto(scope.url,{waitUntil:"domcontentloaded",timeout:20000});
+  }
+  // Do not use waitForConversationReady: its load-error recovery can click Retry.
+  await page.waitForFunction(()=>!!document.querySelector(
+    '[data-message-author-role], [data-chatgpt-search-unit-key$=":user"], [data-chatgpt-search-unit-key$=":assistant"]'
+  ),undefined,{timeout:15000});
+  if(!sameConversationUrl(await page.url(),scope.url) || projectKey(await page.url())!==scope.projectId)
+    throw new Error("OPERATION_OBSERVATION_CONVERSATION_MISMATCH");
+  const login=await page.evaluate(async()=>{
+    if(location.origin!=="https://chatgpt.com") throw new Error("OPERATION_OBSERVATION_ORIGIN_MISMATCH");
+    const response=await fetch("/api/auth/session",{credentials:"same-origin",signal:AbortSignal.timeout(5000)});
+    if(!response.ok) throw new Error("OPERATION_OBSERVATION_LOGIN_UNAVAILABLE");
+    return (await response.json())?.user?.id||null;
+  });
+  if(login!==identity) throw new Error("OPERATION_OBSERVATION_LOGIN_MISMATCH");
+  // Native source text does not require expanding or clicking a rendered message.
+  const snapshot=await state(page,true);
+  if(!sameConversationUrl(snapshot.url,scope.url) || projectKey(snapshot.url)!==scope.projectId)
+    throw new Error("OPERATION_OBSERVATION_CONVERSATION_CHANGED");
+  if(coordinated("observation-context",query).anchor!==scope.anchor)
+    throw new Error("OPERATION_CHANGED_DURING_OBSERVATION");
+  return {ok:true,format:"operation-native-observation-v1",operationId,taskId:scope.taskId,
+    project:scope.project,account:scope.account,accountId:scope.accountId,sessionRef:scope.sessionRef,
+    anchor:scope.anchor,url:snapshot.url,observedAt:snapshot.observedAt,messageSent:false,
+    userMessages:snapshot.userMessages,generating:snapshot.generating,draftChars:snapshot.composerText.length,
+    online:snapshot.online??null,errorTexts:snapshot.errorTexts??null,recoveryControls:snapshot.recoveryControls??null,
+    recoveryRequired:recoveryRequired(snapshot),pageWasDiscarded:snapshot.pageWasDiscarded??null,
+    freshness:"LOCAL_UI_SAMPLE_NOT_SERVER_DELIVERY_TIME",
+    lastAssistantId:snapshot.lastAssistantId,lastAssistant:snapshot.lastAssistant,
+    lastAssistantTextSource:snapshot.lastAssistantTextSource,
+    messageCount:snapshot.messageCount,readOnly:true};
+}
+
 async function ensurePage(reg, chat, options={}) {
   const configured=reg.projects?.[chat.project]?.bindings?.[chat.account];
   const spaceOverride=chat.spaceName && configured?.spaceName!==chat.spaceName
@@ -1128,6 +1198,8 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       online:navigator.onLine,visibility:document.visibilityState,pageWasDiscarded:!!document.wasDiscarded,
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,
       lastAssistantTextSource:lastAssistantMsg?.textSource||'rendered-dom',
+      assistantMessageBinding:null,
+      assistantMessageBindingCondition:lastAssistantMsg?'NATIVE_PARENT_ASSOCIATION_UNAVAILABLE':'ASSISTANT_NOT_OBSERVED',
       lastUserSource:includeUserMessages?lastUserMsg?.userSource||null:null,
       lastUserSourceCondition:includeUserMessages?userSourceConditions.get(lastUserMsg?.id)||'SOURCE_NOT_OBSERVED':null,
       userMessages:includeUserMessages===true?ms.filter(x=>x.role==='user'):undefined,
@@ -1272,6 +1344,25 @@ function sourceContinuityReceipt(before, after) {
     ...(proof.firstGap?{firstGap:proof.firstGap}:{})};
 }
 
+// A bounded compatibility relation observed on two persistent-conversation sends.
+// This does not rewrite the native body or apply to new-chat/temporary aliases.
+function terminalLfBodyBinding(before, after) {
+  const witness=before?.nativeWitness, source=after?.lastUserSource;
+  if(!witness || typeof witness.body!=='string' || !/[^\s]\n$/.test(witness.body) ||
+    source?.text!==witness.body.slice(0,-1) || after.lastUserSourceCondition!=='BOUND_SOURCE' ||
+    !Array.isArray(before.userMessageIds) ||
+    !sameConversationUrl(before.url,before.targetUrl||before.url) ||
+    !sameConversationUrl(before.url,after.url) || source.conversationId!==convId(after.url) ||
+    !Number.isFinite(Date.parse(after.observedAt)) ||
+    Date.parse(after.observedAt)<Date.parse(witness.observedAt) || Date.parse(after.observedAt)>Date.now()) return null;
+  const sha=value=>crypto.createHash('sha256').update(String(value||'')).digest('hex');
+  if(sha(witness.getterSource)!=='baab60f7b982e273471cb00f9b0a8e23eeaf1c489c9a11d378b67e34d3623413' ||
+    sha(witness.serializerSource)!=='c0b631839d32ce26efa405a63cce38a38346c429ff203089b16bd32b2d82d9d4') return null;
+  return {format:'persistent-single-terminal-lf-v1',nativeBodyHash:witness.bodyHash,
+    sourceBodyHash:sha(source.text),nativeBodyLength:witness.body.length,sourceBodyLength:source.text.length,
+    messageId:source.messageId,conversationId:source.conversationId,observedAt:after.observedAt};
+}
+
 function deliveryObserved(before, after, message=before?.expectedMessage, rejection=null) {
   const reject=condition=>{if(rejection) rejection.condition=condition;return false;};
   const witness=before?.nativeWitness;
@@ -1299,7 +1390,7 @@ function deliveryObserved(before, after, message=before?.expectedMessage, reject
         newConversationProjectMatches(before,after);
       if(!temporaryPending && !mapped) return reject(/^local-chatgpt:/.test(source.conversationId)?(proof?.conflicted?'NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT':'NATIVE_TEMPORARY_SOURCE_PROOF_MISSING'):'NATIVE_SOURCE_CONVERSATION_MISMATCH');
     }
-    if(after.lastUserSource.text!==witness.body) return reject('NATIVE_SOURCE_BODY_MISMATCH');
+    if(after.lastUserSource.text!==witness.body && !terminalLfBodyBinding(before,after)) return reject('NATIVE_SOURCE_BODY_MISMATCH');
   }
   const expected=String(message||"").replace(/\s+/g," ").trim();
   if(!before || !after?.lastUserId || !expected) return reject('USER_MESSAGE_EVIDENCE_MISSING');
@@ -1496,7 +1587,8 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
     }
     const nativeReceipt=nativeWitnessReceipt(witness,after.lastUserId), continuity=sourceContinuityReceipt(before,after);
     if(nativeReceipt) Object.assign(nativeReceipt,{conversationId:convId(after.url),
-      sourceConversationId:after.lastUserSource?.conversationId||null,...(continuity?{sourceBinding:continuity}:{})});
+      sourceConversationId:after.lastUserSource?.conversationId||null,...(continuity?{sourceBinding:continuity}:{}),
+      ...(terminalLfBodyBinding(before,after)?{bodyBinding:terminalLfBodyBinding(before,after)}:{})});
     return {delivered:true,attempts,lastUserId:after.lastUserId,url:after.url,messageCount:after.messageCount,nativeWitness:nativeReceipt};
   } catch(error) {
     if(witness) {
@@ -2859,8 +2951,7 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
           live.watchdogResultNotification=null;
           if(observed.lastAssistantId && live.externalEventAssistantId!==observed.lastAssistantId) {
             const event=await emitTaskEvent(live,"ASSISTANT_RESPONSE_READY",{
-              assistantId:observed.lastAssistantId,
-              assistantText:String(observed.lastAssistant||"").slice(0,131072),
+              ...await assistantResponseEvidence(live,observed),
               sessionState:observed.sessionState,
               recommendation:observed.recommendation||null,
               lastProgressAt:observed.lastProgressAt||null,
@@ -3489,6 +3580,9 @@ else if(cmd==="space"){
       print(result);
     } else throw new Error("space subcommand must be show, bind, prune, gc, or consolidate");
   }
+}
+else if(cmd==="operation-evidence") {
+  print(await observeOperation(reg,opt("operation",null),opt("candidate",null)));
 }
 else if(cmd==="reattach") {
   const chat=resolveChat(reg,args[1],project,accountArg);

@@ -68,12 +68,18 @@ class Fakes:
         leader_pid = self.directory / (prefix + '-leader.pid')
         leaf = self.script(prefix + '-leaf', f'''import os,pathlib,signal,time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
-pathlib.Path({str(leaf_pid)!r}).write_text(str(os.getpid()))
+pid_path = pathlib.Path({str(leaf_pid)!r})
+pid_tmp = pid_path.with_suffix(".pid.tmp")
+pid_tmp.write_text(str(os.getpid()))
+pid_tmp.replace(pid_path)
 time.sleep(40)
 ''')
         pipes = ', stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL' if closed else ''
         leader = self.script(prefix + '-leader', f'''import os,pathlib,subprocess,sys,time
-pathlib.Path({str(leader_pid)!r}).write_text(str(os.getpid()))
+pid_path = pathlib.Path({str(leader_pid)!r})
+pid_tmp = pid_path.with_suffix(".pid.tmp")
+pid_tmp.write_text(str(os.getpid()))
+pid_tmp.replace(pid_path)
 subprocess.Popen([sys.executable,{str(leaf)!r}]{pipes})
 while not pathlib.Path({str(leaf_pid)!r}).exists(): time.sleep(.01)
 print('synthetic receipt', flush=True)
@@ -162,7 +168,10 @@ time.sleep(40)
         runner_pid = fakes.directory / 'nested-runner.pid'
         outer = fakes.script('outer', f'''import pathlib,subprocess,sys,time
 p=subprocess.Popen([sys.executable,{str(runner_path)!r},{str(leader)!r},'30'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-pathlib.Path({str(runner_pid)!r}).write_text(str(p.pid))
+pid_path = pathlib.Path({str(runner_pid)!r})
+pid_tmp = pid_path.with_suffix(".pid.tmp")
+pid_tmp.write_text(str(p.pid))
+pid_tmp.replace(pid_path)
 time.sleep(40)
 ''')
         try:

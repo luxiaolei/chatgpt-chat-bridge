@@ -437,3 +437,5 @@ Management authority is distinct from a normal task `callerRef`. Host-local admi
 `chat-bridge reattach ROLE --project PROJECT --account ACCOUNT --task EXACT_TASK --confirm` observes the existing conversation in the account's existing verified Bridge-managed Space. It neither sends/replays a message nor closes old user tabs. `--resume-watch` additionally clears only that exact task's user-control observation pause after a healthy, same-login, empty-composer check. No Project/business pause is cleared; UNKNOWN delivery is not classified as NOT_STARTED. Keep the original task/session identity.
 
 External RPC extraction prefers the exact message-bound Markdown source where available; `lastAssistantTextSource` states whether the source or rendered DOM was used. Unknown source layouts remain explicit fallbacks, never heuristically unescaped or JSON-repaired.
+
+Existing UNKNOWN recovery: see docs/architecture.md, "Recovery of an already created, unregistered rotation". Use operation-anchored queue observe for missing runtime tasks; rotation-recover defaults to preview. Never treat recovery binding as successor ACK.
