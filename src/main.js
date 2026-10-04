@@ -1054,6 +1054,7 @@ async function state(page, includeUserMessages=false, controlAction=null) {
         let text=role==='user'?userMessageText(unit):(content.innerText||content.textContent||'').trim();
         if(role==='assistant') text=text.replace(/^(?:You said:|ChatGPT said:)\s*/i,'').trim();
         const original=role==='assistant'?assistantSource(content,id):null;
+        if(role==='user' && (ids.length>1 || (selected && selected!==id))) userSourceConditions.set(id,'MESSAGE_ID_AMBIGUOUS');
         ms.push({role,id,text,...original,userSource:role==='user'&&ids.length<=1&&(!selected||selected===id)?userSource(unit,id):null});
       }
     }
@@ -1218,13 +1219,43 @@ function captureNewConversationSource(before, after) {
   const rejection={};
   deliveryObserved(before,after,undefined,rejection);
   const prior=before.nativeSourceContinuity, source=after?.lastUserSource, witness=before.nativeWitness;
-  if(prior && (!source || source.messageId!==prior.messageId || source.conversationId!==prior.temporaryId ||
-    source.text!==witness?.body || !newConversationProjectMatches(before,after))) prior.conflicted=true;
-  if(rejection.condition!=='NATIVE_TEMPORARY_CONVERSATION_PENDING') return;
   if(prior) {
-    if(prior.temporaryId!==source.conversationId || prior.messageId!==source.messageId) prior.conflicted=true;
+    // Lack of a source is not contradictory source evidence. Scope still applies.
+    let conflict=null, gap=false;
+    const condition=after?.lastUserSourceCondition;
+    if(!newConversationProjectMatches(before,after)) conflict='PROJECT_OR_URL_CHANGED';
+    else if(after.lastUserId && after.lastUserId!==prior.messageId) conflict='RENDERED_MESSAGE_CHANGED';
+    else if(sameConversationUrl(after.url,after.url) && prior.persistentId && prior.persistentId!==convId(after.url)) conflict='PERSISTENT_CONVERSATION_CHANGED';
+    else if(!source) {
+      gap=!condition || condition==='SOURCE_NOT_OBSERVED' || condition==='SOURCE_OWNER_NOT_FOUND';
+      if(!gap) conflict='SOURCE_UNVERIFIED';
+    } else if(source.messageId!==prior.messageId) conflict='SOURCE_MESSAGE_CHANGED';
+    else if(source.text!==witness?.body) conflict='SOURCE_BODY_CHANGED';
+    else if(source.conversationId!==prior.temporaryId &&
+      !(sameConversationUrl(after.url,after.url) && source.conversationId===convId(after.url)))
+      conflict='SOURCE_CONVERSATION_CHANGED';
+    if(!conflict && sameConversationUrl(after.url,after.url) && !prior.persistentId) prior.persistentId=convId(after.url);
+    // A matching source upgraded to the current persistent CID uses direct proof.
+    // Neither a gap nor a later matching tuple clears an earlier contradiction.
+    if(conflict || gap) {
+      const key=conflict?'firstConflict':'firstGap';
+      if(!prior[key]) {
+        const id=value=>typeof value==='string'&&/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)?value:null;
+        const cid=value=>id(value)||(/^local-chatgpt:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value||'')?value:null);
+        let url=null;
+        try {const u=new URL(after?.url);if(u.origin==='https://chatgpt.com'&&!u.username&&!u.password) url=u.origin+u.pathname;} catch {}
+        const known=['SOURCE_NOT_OBSERVED','SOURCE_OWNER_NOT_FOUND','MESSAGE_ID_MISSING','MESSAGE_ID_AMBIGUOUS','BUBBLE_AMBIGUOUS','SOURCE_TARGET_AMBIGUOUS','SKIPPED_SOURCE_CONTENT','SOURCE_URL_INVALID','FOREIGN_MESSAGE_OWNER','SOURCE_CONVERSATION_CONFLICT','SOURCE_OWNER_TUPLE_UNVERIFIED','SOURCE_OWNER_AMBIGUOUS','UNSUPPORTED_SOURCE_CONTROL','UNOWNED_COPY_CONTROL','FOREIGN_COPY_OWNER','BOUND_SOURCE'];
+        prior[key]={reason:conflict||'SOURCE_ABSENT',
+          observedAt:Number.isFinite(Date.parse(after?.observedAt))?new Date(after.observedAt).toISOString():null,
+          sourceCondition:known.includes(condition)?condition:null,url,
+          lastUserId:id(after?.lastUserId),sourceMessageId:id(source?.messageId),sourceConversationId:cid(source?.conversationId),
+          sourceBodyHash:typeof source?.text==='string'?crypto.createHash('sha256').update(source.text).digest('hex'):null};
+      }
+      if(conflict) prior.conflicted=true;
+    }
     return;
   }
+  if(rejection.condition!=='NATIVE_TEMPORARY_CONVERSATION_PENDING') return;
   before.nativeSourceContinuity={temporaryId:source.conversationId,messageId:source.messageId,
     bodyHash:witness.bodyHash,requestHash:witness.requestHash,witnessObservedAt:witness.observedAt,
     targetUrl:before.targetUrl||before.url,temporaryUrl:after.url,observedAt:after.observedAt,conflicted:false};
@@ -1236,7 +1267,8 @@ function sourceContinuityReceipt(before, after) {
   return {format:'same-send-temporary-conversation-v1',messageId:proof.messageId,
     sourceConversationId:proof.temporaryId,conversationId:convId(after.url),bodyHash:proof.bodyHash,
     temporaryUrl:route(proof.temporaryUrl),persistentUrl:route(after.url),
-    witnessObservedAt:proof.witnessObservedAt,temporaryObservedAt:proof.observedAt,persistentObservedAt:after.observedAt};
+    witnessObservedAt:proof.witnessObservedAt,temporaryObservedAt:proof.observedAt,persistentObservedAt:after.observedAt,
+    ...(proof.firstGap?{firstGap:proof.firstGap}:{})};
 }
 
 function deliveryObserved(before, after, message=before?.expectedMessage, rejection=null) {
@@ -1251,6 +1283,7 @@ function deliveryObserved(before, after, message=before?.expectedMessage, reject
     if(!before.expectedIdentity || witness.accountIdentity!==before.expectedIdentity) return reject('NATIVE_IDENTITY_MISMATCH');
     if(!witness.observedAt || !Number.isFinite(Date.parse(witness.observedAt))) return reject('NATIVE_WITNESS_TIME_INVALID');
     if(Date.now()-Date.parse(witness.observedAt)>15000 || Date.parse(witness.observedAt)>Date.now()) return reject('NATIVE_WITNESS_NOT_FRESH');
+    if(before.nativeSourceContinuity?.conflicted) return reject('NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT');
     if(!after?.lastUserSource?.messageId) return reject('NATIVE_SOURCE_MESSAGE_ID_MISSING');
     if(after.lastUserSource.messageId!==after.lastUserId) return reject('NATIVE_SOURCE_MESSAGE_ID_MISMATCH');
     if(after.lastUserSource.conversationId!==convId(after.url)) {
@@ -1362,6 +1395,8 @@ function postSendObservation(before, after, witness, condition=null, observation
     snapshotAvailable:!!after,observationFailed,
     sourceCondition:after?.lastUserSourceCondition||null,
     temporarySourceProof:sourceContinuityReceipt(before,after),
+    temporarySourceFirstConflict:before?.nativeSourceContinuity?.firstConflict||null,
+    temporarySourceFirstGap:before?.nativeSourceContinuity?.firstGap||null,
     beforeUrl:route(before?.url),targetUrl:route(before?.targetUrl||before?.url),afterUrl:route(after?.url),
     lastUserId:id(after?.lastUserId),sourceMessageId:id(after?.lastUserSource?.messageId),
     sourceConversationId:id(after?.lastUserSource?.conversationId)||(/^local-chatgpt:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(after?.lastUserSource?.conversationId||'')?after.lastUserSource.conversationId:null),

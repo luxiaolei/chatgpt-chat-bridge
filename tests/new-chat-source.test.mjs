@@ -25,7 +25,7 @@ class Element {
     part=part.trim();const tag=part.match(/^[a-z]+/i)?.[0];
     if(tag&&tag.toUpperCase()!==this.tagName)return false;
     if(!part.includes('['))return !!tag;
-    return [...part.matchAll(/\[([^\s=\]^]+)(\$?=)?"?([^"\]]*)"?\]/g)].every(([,key,op,value])=>
+    return [...part.matchAll(/\[([^\s=$\]^]+)(\$?=)?"?([^"\]]*)"?\]/g)].every(([,key,op,value])=>
       op==='='?this.getAttribute(key)===value:op==='$='?String(this.getAttribute(key)||'').endsWith(value):this.getAttribute(key)!==null);
   });}
   closest(selector){for(let n=this;n;n=n.parentElement)if(n.matches(selector))return n;return null;}
@@ -71,7 +71,7 @@ function fixture(change=()=>{}){
   },querySelectorAll(selector){
     if(selector.includes('contenteditable="true"'))return [composer];
     if(selector==='[data-message-author-role]')return [];
-    if(selector.includes('[data-chatgpt-search-unit-key')||selector.includes('[data-content-search-unit-key'))return f.sends||f.beforeUserId?[unit]:[];
+    if(selector.includes('[data-chatgpt-search-unit-key')||selector.includes('[data-content-search-unit-key'))return f.sends||f.beforeUserId?[unit].filter(node=>node.matches(selector)):[];
     if(selector==='button')return f.sends?[copy]:[send];
     return [];
   }};
@@ -232,4 +232,82 @@ test('malformed source CID cannot create a temporary continuity proof',async()=>
     captureNewConversationSource(before,after);
     assert.equal(before.nativeSourceContinuity,undefined);
   });
+});
+
+for(const gap of ['message-unmounted','fiber-not-ready'])test('qualified temporary anchor survives '+gap+' without creating or replacing a proof',async()=>{
+  const f=fixture(x=>{
+    const query=x.document.querySelectorAll;
+    if(gap==='message-unmounted')x.document.querySelectorAll=selector=>x.polls===2&&
+      (selector.includes('[data-chatgpt-search-unit-key')||selector.includes('[data-content-search-unit-key'))?[]:query(selector);
+    else x.onPoll=value=>{value.outer.__reactFiber$fixture=value.polls===2?null:value.frames[0];};
+  });
+  let failure;
+  await inBrowser(f,async({runNew})=>{try{await runNew();}catch(error){failure=error;}});
+  const anchor=f.trace.find(s=>s.url===transient&&s.lastUserSource?.messageId===messageId);
+  const absent=f.trace.find(s=>s.url===permanent&&s.lastUserSource===null&&
+    (gap==='message-unmounted'?s.lastUserId===null:s.lastUserSourceCondition==='SOURCE_OWNER_NOT_FOUND'));
+  assert.ok(anchor,'a qualified temporary source precedes the gap');
+  assert.ok(absent,'the actual state getter observed the intended absent source');
+  if(failure)throw failure;
+  assert.equal(f.sends,1);assert.equal(f.persisted.length,1);
+  const binding=f.printed[0].delivery.nativeWitness.sourceBinding;
+  assert.equal(binding.sourceConversationId,temporary);
+  assert.equal(binding.temporaryObservedAt,anchor.observedAt);
+  assert.equal(binding.firstGap?.reason,'SOURCE_ABSENT');
+  assert.equal(binding.firstGap?.observedAt,absent.observedAt);
+});
+
+test('ambiguous or foreign source during migration remains a conflict after the original tuple returns',async()=>{
+  const conditions={'duplicate-owner':'SOURCE_OWNER_AMBIGUOUS','foreign-owner':'FOREIGN_MESSAGE_OWNER','ambiguous-message-id':'MESSAGE_ID_AMBIGUOUS'};
+  for(const fault of Object.keys(conditions)){
+    const f=fixture(x=>x.onPoll=value=>{
+      value.frames[15].memoizedProps=value.polls===2&&fault==='duplicate-owner'?{...value.source}:{};
+      value.frames[3].memoizedProps=value.polls===2&&fault==='foreign-owner'?{messageId:'foreign-owner'}:{};
+      value.unit.attrs['data-chatgpt-search-message-ids']=value.polls===2&&fault==='ambiguous-message-id'?messageId+' another-user':messageId;
+    });
+    await inBrowser(f,async({runNew})=>assert.rejects(runNew(),error=>{
+      assert.equal(error.nativeWitness.postSend.missingCondition,'NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT');
+      assert.equal(error.nativeWitness.postSend.temporarySourceProof,null);
+      assert.equal(error.nativeWitness.postSend.temporarySourceFirstConflict?.reason,'SOURCE_UNVERIFIED');
+      assert.equal(error.nativeWitness.postSend.temporarySourceFirstConflict?.sourceCondition,conditions[fault]);
+      return error.code==='DELIVERY_UNCONFIRMED';
+    }));
+    assert.ok(f.trace.some(s=>s.url===transient&&s.lastUserSource?.messageId===messageId),'qualified temporary source was observed');
+    assert.ok(f.trace.some(s=>s.lastUserSource===null&&s.lastUserSourceCondition===conditions[fault]),'the exact source conflict was observed');
+    assert.equal(f.sends,1);assert.equal(f.persisted.length,0);
+  }
+});
+
+test('a changed exact body cannot be washed away by a later valid direct persistent source',async()=>{
+  const f=fixture(x=>x.onPoll=value=>{
+    value.source.message=value.polls===2?request+' altered footer':request;
+    if(value.polls>=3){value.source.conversationId=uuid;value.frames[10].memoizedProps.conversationId=uuid;}
+  });
+  await inBrowser(f,async({runNew})=>assert.rejects(runNew(),error=>{
+    const conflict=error.nativeWitness.postSend.temporarySourceFirstConflict;
+    assert.equal(error.nativeWitness.postSend.missingCondition,'NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT');
+    assert.equal(conflict?.reason,'SOURCE_BODY_CHANGED');
+    assert.equal(conflict?.sourceBodyHash,sha(request+' altered footer'));
+    assert.equal(JSON.stringify(conflict).includes('altered footer'),false);
+    return error.code==='DELIVERY_UNCONFIRMED';
+  }));
+  assert.ok(f.trace.some(s=>s.lastUserSource?.conversationId===uuid&&s.lastUserSource?.text===request),'later direct source was actually valid');
+  assert.equal(f.sends,1);assert.equal(f.persisted.length,0);
+});
+
+test('a different permanent CID observed during a source gap is never adopted after recovery',async()=>{
+  const other='55555555-5555-4555-8555-555555555555';
+  const f=fixture(x=>{
+    const query=x.document.querySelectorAll;
+    x.document.querySelectorAll=selector=>x.polls===2&&
+      (selector.includes('[data-chatgpt-search-unit-key')||selector.includes('[data-content-search-unit-key'))?[]:query(selector);
+    x.onPoll=value=>{if(value.polls>=3)value.url=permanent.replace(uuid,other);};
+  });
+  await inBrowser(f,async({runNew})=>assert.rejects(runNew(),error=>{
+    assert.equal(error.nativeWitness.postSend.temporarySourceFirstConflict?.reason,'PERSISTENT_CONVERSATION_CHANGED');
+    return error.code==='DELIVERY_UNCONFIRMED';
+  }));
+  assert.ok(f.trace.some(s=>s.url===transient&&s.lastUserSource?.messageId===messageId),'qualified temporary source was observed');
+  assert.ok(f.trace.some(s=>s.url===permanent&&s.lastUserSource===null&&s.lastUserId===null),'the first permanent CID was observed during a real source gap');
+  assert.equal(f.sends,1);assert.equal(f.persisted.length,0);
 });
