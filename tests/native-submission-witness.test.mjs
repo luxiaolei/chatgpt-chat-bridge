@@ -79,6 +79,14 @@ test('captured persisted-text native format produces a witness and deduplicates 
  assert.equal(witness.bodyHash,crypto.createHash('sha256').update(fixture.body).digest('hex'));
 });
 
+test('QuantCompany captured F editor alias preserves the exact persisted getter checks',async()=>{
+ const alias=({host})=>{host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return e=>{ev(F.getText(),e)}')();};
+ const witness=await inspectPersisted(alias);
+ assert.equal(witness.body,fixture.body);
+ await assert.rejects(inspectPersisted(context=>{alias(context);context.editor.getText=()=>fixture.body;}),/NATIVE_SUBMISSION_UNVERIFIED/);
+ await assert.rejects(inspectPersisted(({host})=>{host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return e=>{ev(Z.getText(),e)}')();}),/NATIVE_SUBMISSION_UNVERIFIED/);
+});
+
 test('persisted native getter preserves its plain, entity-only and trailing-space branches',async()=>{
  const plain=await inspectPersisted(({native})=>native.formatted=false);
  assert.equal(plain.body,fixture.request);
