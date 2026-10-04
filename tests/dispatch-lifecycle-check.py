@@ -348,6 +348,54 @@ def temporary_queue(coordinator, fakes, *, existing=True, worker_body):
 
 
 def integration_case(case, coordinator, runner, runner_path, fakes):
+    if case.startswith('private-pre-send-'):
+        traceback = ("STATE_STORE_REGISTRY: Traceback (most recent call last):\n"
+                     + "  synthetic intermediate frame\n" * 12
+                     + "OSError: SYNTHETIC_STORAGE_FAILURE")
+        code = traceback if case == 'private-pre-send-traceback' else (
+            'SYNTHETIC_FAILURE' if case == 'private-pre-send-stdout' else 'MODEL_MENU_NOT_READY')
+        receipt = {'ok': False, 'deliveryStage': 'PRE_SEND', 'code': code,
+                   'message': 'PRIVATE_DIAGNOSTIC_BODY', 'token': 'PRIVATE_DIAGNOSTIC_TOKEN'}
+        stdout_receipt = case == 'private-pre-send-stdout'
+        body = ("import sys\nsys.stderr.write('x'*5000+'synthetic-stderr-tail\\n')\n"
+                + "print(" + repr(json.dumps(receipt)) + ",file=sys."
+                + ("stdout" if stdout_receipt else "stderr") + ")\nsys.exit(2)\n")
+        db, op, _, _ = temporary_queue(coordinator, fakes, worker_body=body)
+        initial_failures = coordinator.PRE_SEND_RETRY_LIMIT - 1 if case == 'private-pre-send-exhausted' else 0
+        try:
+            db.execute('UPDATE operations SET pre_send_failures=? WHERE id=?', (initial_failures, op['operationId']))
+            db.commit()
+            response = coordinator.work_one(db)
+            row = db.execute('SELECT * FROM operations WHERE id=?', (op['operationId'],)).fetchone()
+            retry = case == 'private-pre-send-retry'
+            expected_status = 'QUEUED' if retry else 'FAILED_PRE_SEND'
+            expected_reason = ('PRE_SEND_RETRY_1_' if retry else 'PRE_SEND_') + code[:200]
+            assert response['status'] == row['status'] == expected_status
+            assert response['reason'] == row['reason'] == expected_reason
+            assert row['attempts'] == 1 and row['pre_send_failures'] == initial_failures + 1
+            assert row['session_ref'] == 'worker'
+            assert row['result'] is not None, 'structured PRE_SEND worker diagnostic was discarded'
+            worker = json.loads(row['result'])['worker']
+            assert worker['phase'] == 'dispatch' and worker['exitCode'] == 2
+            assert len(worker['stderrTail']) == 2048
+            expected_receipt = {'deliveryStage': 'PRE_SEND'}
+            if code != traceback:
+                expected_receipt['code'] = code
+            assert worker['capturedReceipt'] == expected_receipt
+            if case == 'private-pre-send-traceback':
+                assert 'SYNTHETIC_STORAGE_FAILURE' not in row['reason']
+                assert 'SYNTHETIC_STORAGE_FAILURE' in worker['stderrTail']
+            if stdout_receipt:
+                assert worker['stderrTail'].endswith('synthetic-stderr-tail\n')
+            public = json.dumps(response)
+            for private in ('stderrTail', 'capturedReceipt', 'PRIVATE_DIAGNOSTIC_BODY',
+                            'PRIVATE_DIAGNOSTIC_TOKEN', 'PRIVATE_SYNTHETIC_ARGV'):
+                assert private not in public
+            assert 'result' not in response and 'worker' not in response
+            assert coordinator.work_one(db)['status'] == 'IDLE', 'failed or deferred operation was immediately replayed'
+        finally:
+            db.close()
+        return
     if case == 'private-captured-timeout-receipt':
         for stage in ('PRE_SEND', 'SEND_ATTEMPTED'):
             payload = json.dumps({'ok': False, 'deliveryStage': stage, 'code': 'SYNTHETIC_FAILURE',
