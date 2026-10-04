@@ -51,6 +51,9 @@ with tempfile.TemporaryDirectory() as root:
             db.execute("UPDATE operations SET attempts=attempts+1 WHERE id=?",(op,));db.commit()
         return subprocess.CompletedProcess(command,0,json.dumps(result),"")
     c.run_bridge=observe
+    if case=="wrong-predecessor-project":
+        reg["chats"][sid]["project"]="Other"
+        db.execute("UPDATE documents SET payload=? WHERE kind=\'registry\'",(json.dumps(reg),));db.commit()
     if case=="wrong-handoff":
         db.execute("UPDATE operations SET original_message='different' WHERE id=?",(op,));db.commit()
     if case=="wrong-witness":
@@ -71,11 +74,11 @@ with tempfile.TemporaryDirectory() as root:
     before="\n".join(db.iterdump())
     payload={"operationId":op,"candidate":candidate}
     negative=case in {"wrong-login","wrong-project","wrong-cid","wrong-uid","temporary","wrong-body","missing","duplicate",
-                     "stale-observation","wrong-handoff","wrong-witness","wrong-epoch","occupied","pending","prior-cid","prior-user"}
+                     "stale-observation","wrong-handoff","wrong-witness","wrong-epoch","occupied","pending","prior-cid","prior-user","wrong-predecessor-project"}
     if negative:
         try:c.rotation_recover(db,payload);raise AssertionError("accepted invalid evidence")
         except ValueError as e:
-            expected={"wrong-login":"IDENTITY_MISMATCH","wrong-project":"IDENTITY_MISMATCH","wrong-cid":"IDENTITY_MISMATCH",
+            expected={"wrong-predecessor-project":"LOGICAL_MISMATCH","wrong-login":"IDENTITY_MISMATCH","wrong-project":"IDENTITY_MISMATCH","wrong-cid":"IDENTITY_MISMATCH",
                       "wrong-uid":"SOURCE_IDENTITY","temporary":"SOURCE_IDENTITY","wrong-body":"NOT_UNIQUE","missing":"NOT_UNIQUE",
                       "duplicate":"NOT_UNIQUE","stale-observation":"TIME_INVALID","wrong-handoff":"HANDOFF_MISMATCH",
                       "prior-cid":"PRIOR_IDENTITY_CONFLICT","prior-user":"PRIOR_IDENTITY_CONFLICT","wrong-witness":"WITNESS_MISMATCH","wrong-epoch":"HANDOFF_MISMATCH","occupied":"OCCUPIED","pending":"LOGICAL_MISMATCH"}[case]
@@ -135,7 +138,7 @@ with tempfile.TemporaryDirectory() as root:
     db.close()
 `;
 
-for(const name of ["success","draft","wrong-login","wrong-project","wrong-cid","wrong-uid","temporary","wrong-body","missing","duplicate","stale-observation","wrong-handoff","wrong-witness","wrong-epoch","occupied","pending","observation-race","stale-preview","cas-race","missing-task-observe","prior-cid","prior-user"]) {
+for(const name of ["success","draft","wrong-login","wrong-project","wrong-cid","wrong-uid","temporary","wrong-body","missing","duplicate","stale-observation","wrong-handoff","wrong-witness","wrong-epoch","occupied","pending","observation-race","stale-preview","cas-race","missing-task-observe","prior-cid","prior-user","wrong-predecessor-project"]) {
   test("existing rotation / operation observation: "+name,()=>{
     const env={...process.env,PYTHONDONTWRITEBYTECODE:"1"};
     delete env.CHAT_BRIDGE_FROM_ACCOUNT_ID;delete env.CHAT_BRIDGE_FROM_SPACE;delete env.CODEX_THREAD_ID;

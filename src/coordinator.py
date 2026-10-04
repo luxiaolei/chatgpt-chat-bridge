@@ -2138,8 +2138,15 @@ def rotation_ack(db, payload, config, state):
     origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
     if origin and (not identity or account_id(identity) != origin):
         raise ValueError("ROTATION_ACK_ORIGIN_MISMATCH")
-    if successor_chat.get("rotationRecovery") and (not origin or payload.get("callerRef") != successor or not message):
-        raise ValueError("ROTATION_RECOVERY_ACK_SUCCESSOR_REQUIRED")
+    recovery = successor_chat.get("rotationRecovery")
+    if recovery:
+        if not origin or payload.get("callerRef") != successor or not message:
+            raise ValueError("ROTATION_RECOVERY_ACK_SUCCESSOR_REQUIRED")
+        if (recovery.get("rotationId") != rotation_id or recovery.get("candidate") != successor
+                or recovery.get("predecessor") != row["current_session_ref"] or recovery.get("epoch") != row["epoch"]
+                or recovery.get("logicalRef") != row["logical_ref"] or recovery.get("accountId") != account_id(identity)
+                or successor_chat.get("status") != "pending-rotation"):
+            raise ValueError("ROTATION_RECOVERY_ACK_PROOF_CHANGED")
     old_ref = row["current_session_ref"]
     base = reg
     next_reg = json.loads(json.dumps(reg))
@@ -2725,7 +2732,8 @@ def rotation_recover(db, payload):
             or logical["current_session_ref"] != row["caller_ref"]
             or any(logical[k] != row[k] for k in ("project","role","workgroup_id"))
             or not predecessor or predecessor.get("status","active") != "active"
-            or predecessor.get("account") != row["account_alias"]
+            or predecessor.get("account") != row["account_alias"] or predecessor.get("project") != row["project"]
+            or (predecessor.get("workgroupId") or None) != row["workgroup_id"]
             or current_controller_ref(db, reg, row["project"], row["role"], row["workgroup_id"]) != row["caller_ref"]):
         raise ValueError("ROTATION_RECOVERY_LOGICAL_MISMATCH")
     competing = [chat for chat in (reg.get("chats") or {}).values()
