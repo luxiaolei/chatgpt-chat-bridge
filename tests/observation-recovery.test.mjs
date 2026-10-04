@@ -123,7 +123,7 @@ async function operationFixture(change={}) {
     opt:key=>key==="project"?"P":"a",listTaskSpaces:async()=>[{id:1,name:scope.binding.spaceName,ownership:change.ownership||"agent",createdBy:"agent",profileId:"Profile 1"}],
     loadRuntime:async()=>({tasks:change.paused?{x:{sessionId:cid,watchdogPausedForUserControl:true}}:{},sessions:{}}),
     assertWebAvailable:async()=>{},taskSpace:async()=>({spaceId:1,tabs:async()=>[{label:"p1",url:scope.url,openedBy:"agent"}],page:()=>page,newPage:async()=>{throw Error("unexpected allocation");}}),
-    taskAccounts:new Map(),accountScope:()=>scope.accountId,waitForConversationReady:async()=>{},
+    taskAccounts:new Map(),accountScope:()=>scope.accountId,waitForConversationReady:async()=>{throw Error("read-only observer must never run retry-capable readiness");},
     sameConversationUrl:(a,b)=>a===b,projectKey:url=>url.match(/g-p-[a-f0-9]{32}/)?.[0],state:async()=>snapshot};
   const fn=await new AsyncFunction(...Object.keys(params),observerCode+";return observeOperation;")(...Object.values(params));
   return {run:()=>fn({},"op"),get opened(){return opened;}};

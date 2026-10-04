@@ -863,7 +863,7 @@ async function observeOperation(reg, operationId, candidate=null) {
     page=await task.newPage();
     await page.goto(scope.url,{waitUntil:"domcontentloaded",timeout:20000});
   }
-  await waitForConversationReady(page,20000);
+  // Do not use waitForConversationReady: its load-error recovery can click Retry.
   await page.waitForFunction(()=>!!document.querySelector(
     '[data-message-author-role], [data-chatgpt-search-unit-key$=":user"], [data-chatgpt-search-unit-key$=":assistant"]'
   ),undefined,{timeout:15000});
