@@ -1228,7 +1228,7 @@ function captureNewConversationSource(before, after) {
     else if(temporaryConversationId(after.url) && temporaryConversationId(after.url)!==prior.temporaryId) conflict='SOURCE_CONVERSATION_CHANGED';
     else if(sameConversationUrl(after.url,after.url) && prior.persistentId && prior.persistentId!==convId(after.url)) conflict='PERSISTENT_CONVERSATION_CHANGED';
     else if(!source) {
-      gap=!condition || condition==='SOURCE_NOT_OBSERVED' || condition==='SOURCE_OWNER_NOT_FOUND';
+      gap=!condition || condition==='SOURCE_NOT_OBSERVED' || condition==='SOURCE_OWNER_NOT_FOUND' || condition==='UNOWNED_COPY_CONTROL';
       if(!gap) conflict='SOURCE_UNVERIFIED';
     } else if(source.messageId!==prior.messageId) conflict='SOURCE_MESSAGE_CHANGED';
     else if(source.text!==witness?.body) conflict='SOURCE_BODY_CHANGED';

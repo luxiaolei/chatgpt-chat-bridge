@@ -332,3 +332,58 @@ test('a different temporary CID observed during a source gap remains a conflict 
   assert.ok(f.trace.some(s=>s.url===permanent&&s.lastUserSource?.conversationId===temporary),'original source returned on the final permanent URL');
   assert.equal(f.sends,1);assert.equal(f.persisted.length,0);
 });
+
+test('qualified temporary anchor survives unavailable Copy ownership until complete owned source returns',async()=>{
+  const f=fixture(x=>x.onPoll=value=>{
+    value.copy.__reactFiber$fixture=value.polls===2?null:value.copyFrames[0];
+  });
+  let failure;
+  await inBrowser(f,async({runNew})=>{try{await runNew();}catch(error){failure=error;}});
+  const anchor=f.trace.find(s=>s.url===transient&&s.lastUserSource?.messageId===messageId);
+  const absent=f.trace.find(s=>s.url===permanent&&s.lastUserSource===null&&s.lastUserSourceCondition==='UNOWNED_COPY_CONTROL');
+  assert.ok(anchor,'qualified temporary source precedes unavailable Copy ownership');
+  assert.ok(absent,'actual state getter observed the unavailable Copy fiber');
+  assert.ok(f.trace.some(s=>s.url===permanent&&s.lastUserSourceCondition==='BOUND_SOURCE'&&s.lastUserSource?.text===request),'complete owned source returned');
+  if(failure)throw failure;
+  assert.equal(f.sends,1);assert.equal(f.persisted.length,1);
+  const binding=f.printed[0].delivery.nativeWitness.sourceBinding;
+  assert.equal(binding.temporaryObservedAt,anchor.observedAt);
+  assert.equal(binding.firstGap?.sourceCondition,'UNOWNED_COPY_CONTROL');
+  assert.equal(binding.firstGap?.observedAt,absent.observedAt);
+});
+
+test('a foreign Copy owner stays contradictory after complete direct source ownership returns',async()=>{
+  const f=fixture(x=>x.onPoll=value=>{
+    value.copyFrames[4].memoizedProps=value.polls===2?{messageId:'foreign-copy-owner'}:{};
+    if(value.polls>=3){value.source.conversationId=uuid;value.frames[10].memoizedProps.conversationId=uuid;}
+  });
+  await inBrowser(f,async({runNew})=>assert.rejects(runNew(),error=>{
+    assert.equal(error.nativeWitness.postSend.missingCondition,'NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT');
+    assert.equal(error.nativeWitness.postSend.temporarySourceFirstConflict?.reason,'SOURCE_UNVERIFIED');
+    assert.equal(error.nativeWitness.postSend.temporarySourceFirstConflict?.sourceCondition,'FOREIGN_COPY_OWNER');
+    return error.code==='DELIVERY_UNCONFIRMED';
+  }));
+  assert.ok(f.trace.some(s=>s.url===transient&&s.lastUserSource?.messageId===messageId),'qualified temporary source was observed');
+  assert.ok(f.trace.some(s=>s.lastUserSource===null&&s.lastUserSourceCondition==='FOREIGN_COPY_OWNER'),'actual foreign Copy owner was observed');
+  assert.ok(f.trace.some(s=>s.lastUserSource?.conversationId===uuid&&s.lastUserSource?.text===request),'later direct owned source was observed');
+  assert.equal(f.sends,1);assert.equal(f.persisted.length,0);
+});
+
+test('permanently unowned Copy source remains unconfirmed with or without an earlier qualified anchor',async()=>{
+  for(const missingAtStart of [false,true]){
+    const f=fixture(x=>x.onPoll=value=>{
+      value.copy.__reactFiber$fixture=missingAtStart||value.polls>=2?null:value.copyFrames[0];
+    });
+    await inBrowser(f,async({runNew})=>assert.rejects(runNew(),error=>{
+      assert.equal(error.nativeWitness.postSend.missingCondition,'NATIVE_SOURCE_MESSAGE_ID_MISSING');
+      assert.equal(error.nativeWitness.postSend.sourceCondition,'UNOWNED_COPY_CONTROL');
+      assert.equal(error.nativeWitness.postSend.temporarySourceProof,null);
+      assert.equal(error.nativeWitness.postSend.temporarySourceFirstConflict,null);
+      if(missingAtStart)assert.equal(error.nativeWitness.postSend.temporarySourceFirstGap,null);
+      else assert.equal(error.nativeWitness.postSend.temporarySourceFirstGap?.sourceCondition,'UNOWNED_COPY_CONTROL');
+      return error.code==='DELIVERY_UNCONFIRMED';
+    }));
+    assert.equal(f.trace.some(s=>s.url===transient&&s.lastUserSource?.messageId===messageId),!missingAtStart,'anchor requirement is unchanged');
+    assert.equal(f.sends,1);assert.equal(f.persisted.length,0);assert.deepEqual(f.reg.chats,{});
+  }
+});
