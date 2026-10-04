@@ -306,3 +306,13 @@ Conversation attachment compares the conversation ID, origin, and any available 
 Orphan cleanup does not create an idle-browser wakeup or bypass a cooling account. Cleanup inside a scan is scoped to the admitted account/Project and is not repeated by every per-task child. Terminal tab safety, active generations, drafts, user ownership, and UNKNOWN delivery reconciliation remain protected. This intentionally favors effective completed work over maximum open tabs.
 
 See `docs/local-reliability-20260929.md` for the repair evidence, limitations, and deployment gate.
+
+### Assistant observation and late reply correlation
+
+assistantMessageBinding is explicitly null in the current native adapter; assistantMessageBindingCondition is NATIVE_PARENT_ASSOCIATION_UNAVAILABLE (or ASSISTANT_NOT_OBSERVED without an assistant). The characterized message-bound Markdown source proves the observed assistant ID/conversation/text but supplies no reliable parent-user relation. DOM order, latest user, task metadata and model self-reports never create one. No private conversation endpoint is added.
+
+Reserved positive schema, not yet a supported positive capability: {format:"chatgpt-native-assistant-parent-v1",assistantId,parentUserMessageId,conversationId,account,assistantTextSha256,source}. A future extractor requires independently characterized native ancestry and exact same-assistant complete text, persistent conversation and account evidence. Missing/ambiguous ancestry stays null. Ordinary successful-send ACK handling is unchanged; late recovery consumers must fail closed per task when they need a parent association.
+
+ASSISTANT_RESPONSE_READY carries assistantTextSha256 (complete observed UTF-8 bytes), assistantTextSource, assistantTextTruncated, assistantTextUtf16Length, assistantTextUtf8Bytes and the same explicit null binding. The preview is bounded by serialized JSON bytes. If truncated, assistantTextRef={format,path,sha256} points to a content-addressed local JSON document retaining complete text and exact account/Project/session/assistant metadata. Verify reference digest and complete text hash before use; never execute a truncated preview as complete RPC. Text retention does not prove parentage or task authorization.
+
+Canonical conversation URLs with local-chatgpt:* native source remain rejected absent the existing authentic same-send temporary continuity proof. Equal body hashes/current URL cannot manufacture a historical alias anchor. This change does not repair lost historical receipts or introduce a new positive native alias mechanism.
