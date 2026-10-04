@@ -64,7 +64,41 @@
         rootController:event.rootController||null,
         data:event.data&&typeof event.data==="object"?event.data:{},
       };
-      const line=JSON.stringify(record);
+      let line=JSON.stringify(record);
+      if(Buffer.byteLength(line,"utf8")>262144 && type==="ASSISTANT_RESPONSE_READY" &&
+          typeof record.data.assistantText==="string") {
+        const text=record.data.assistantText;
+        const sha256=crypto.createHash("sha256").update(text,"utf8").digest("hex");
+        if(record.data.assistantTextSha256!==sha256 || record.data.assistantTextTruncated!==false)
+          throw new Error("complete assistant text evidence required");
+        // Preserve the old complete event when additive metadata alone exceeds its budget.
+        const legacyData={...record.data};
+        for(const key of ["assistantTextSha256","assistantTextTruncated","assistantTextUtf16Length",
+          "assistantTextUtf8Bytes","assistantTextRef","assistantTextSource","assistantMessageBinding",
+          "assistantMessageBindingCondition"]) delete legacyData[key];
+        const legacyLine=JSON.stringify({...record,data:legacyData});
+        if(Buffer.byteLength(legacyLine,"utf8")<=262144) {
+          record.data=legacyData;
+          line=legacyLine;
+        } else {
+          const document={format:"chat-bridge-assistant-text-v1",project,account,sessionId:record.sessionId,
+            assistantId:record.data.assistantId,assistantTextSource:record.data.assistantTextSource,
+            assistantTextSha256:sha256,text};
+          const bytes=JSON.stringify(document), digest=crypto.createHash("sha256").update(bytes,"utf8").digest("hex");
+          const directory=path.join(stateDir,"assistant-responses"), original=path.join(directory,digest+".json");
+          await fs.mkdir(directory,{recursive:true,mode:0o700});
+          try { await fs.writeFile(original,bytes,{encoding:"utf8",mode:0o600,flag:"wx"}); }
+          catch(error) {
+            if(error?.code!=="EEXIST" || await fs.readFile(original,"utf8")!==bytes) throw error;
+          }
+          // Old READY consumers must never receive a partial executable body.
+          record.type="ASSISTANT_RESPONSE_UNAVAILABLE";
+          record.data={...record.data,assistantText:null,assistantTextTruncated:true,
+            assistantTextRef:{format:document.format,path:original,sha256:digest},
+            sessionState:"RESPONSE_BODY_UNAVAILABLE",reason:"ASSISTANT_TEXT_EXCEEDS_EVENT_LIMIT"};
+          line=JSON.stringify(record);
+        }
+      }
       if(Buffer.byteLength(line,"utf8")>262144) throw new Error("event payload exceeds 256 KiB");
       await fs.appendFile(file,line+"\n",{encoding:"utf8",mode:0o600});
       try { await fs.chmod(file,0o600); } catch {}

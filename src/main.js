@@ -218,33 +218,10 @@ async function touchRuntime(project, patch={}) {
 
 async function assistantResponseEvidence(task, observed) {
   const text=String(observed.lastAssistant||"");
-  const sha256=crypto.createHash("sha256").update(text,"utf8").digest("hex");
-  // Bound serialized JSON bytes, including escapes and multibyte text.
-  let low=0, high=text.length;
-  while(low<high) {
-    const middle=Math.ceil((low+high)/2);
-    if(Buffer.byteLength(JSON.stringify(text.slice(0,middle)),"utf8")<=131072) low=middle;
-    else high=middle-1;
-  }
-  if(low<text.length && /[\uD800-\uDBFF]/.test(text[low-1]||"")) low--;
-  const truncated=low<text.length;
-  let reference=null;
-  if(truncated) {
-    const document={format:"chat-bridge-assistant-text-v1",project:task.project,account:task.account,
-      sessionId:task.sessionId,assistantId:observed.lastAssistantId,
-      assistantTextSource:observed.lastAssistantTextSource||"rendered-dom",assistantTextSha256:sha256,text};
-    const bytes=JSON.stringify(document), digest=crypto.createHash("sha256").update(bytes,"utf8").digest("hex");
-    const directory=pathMod.join(STATE_DIR,"assistant-responses"), file=pathMod.join(directory,digest+".json");
-    await fs.mkdir(directory,{recursive:true,mode:0o700});
-    try { await fs.writeFile(file,bytes,{encoding:"utf8",mode:0o600,flag:"wx"}); }
-    catch(error) {
-      if(error?.code!=="EEXIST" || await fs.readFile(file,"utf8")!==bytes) throw error;
-    }
-    reference={format:document.format,path:file,sha256:digest};
-  }
-  return {assistantId:observed.lastAssistantId,assistantText:text.slice(0,low),
-    assistantTextSha256:sha256,assistantTextTruncated:truncated,assistantTextUtf16Length:text.length,
-    assistantTextUtf8Bytes:Buffer.byteLength(text,"utf8"),assistantTextRef:reference,
+  return {assistantId:observed.lastAssistantId,assistantText:text,
+    assistantTextSha256:crypto.createHash("sha256").update(text,"utf8").digest("hex"),
+    assistantTextTruncated:false,assistantTextUtf16Length:text.length,
+    assistantTextUtf8Bytes:Buffer.byteLength(text,"utf8"),assistantTextRef:null,
     assistantTextSource:observed.lastAssistantTextSource||"rendered-dom",
     // Current characterized source proves message/text identity, not native ancestry.
     assistantMessageBinding:null,assistantMessageBindingCondition:"NATIVE_PARENT_ASSOCIATION_UNAVAILABLE"};
