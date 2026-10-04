@@ -63,17 +63,22 @@ with tempfile.TemporaryDirectory() as root:
         db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(reg),));db.commit()
     if case=="pending":
         db.execute("UPDATE logical_sessions SET pending_session_ref=?",(candidate,));db.commit()
+    if case in {"prior-cid","prior-user"}:
+        prior={"nativeWitness":witness}
+        if case=="prior-cid":prior["newSession"]={"observedConversationId":sid}
+        else:witness["postSend"]={"sourceMessageId":sid}
+        db.execute("UPDATE operations SET result=? WHERE id=?",(json.dumps(prior),op));db.commit()
     before="\n".join(db.iterdump())
     payload={"operationId":op,"candidate":candidate}
     negative=case in {"wrong-login","wrong-project","wrong-cid","wrong-uid","temporary","wrong-body","missing","duplicate",
-                     "stale-observation","wrong-handoff","wrong-witness","wrong-epoch","occupied","pending"}
+                     "stale-observation","wrong-handoff","wrong-witness","wrong-epoch","occupied","pending","prior-cid","prior-user"}
     if negative:
         try:c.rotation_recover(db,payload);raise AssertionError("accepted invalid evidence")
         except ValueError as e:
             expected={"wrong-login":"IDENTITY_MISMATCH","wrong-project":"IDENTITY_MISMATCH","wrong-cid":"IDENTITY_MISMATCH",
                       "wrong-uid":"SOURCE_IDENTITY","temporary":"SOURCE_IDENTITY","wrong-body":"NOT_UNIQUE","missing":"NOT_UNIQUE",
                       "duplicate":"NOT_UNIQUE","stale-observation":"TIME_INVALID","wrong-handoff":"HANDOFF_MISMATCH",
-                      "wrong-witness":"WITNESS_MISMATCH","wrong-epoch":"HANDOFF_MISMATCH","occupied":"OCCUPIED","pending":"LOGICAL_MISMATCH"}[case]
+                      "prior-cid":"PRIOR_IDENTITY_CONFLICT","prior-user":"PRIOR_IDENTITY_CONFLICT","wrong-witness":"WITNESS_MISMATCH","wrong-epoch":"HANDOFF_MISMATCH","occupied":"OCCUPIED","pending":"LOGICAL_MISMATCH"}[case]
             assert expected in str(e), str(e)
         assert "\n".join(db.iterdump())==before
     elif case=="observation-race":
@@ -130,7 +135,7 @@ with tempfile.TemporaryDirectory() as root:
     db.close()
 `;
 
-for(const name of ["success","draft","wrong-login","wrong-project","wrong-cid","wrong-uid","temporary","wrong-body","missing","duplicate","stale-observation","wrong-handoff","wrong-witness","wrong-epoch","occupied","pending","observation-race","stale-preview","cas-race","missing-task-observe"]) {
+for(const name of ["success","draft","wrong-login","wrong-project","wrong-cid","wrong-uid","temporary","wrong-body","missing","duplicate","stale-observation","wrong-handoff","wrong-witness","wrong-epoch","occupied","pending","observation-race","stale-preview","cas-race","missing-task-observe","prior-cid","prior-user"]) {
   test("existing rotation / operation observation: "+name,()=>{
     const env={...process.env,PYTHONDONTWRITEBYTECODE:"1"};
     delete env.CHAT_BRIDGE_FROM_ACCOUNT_ID;delete env.CHAT_BRIDGE_FROM_SPACE;delete env.CODEX_THREAD_ID;

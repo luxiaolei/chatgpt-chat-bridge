@@ -2783,9 +2783,14 @@ def rotation_recover(db, payload):
     nonce_header = "\n".join(row["message"].split("\n")[:5]) + "\n\n"
     if not matches[0]["text"].startswith(nonce_header):
         raise ValueError("ROTATION_RECOVERY_SOURCE_NONCE_MISMATCH")
-    prior_cid = (previous.get("uncertainNewSession") or {}).get("observedConversationId")
-    if ((witness.get("messageId") and witness["messageId"] != matches[0]["messageId"])
-            or (prior_cid and prior_cid != candidate)):
+    prior_cid = (previous.get("newSession") or {}).get("observedConversationId")
+    post = witness.get("postSend") or {}
+    post_url = post.get("afterUrl") or ""
+    post_cid = (re.search(r"/c/([^/?#]+)", post_url) or [None,None])[1]
+    prior_message_ids = [witness.get("messageId"),post.get("lastUserId"),post.get("sourceMessageId")]
+    if (any(value and value != matches[0]["messageId"] for value in prior_message_ids)
+            or (prior_cid and prior_cid != candidate) or (post_cid and post_cid != candidate)
+            or (post.get("sourceBodyHash") and post["sourceBodyHash"] != witness["bodyHash"])):
         raise ValueError("ROTATION_RECOVERY_PRIOR_IDENTITY_CONFLICT")
     try:
         observed_at = datetime.fromisoformat(evidence["observedAt"].replace("Z","+00:00"))
