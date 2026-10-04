@@ -2695,6 +2695,38 @@ def observation_context(db, operation_id, candidate=None):
             "url":"https://chatgpt.com/g/" + project_id + "/c/" + session, "anchor":anchor}
 
 
+
+class OperationObservationError(ValueError):
+    """Read-only failure receipt; never changes the original delivery outcome."""
+    def __init__(self, operation_id, completed=None, error=None):
+        returncode = completed.returncode if completed is not None else None
+        stdout = completed.stdout if completed is not None else getattr(error, "output", None)
+        stderr = completed.stderr if completed is not None else getattr(error, "stderr", None)
+        receipt = parse_worker_receipt(completed) if completed is not None else None
+        receipt = receipt if receipt and receipt.get("ok") is False else None
+        code = (receipt or {}).get("code") or "OPERATION_OBSERVATION_UNAVAILABLE"
+        deferred = (error is None and returncode == 75 and receipt
+                    and receipt.get("deliveryStage") == "PRE_SEND"
+                    and code in {"PACING_DEFERRED", "WEB_COOLDOWN_ACTIVE"})
+        identity = code in {"OPERATION_OBSERVATION_LOGIN_MISMATCH", "OPERATION_OBSERVATION_ORIGIN_MISMATCH",
+                            "OPERATION_OBSERVATION_ROUTE_MISMATCH", "OPERATION_OBSERVATION_ACCOUNT_CONFLICT",
+                            "OPERATION_OBSERVATION_CONVERSATION_MISMATCH", "OPERATION_OBSERVATION_CONVERSATION_CHANGED"}
+        diagnostic = worker_diagnostic(returncode, stderr, "operation-evidence", error=error, stdout=stdout)["worker"]
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        diagnostic["stdoutTail"] = (stdout or "")[-2048:]
+        if error is not None:
+            diagnostic["errorType"] = type(error).__name__
+        self.detail = {"ok":False, "code":code, "operationId":operation_id, "deliveryStatus":"DELIVERY_UNKNOWN",
+                       "retryOriginalOperation":False,
+                       "observation":{"outcome":"DEFERRED" if deferred else "IDENTITY_REJECTED" if identity else "UNKNOWN",
+                                      "receipt":receipt, "worker":diagnostic}}
+        if deferred:
+            self.detail["readDeferred"] = {key:receipt[key] for key in ("code","status","reason","retryAfterSec","until") if key in receipt}
+        self.exit_code = 75 if deferred else 2
+        super().__init__(code)
+
+
 def observe_operation(db, operation_id, candidate=None):
     context = observation_context(db, operation_id, candidate)
     bridge = os.environ.get("CHAT_BRIDGE_BIN") or str(pathlib.Path.home() / ".local/bin/chat-bridge")
@@ -2702,10 +2734,13 @@ def observe_operation(db, operation_id, candidate=None):
                "--project", context["project"], "--account", context["account"], "--background"]
     if candidate:
         command += ["--candidate", candidate]
-    completed = run_bridge(command)
+    try:
+        completed = run_bridge(command)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise OperationObservationError(operation_id, error=error) from error
     evidence = parse_worker_receipt(completed) if completed.returncode == 0 else None
-    if not evidence:
-        raise ValueError("OPERATION_OBSERVATION_UNAVAILABLE")
+    if not evidence or evidence.get("ok") is not True:
+        raise OperationObservationError(operation_id, completed=completed)
     latest = observation_context(db, operation_id, candidate)
     if latest["anchor"] != context["anchor"] or evidence.get("anchor") != context["anchor"]:
         raise ValueError("OPERATION_CHANGED_DURING_OBSERVATION")
@@ -2716,6 +2751,22 @@ def observe_operation(db, operation_id, candidate=None):
             or evidence.get("messageSent") is not False):
         raise ValueError("OPERATION_OBSERVATION_IDENTITY_MISMATCH")
     return evidence
+
+
+def assert_rotation_candidate_free(db, row, candidate, reg):
+    operation_id = row["id"]
+    competing = [chat for chat in (reg.get("chats") or {}).values()
+                 if chat.get("project") == row["project"] and chat.get("role") == row["role"]
+                 and (chat.get("workgroupId") or None) == row["workgroup_id"]
+                 and chat.get("status","active") == "active" and chat.get("id") != row["caller_ref"]]
+    if competing or db.execute("SELECT count(*) FROM operations WHERE rotation_id=?", (row["rotation_id"],)).fetchone()[0] != 1:
+        raise ValueError("ROTATION_RECOVERY_COMPETING_ROLE_OR_OPERATION")
+    if db.execute("SELECT 1 FROM operations WHERE session_ref=? AND id<>?", (candidate,operation_id)).fetchone():
+        raise ValueError("ROTATION_RECOVERY_CANDIDATE_OCCUPIED")
+    if candidate == row["caller_ref"] or candidate in (reg.get("chats") or {}):
+        raise ValueError("ROTATION_RECOVERY_CANDIDATE_OCCUPIED")
+    if db.execute("SELECT 1 FROM logical_sessions WHERE current_session_ref=? OR pending_session_ref=?", (candidate,candidate)).fetchone():
+        raise ValueError("ROTATION_RECOVERY_CANDIDATE_OCCUPIED")
 
 
 def rotation_recover(db, payload):
@@ -2736,18 +2787,7 @@ def rotation_recover(db, payload):
             or (predecessor.get("workgroupId") or None) != row["workgroup_id"]
             or current_controller_ref(db, reg, row["project"], row["role"], row["workgroup_id"]) != row["caller_ref"]):
         raise ValueError("ROTATION_RECOVERY_LOGICAL_MISMATCH")
-    competing = [chat for chat in (reg.get("chats") or {}).values()
-                 if chat.get("project") == row["project"] and chat.get("role") == row["role"]
-                 and (chat.get("workgroupId") or None) == row["workgroup_id"]
-                 and chat.get("status","active") == "active" and chat.get("id") != row["caller_ref"]]
-    if competing or db.execute("SELECT count(*) FROM operations WHERE rotation_id=?", (row["rotation_id"],)).fetchone()[0] != 1:
-        raise ValueError("ROTATION_RECOVERY_COMPETING_ROLE_OR_OPERATION")
-    if db.execute("SELECT 1 FROM operations WHERE session_ref=? AND id<>?", (candidate,operation_id)).fetchone():
-        raise ValueError("ROTATION_RECOVERY_CANDIDATE_OCCUPIED")
-    if candidate == row["caller_ref"] or candidate in (reg.get("chats") or {}):
-        raise ValueError("ROTATION_RECOVERY_CANDIDATE_OCCUPIED")
-    if db.execute("SELECT 1 FROM logical_sessions WHERE current_session_ref=? OR pending_session_ref=?", (candidate,candidate)).fetchone():
-        raise ValueError("ROTATION_RECOVERY_CANDIDATE_OCCUPIED")
+    assert_rotation_candidate_free(db, row, candidate, reg)
     handoff = row["original_message"] or ""
     body_hash = hashlib.sha256(handoff.encode()).hexdigest()
     envelope = "\n".join(["[CHATBRIDGE ROLE HANDOFF v1]", "rotation_id: "+row["rotation_id"],
@@ -2775,6 +2815,9 @@ def rotation_recover(db, payload):
     except (KeyError, TypeError, ValueError):
         raise ValueError("ROTATION_RECOVERY_WITNESS_TIME_INVALID")
     evidence = observe_operation(db, operation_id, candidate)
+    if (evidence.get("online") is not True or evidence.get("pageWasDiscarded") is not False
+            or evidence.get("recoveryRequired") is not False or evidence.get("errorTexts") != []):
+        raise ValueError("ROTATION_RECOVERY_OBSERVATION_UNHEALTHY")
     matches = []
     for item in evidence.get("userMessages") or []:
         source = item.get("userSource") or {}
@@ -2798,7 +2841,10 @@ def rotation_recover(db, payload):
     prior_message_ids = [witness.get("messageId"),post.get("lastUserId"),post.get("sourceMessageId")]
     if (any(value and value != matches[0]["messageId"] for value in prior_message_ids)
             or (prior_cid and prior_cid != candidate) or (post_cid and post_cid != candidate)
-            or (post.get("sourceBodyHash") and post["sourceBodyHash"] != witness["bodyHash"])):
+            or (post.get("sourceBodyHash") and post["sourceBodyHash"] != witness["bodyHash"])
+            or (post.get("sourceConversationId") and post["sourceConversationId"] != candidate)
+            or post.get("temporarySourceFirstConflict") is not None
+            or post.get("missingCondition") == "NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT"):
         raise ValueError("ROTATION_RECOVERY_PRIOR_IDENTITY_CONFLICT")
     try:
         observed_at = datetime.fromisoformat(evidence["observedAt"].replace("Z","+00:00"))
@@ -2828,6 +2874,8 @@ def rotation_recover(db, payload):
         if (not current_logical or dict(current_logical) != dict(logical)
                 or observation_context(db, operation_id, candidate)["anchor"] != context["anchor"]):
             raise ValueError("ROTATION_RECOVERY_CAS_CHANGED")
+        # Recheck cross-row ownership under the same write lock as the binding.
+        assert_rotation_candidate_free(db, row, candidate, registry(db))
         now = stamp()
         next_reg = json.loads(json.dumps(reg))
         next_reg.setdefault("chats",{})[candidate] = {
@@ -4327,6 +4375,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except OperationObservationError as error:
+        print(json.dumps(error.detail, ensure_ascii=False), file=sys.stderr)
+        raise SystemExit(error.exit_code)
     except (ValueError, KeyError, sqlite3.Error) as error:
         print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False), file=sys.stderr)
         raise SystemExit(2)

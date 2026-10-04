@@ -886,6 +886,9 @@ async function observeOperation(reg, operationId, candidate=null) {
     project:scope.project,account:scope.account,accountId:scope.accountId,sessionRef:scope.sessionRef,
     anchor:scope.anchor,url:snapshot.url,observedAt:snapshot.observedAt,messageSent:false,
     userMessages:snapshot.userMessages,generating:snapshot.generating,draftChars:snapshot.composerText.length,
+    online:snapshot.online??null,errorTexts:snapshot.errorTexts??null,recoveryControls:snapshot.recoveryControls??null,
+    recoveryRequired:recoveryRequired(snapshot),pageWasDiscarded:snapshot.pageWasDiscarded??null,
+    freshness:"LOCAL_UI_SAMPLE_NOT_SERVER_DELIVERY_TIME",
     lastAssistantId:snapshot.lastAssistantId,lastAssistant:snapshot.lastAssistant,
     lastAssistantTextSource:snapshot.lastAssistantTextSource,
     messageCount:snapshot.messageCount,readOnly:true};

@@ -116,6 +116,7 @@ async function operationFixture(change={}) {
     binding:{spaceName:"chat-bridge-agent-a",profileId:"Profile 1"}};
   let contextReads=0, opened=0;
   const snapshot={url:scope.url,observedAt:new Date().toISOString(),userMessages:[],composerText:"untouched draft",
+    online:false,errorTexts:["Network error"],recoveryControls:[{label:"Retry",disabled:false}],pageWasDiscarded:false,
     generating:true,lastAssistantId:"assistant",lastAssistant:"body",messageCount:2};
   const page={label:"p1",url:async()=>change.url||scope.url,waitForFunction:async()=>{},
     evaluate:async()=>change.login||"login",goto:async()=>opened++};
@@ -124,13 +125,15 @@ async function operationFixture(change={}) {
     loadRuntime:async()=>({tasks:change.paused?{x:{sessionId:cid,watchdogPausedForUserControl:true}}:{},sessions:{}}),
     assertWebAvailable:async()=>{},taskSpace:async()=>({spaceId:1,tabs:async()=>[{label:"p1",url:scope.url,openedBy:"agent"}],page:()=>page,newPage:async()=>{throw Error("unexpected allocation");}}),
     taskAccounts:new Map(),accountScope:()=>scope.accountId,waitForConversationReady:async()=>{throw Error("read-only observer must never run retry-capable readiness");},
-    sameConversationUrl:(a,b)=>a===b,projectKey:url=>url.match(/g-p-[a-f0-9]{32}/)?.[0],state:async()=>snapshot};
+    recoveryRequired:()=>true,sameConversationUrl:(a,b)=>a===b,projectKey:url=>url.match(/g-p-[a-f0-9]{32}/)?.[0],state:async()=>snapshot};
   const fn=await new AsyncFunction(...Object.keys(params),observerCode+";return observeOperation;")(...Object.values(params));
   return {run:()=>fn({},"op"),get opened(){return opened;}};
 }
 test("operation observer reads existing conversation without runtime task, send or draft changes",async()=>{
   const f=await operationFixture(), result=await f.run();
   assert.equal(result.messageSent,false);assert.equal(result.draftChars,15);
+  assert.equal(result.online,false);assert.deepEqual(result.errorTexts,["Network error"]);assert.equal(result.recoveryRequired,true);
+  assert.deepEqual(result.recoveryControls,[{label:"Retry",disabled:false}]);
   assert.equal(result.generating,true);assert.equal(result.readOnly,true);assert.equal(f.opened,0);
 });
 test("operation observer rejects wrong login, URL, user Space, pause and changed anchor",async()=>{
