@@ -15,6 +15,7 @@ const cases = [
   'dispatch-unstructured-diagnostic', 'dispatch-timeout-unknown',
   'evidence-timeout-unknown', 'task-record-timeout', 'task-record-unstructured',
   'structured-receipt-preserved',
+  'private-pre-send-traceback', 'private-pre-send-retry', 'private-pre-send-exhausted', 'private-pre-send-stdout',
 ];
 for (const name of cases) {
   test(`owned subprocess lifecycle: ${name}`, () => {

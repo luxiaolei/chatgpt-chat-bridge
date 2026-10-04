@@ -2823,11 +2823,14 @@ def work_one(db):
         return finish(db, row, "QUEUED", reason, 30)
     if completed.returncode:
         if receipt and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("ok") is False:
+            diagnostic = worker_diagnostic(completed.returncode, completed.stderr, "dispatch", stdout=completed.stdout)
             retry_after = pre_send_retry_after(row, receipt)
             if retry_after is not None:
                 code = str(receipt.get("code") or "ERROR")[:200]
-                return finish(db, row, "QUEUED", f"PRE_SEND_RETRY_{row['pre_send_failures'] + 1}_{code}", retry_after, pre_send_failure=True)
-            return finish(db, row, "FAILED_PRE_SEND", "PRE_SEND_" + str(receipt.get("code") or "ERROR")[:200], pre_send_failure=True)
+                return finish(db, row, "QUEUED", f"PRE_SEND_RETRY_{row['pre_send_failures'] + 1}_{code}", retry_after,
+                              result=diagnostic, pre_send_failure=True)
+            return finish(db, row, "FAILED_PRE_SEND", "PRE_SEND_" + str(receipt.get("code") or "ERROR")[:200],
+                          result=diagnostic, pre_send_failure=True)
         if receipt and receipt.get("deliveryStage") == "SEND_ATTEMPTED":
             return finish(db, row, "DELIVERY_UNKNOWN", "SEND_ATTEMPTED_" + str(receipt.get("code") or "ERROR")[:200],
                           result={"nativeWitness": receipt.get("nativeWitness")} if receipt.get("nativeWitness") else None)
