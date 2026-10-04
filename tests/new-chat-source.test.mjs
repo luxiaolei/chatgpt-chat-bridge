@@ -311,3 +311,24 @@ test('a different permanent CID observed during a source gap is never adopted af
   assert.ok(f.trace.some(s=>s.url===permanent&&s.lastUserSource===null&&s.lastUserId===null),'the first permanent CID was observed during a real source gap');
   assert.equal(f.sends,1);assert.equal(f.persisted.length,0);
 });
+
+test('a different temporary CID observed during a source gap remains a conflict after recovery',async()=>{
+  const other='local-chatgpt:66666666-6666-4666-8666-666666666666';
+  const changed=transient.replace(encodeURIComponent(temporary),encodeURIComponent(other));
+  const f=fixture(x=>{
+    const query=x.document.querySelectorAll;
+    x.document.querySelectorAll=selector=>x.polls===2&&
+      (selector.includes('[data-chatgpt-search-unit-key')||selector.includes('[data-content-search-unit-key'))?[]:query(selector);
+    x.onPoll=value=>{if(value.polls===2)value.url=changed;};
+  });
+  await inBrowser(f,async({runNew})=>assert.rejects(runNew(),error=>{
+    assert.equal(error.nativeWitness.postSend.missingCondition,'NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT');
+    assert.equal(error.nativeWitness.postSend.temporarySourceFirstConflict?.reason,'SOURCE_CONVERSATION_CHANGED');
+    assert.equal(error.nativeWitness.postSend.temporarySourceFirstConflict?.url,changed);
+    return error.code==='DELIVERY_UNCONFIRMED';
+  }));
+  assert.ok(f.trace.some(s=>s.url===transient&&s.lastUserSource?.messageId===messageId),'qualified original temporary source was observed');
+  assert.ok(f.trace.some(s=>s.url===changed&&s.lastUserSource===null&&s.lastUserId===null),'different temporary URL was observed during a real source gap');
+  assert.ok(f.trace.some(s=>s.url===permanent&&s.lastUserSource?.conversationId===temporary),'original source returned on the final permanent URL');
+  assert.equal(f.sends,1);assert.equal(f.persisted.length,0);
+});

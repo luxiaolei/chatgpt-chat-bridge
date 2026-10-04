@@ -1225,6 +1225,7 @@ function captureNewConversationSource(before, after) {
     const condition=after?.lastUserSourceCondition;
     if(!newConversationProjectMatches(before,after)) conflict='PROJECT_OR_URL_CHANGED';
     else if(after.lastUserId && after.lastUserId!==prior.messageId) conflict='RENDERED_MESSAGE_CHANGED';
+    else if(temporaryConversationId(after.url) && temporaryConversationId(after.url)!==prior.temporaryId) conflict='SOURCE_CONVERSATION_CHANGED';
     else if(sameConversationUrl(after.url,after.url) && prior.persistentId && prior.persistentId!==convId(after.url)) conflict='PERSISTENT_CONVERSATION_CHANGED';
     else if(!source) {
       gap=!condition || condition==='SOURCE_NOT_OBSERVED' || condition==='SOURCE_OWNER_NOT_FOUND';
