@@ -376,6 +376,10 @@ def response(row):
                 result[key] = receipt[key]
     if "routing_advice" in row.keys() and row["routing_advice"]:
         result["routingAdvice"] = json.loads(row["routing_advice"])
+    if row["result"]:
+        candidate = (json.loads(row["result"]) or {}).get("newSession")
+        if isinstance(candidate, dict) and candidate.get("format") == "uncertain-new-session-v1":
+            result["uncertainNewSession"] = candidate
     return result
 
 
@@ -715,6 +719,16 @@ def submit(db, payload):
                                      (placement_key,)).fetchone()
             if reservation:
                 raise ValueError("ROLE_PLACEMENT_RESERVED:" + reservation["id"])
+            uncertain = db.execute("""SELECT id,task_id,result FROM operations WHERE placement_key=? AND kind='dispatch'
+                                      AND session_ref IS NULL AND status='DELIVERY_UNKNOWN'""", (placement_key,)).fetchall()
+            for prior in uncertain:
+                candidate = (json.loads(prior["result"] or "{}") or {}).get("newSession") or {}
+                if candidate.get("format") != "uncertain-new-session-v1":
+                    continue  # Historical UNKNOWN receipts are never backfilled or reclassified.
+                accepted = db.execute("""SELECT acceptance_status FROM task_results WHERE task_id=?
+                                         ORDER BY recorded_at DESC,event_id DESC LIMIT 1""", (prior["task_id"],)).fetchone()
+                if not accepted or accepted["acceptance_status"] != "ACCEPTED":
+                    raise ValueError("ROLE_CREATION_UNCONFIRMED:" + prior["id"])
 
         bindings = project_record.get("bindings") or {}
         accounts = reg.get("accounts") or {}
@@ -2439,9 +2453,45 @@ def claim(db):
         raise
 
 
+def uncertain_new_session(db, row, result):
+    """Keep creation evidence on its operation; it is never a routing session."""
+    witness = (result or {}).get("nativeWitness") or {}
+    post = witness.get("postSend") or {}
+    reg = registry(db)
+    identity = ((reg.get("accounts") or {}).get(row["account_alias"]) or {}).get("identity")
+    binding = ((reg.get("projects") or {}).get(row["project"]) or {}).get("bindings", {}).get(row["account_alias"]) or {}
+    project_key = lambda value: (re.search(r"g-p-[0-9a-f]{32}", str(value or ""), re.I) or [None])[0]
+    project = project_key(binding.get("projectId") or binding.get("projectUrl"))
+    observed = re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/c/([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})/?", str(post.get("afterUrl") or ""), re.I)
+    scoped = bool(identity and account_id(identity) == row["account_id"] and project and observed
+                  and observed[1].lower() == project.lower()
+                  and project_key(post.get("targetUrl")) == project_key(binding.get("projectUrl")))
+    safe_id = lambda value: value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value, re.I) else None
+    safe_hash = lambda value: value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value, re.I) else None
+    context = post.get("newSessionContext") or {}
+    return {"format": "uncertain-new-session-v1", "operationId": row["id"], "taskId": row["task_id"],
+            "requestKey": row["request_key"], "payloadHash": row["payload_hash"],
+            "messageSha256": hashlib.sha256(row["message"].encode()).hexdigest(),
+            "project": row["project"], "account": row["account_alias"], "accountId": row["account_id"],
+            "callerRef": row["caller_ref"], "role": row["role"], "workgroupId": row["workgroup_id"],
+            "affinityKey": row["affinity_key"], "requestedModel": row["requested_model"], "requestedEffort": row["requested_effort"],
+            "observedConversationId": observed[2] if scoped else None, "observedUrl": post.get("afterUrl") if scoped else None,
+            "lastUserId": safe_id(post.get("lastUserId")), "sourceMessageId": safe_id(post.get("sourceMessageId")),
+            "nativeBodyHash": safe_hash(witness.get("bodyHash")), "sourceBodyHash": safe_hash(post.get("sourceBodyHash")),
+            "observedAt": post.get("observedAt") if isinstance(post.get("observedAt"), str) and len(post["observedAt"]) <= 40 else None,
+            "page": context.get("page") if isinstance(context.get("page"), str) and re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", context["page"]) else None,
+            "spaceId": context.get("spaceId") if type(context.get("spaceId")) is int else None,
+            "preSendIdentityVerified": bool(identity and account_id(identity) == row["account_id"] and witness.get("accountIdentityHash") == hashlib.sha256(identity.encode()).hexdigest()),
+            "postSendIdentityVerified": False, "deliveryConfirmed": False, "routable": False,
+            "capturedAt": stamp()}
+
+
 def finish(db, row, status, reason=None, retry_after=0, result=None, session_ref=None, pre_send_failure=False):
     begin_immediate(db)
     try:
+        if status == 'DELIVERY_UNKNOWN' and row['kind'] in {'dispatch', 'rotation'} and not row['session_ref'] and not session_ref:
+            result = dict(result or {})
+            result['newSession'] = uncertain_new_session(db, row, result)
         db.execute("""UPDATE operations SET status=?,reason=?,not_before=?,updated_at=?,result=?,session_ref=coalesce(?,session_ref),claimed_at=NULL,
                       pre_send_failures=pre_send_failures+?
                       WHERE id=? AND status='DISPATCHING'""",
