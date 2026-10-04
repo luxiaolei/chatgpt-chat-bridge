@@ -215,6 +215,18 @@ async function touchRuntime(project, patch={}) {
   await saveRuntime(rt); return rt;
 }
 
+
+async function assistantResponseEvidence(task, observed) {
+  const text=String(observed.lastAssistant||"");
+  return {assistantId:observed.lastAssistantId,assistantText:text,
+    assistantTextSha256:crypto.createHash("sha256").update(text,"utf8").digest("hex"),
+    assistantTextTruncated:false,assistantTextUtf16Length:text.length,
+    assistantTextUtf8Bytes:Buffer.byteLength(text,"utf8"),assistantTextRef:null,
+    assistantTextSource:observed.lastAssistantTextSource||"rendered-dom",
+    // Current characterized source proves message/text identity, not native ancestry.
+    assistantMessageBinding:null,assistantMessageBindingCondition:"NATIVE_PARENT_ASSOCIATION_UNAVAILABLE"};
+}
+
 async function emitTaskEvent(task, type, data={}) {
   if(!task?.project) return null;
   const account=task.account||DEFAULT_ACCOUNT;
@@ -1186,6 +1198,8 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       online:navigator.onLine,visibility:document.visibilityState,pageWasDiscarded:!!document.wasDiscarded,
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,
       lastAssistantTextSource:lastAssistantMsg?.textSource||'rendered-dom',
+      assistantMessageBinding:null,
+      assistantMessageBindingCondition:lastAssistantMsg?'NATIVE_PARENT_ASSOCIATION_UNAVAILABLE':'ASSISTANT_NOT_OBSERVED',
       lastUserSource:includeUserMessages?lastUserMsg?.userSource||null:null,
       lastUserSourceCondition:includeUserMessages?userSourceConditions.get(lastUserMsg?.id)||'SOURCE_NOT_OBSERVED':null,
       userMessages:includeUserMessages===true?ms.filter(x=>x.role==='user'):undefined,
@@ -2917,8 +2931,7 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
           live.watchdogResultNotification=null;
           if(observed.lastAssistantId && live.externalEventAssistantId!==observed.lastAssistantId) {
             const event=await emitTaskEvent(live,"ASSISTANT_RESPONSE_READY",{
-              assistantId:observed.lastAssistantId,
-              assistantText:String(observed.lastAssistant||"").slice(0,131072),
+              ...await assistantResponseEvidence(live,observed),
               sessionState:observed.sessionState,
               recommendation:observed.recommendation||null,
               lastProgressAt:observed.lastProgressAt||null,
