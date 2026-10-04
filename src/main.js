@@ -541,7 +541,7 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     const tab=tabs.find(item=>item.label===candidate.page);
     if(!tab || tab.active || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
+    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
     const oldPage=candidate.page;
     if(imageSessionOccupancy(reg,candidate).occupied) continue;
     try { await page.close(); }
@@ -593,7 +593,7 @@ async function reclaimOrphanManagedPage(reg, task, binding) {
   });
   for(const page of candidates) {
     const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
+    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
     try {
       await page.close();
       return {page:page.label,reason:"orphan-managed"};
@@ -712,10 +712,14 @@ async function recoverConversationLoadError(page) {
     return {loadError:true,count:buttons.length};
   }).catch(()=>({loadError:false,count:0}));
   if(!marked.loadError || marked.count!==1) return false;
+  if((await state(page,false,"approval")).approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
   try {
     await page.focus('[data-chat-bridge-conversation-retry="1"]');
+    if((await state(page,false,"approval")).approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
     await page.keyboard.press("Enter");
-  } catch {
+  } catch(error) {
+    if(error?.message==="APPROVAL_REQUIRED") throw error;
+    if((await state(page,false,"approval")).approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
     try { await page.click('[data-chat-bridge-conversation-retry="1"]'); }
     catch { return false; }
   }
@@ -728,6 +732,8 @@ async function waitForConversationReady(page, timeout=15000) {
   let loadRetries=0;
   while(Date.now()<deadline) {
     await detectWebRateLimit(page,"conversation-ready");
+    const snapshot=await state(page).catch(()=>null);
+    if(snapshot?.approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
     const ok=await page.waitForSelector(COMPOSER_SELECTOR,{state:"visible",timeout:1000})
       .then(()=>true).catch(()=>false);
     if(ok && await page.evaluate(()=>[...document.querySelectorAll(
@@ -781,7 +787,8 @@ async function openConversationFromProject(page, binding, projectName, chatId) {
   try {
     await page.waitForFunction((chatId)=>location.pathname.includes("/c/"+chatId),chatId,{timeout:12000});
     await waitForConversationReady(page,20000);
-  } catch {
+  } catch(error) {
+    if(error?.message==="APPROVAL_REQUIRED") throw error;
     return false;
   }
   return (await page.url()).includes("/c/"+chatId);
@@ -930,7 +937,7 @@ async function ensurePage(reg, chat, options={}) {
     attached=sameConversationUrl(await page.url(),chat.url);
   } catch(error) {
     // A same-conversation tab may still have a live stream or tool call.
-    if(!allocated) throw error;
+    if(!allocated || error?.message==="APPROVAL_REQUIRED") throw error;
   }
   if(!attached && allocated) attached=await openConversationFromProject(page,binding,chat.project,chat.id);
   if(!attached) {
@@ -973,7 +980,7 @@ async function expandEvidenceMessages(page, latestOnly=false) {
 }
 
 async function state(page, includeUserMessages=false, controlAction=null) {
-  return await page.evaluate(({includeUserMessages,controlAction}) => {
+  const snapshot=await page.evaluate(({includeUserMessages,controlAction}) => {
     const root=document.querySelector('main') || document.querySelector('[role="main"]') || document.body;
     const messageSelector='[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]';
     if(!globalThis.__CHAT_BRIDGE_WATCH || globalThis.__CHAT_BRIDGE_WATCH.root!==root) {
@@ -1152,6 +1159,13 @@ async function state(page, includeUserMessages=false, controlAction=null) {
     const recoveryWords=["continue generating","try again","retry","regenerate"];
     const recoverableButtons=buttons.filter(currentUi).filter(b=>recoveryWords.some(k=>norm(b).toLowerCase().includes(k)));
     const recoveryControls=recoverableButtons.map(b=>({label:norm(b),disabled:false}));
+    // The captured Codex Tasks permission card came through this alert/error UI query.
+    // Require its exact heading outside message prose; never infer approval from chat text.
+    const alertNodes=[...document.querySelectorAll('[role="alert"], [data-testid*="error" i]')]
+      .filter(node=>uiVisible(node) && currentUi(node));
+    const approvalRequired=alertNodes.some(node=>!node.closest(messageSelector) && !node.querySelector(messageSelector) &&
+      /^Codex Tasks\s+Allow ChatGPT to use Codex Tasks\?(?:\s|$)/.test((node.innerText||"").trim()));
+    if(approvalRequired && controlAction) return {approvalRequired:true,clicked:false,stopped:false};
     if(controlAction==="stop") {
       if(!stop) return {stopped:false};
       const label=norm(stop); stop.click(); return {stopped:true,label};
@@ -1163,8 +1177,7 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       }
       return {clicked:false};
     }
-    const alerts=[...document.querySelectorAll('[role="alert"], [data-testid*="error" i]')]
-      .filter(node=>uiVisible(node) && currentUi(node))
+    const alerts=alertNodes
       .map(x=>(x.innerText||'').trim()).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).slice(-8);
     const errorWords=["something went wrong","error generating","network error","unable to load conversation","try again later",
       "resume stream unavailable","error in message stream","stream error","error occurred while connecting to the websocket",
@@ -1193,7 +1206,7 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       url:location.href,title:document.title,mode,observedAt:new Date().toISOString(),
       generating:!!stop,stopAvailable:!!stop,
       sendAvailable:!!send && !send.disabled && send.getAttribute('aria-disabled')!=='true',
-      inputReady:composer && !stop,composerPresent:composer,composerText,recoveryControls,
+      inputReady:composer && !stop,composerPresent:composer,composerText,recoveryControls,approvalRequired,
       errorTexts:[...alerts,...knownErrors].filter((v,i,a)=>a.indexOf(v)===i),
       online:navigator.onLine,visibility:document.visibilityState,pageWasDiscarded:!!document.wasDiscarded,
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,
@@ -1211,6 +1224,8 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       observerStartedAt:new Date(globalThis.__CHAT_BRIDGE_WATCH.startedAt).toISOString()
     };
   },{includeUserMessages,controlAction});
+  if(snapshot.approvalRequired && controlAction) throw new Error("APPROVAL_REQUIRED");
+  return snapshot;
 }
 
 function classifySnapshot(raw, heartbeat, task=null, effort=null) {
@@ -1218,7 +1233,8 @@ function classifySnapshot(raw, heartbeat, task=null, effort=null) {
   const budget=livenessBudget(raw,task,effort);
   const threshold=budget.stallThresholdSec;
   let sessionState="IDLE", recommendation="NONE";
-  if(contextExhausted(raw)) { sessionState="CONTEXT_EXHAUSTED"; recommendation="ROTATE_SESSION"; }
+  if(raw.approvalRequired===true) { sessionState="WAITING_USER_APPROVAL"; recommendation="WAIT_FOR_USER_APPROVAL"; }
+  else if(contextExhausted(raw)) { sessionState="CONTEXT_EXHAUSTED"; recommendation="ROTATE_SESSION"; }
   else if(!raw.online || !raw.composerPresent) { sessionState="BLOCKED"; recommendation="ESCALATE"; }
   else if(recoveryRequired(raw)) { sessionState="ERROR_RECOVERABLE"; recommendation="RECOVER_NATIVE"; }
   else if(raw.generating) {
@@ -1446,6 +1462,7 @@ async function activateComposer(page) {
 
 async function triggerSend(page) {
   const hasSend=await page.evaluate(()=>!!document.querySelector('button[data-testid="send-button"]'));
+  if((await state(page,false,"approval")).approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
   sendAttempted=true;
   try {
     if(hasSend) {
@@ -1563,6 +1580,7 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
     before.expectedMessage=msg; before.targetUrl=targetUrl||before.url;
     try { await page.fill(COMPOSER_SELECTOR,msg); }
     catch {
+      if((await state(page,false,"approval")).approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
       await activateComposer(page);
       await page.keyboard.press("ControlOrMeta+A");
       await page.keyboard.press("Backspace");
@@ -2708,6 +2726,7 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
 }
 
 async function gradedRecover(reg, chat, page, task, observed, options={}) {
+  if(observed.approvalRequired===true || observed.sessionState==="WAITING_USER_APPROVAL") return {action:"DEFERRED",reason:"WAITING_USER_APPROVAL"};
   if(imageSessionOccupancy(reg,chat).occupied) return {action:"RECONCILE_ONLY",reason:"IMAGE_SESSION_OCCUPIED_RECONCILE_ONLY"};
   const rt=await loadRuntime();
   const live=rt.tasks[task.taskId];
@@ -2827,7 +2846,7 @@ async function detachTerminalTaskPages(reg, project=null, account=null) {
     const tab=tabs.find(item=>item.label===chat.page);
     if(!tab || tab.active || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
+    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
     const oldPage=chat.page;
     if(imageSessionOccupancy(reg,chat).occupied) continue;
     try { await page.close(); } catch { continue; }
@@ -2876,7 +2895,7 @@ async function pruneManagedOrphanTabs(reg, project=null, account=null) {
       if(!tab||tab.active||tab.openedBy!=="agent") continue;
       const emptyTab=/^(about:blank|chrome:\/\/newtab\/?$)/i.test(String(tab.url||""));
       const snapshot=emptyTab?{generating:false,composerText:""}:await state(page).catch(()=>null);
-      if(!snapshot||snapshot.generating||String(snapshot.composerText||"").trim()) continue;
+      if(!snapshot||snapshot.approvalRequired===true||snapshot.generating||String(snapshot.composerText||"").trim()) continue;
       try { await page.close(); closed.push({spaceId:space.id,spaceName:space.name,page:page.label}); }
       catch {}
     }
@@ -2923,7 +2942,9 @@ async function watchOnce(reg, project=null, account=null, options={}) {
         continue;
       }
       let recovery={action:"NONE"}, notification=null;
-      if(observed.sessionState==="CONTEXT_EXHAUSTED") {
+      if(observed.sessionState==="WAITING_USER_APPROVAL") {
+        recovery={action:"DEFERRED",reason:"WAITING_USER_APPROVAL"};
+      } else if(observed.sessionState==="CONTEXT_EXHAUSTED") {
         const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
         live.status="BLOCKED";
         live.blockedReason="CONTEXT_EXHAUSTED";
@@ -2986,6 +3007,15 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
       // Do not amplify store contention by writing failure counters back to it.
       if(/^STATE_STORE_(?:RUNTIME|REGISTRY):/.test(String(error?.message||""))) {
         results.push({taskId:task.taskId,role:task.role,state:"STATE_STORE_DEFERRED",error:error.message});
+        continue;
+      }
+      if(error?.message==="APPROVAL_REQUIRED" && error.deliveryStage!=="SEND_ATTEMPTED") {
+        const latest=await loadRuntime(), live=latest.tasks[task.taskId];
+        if(live && activeTaskStatus(live.status)) {
+          live.sessionState="WAITING_USER_APPROVAL"; live.recommendation="WAIT_FOR_USER_APPROVAL";
+          latest.tasks[live.taskId]=live; await saveRuntime(latest);
+        }
+        results.push({taskId:task.taskId,state:"WAITING_USER_APPROVAL",recovery:{action:"DEFERRED",reason:"WAITING_USER_APPROVAL"}});
         continue;
       }
       if(error?.code==="WEB_RATE_LIMITED"){ results.push({taskId:task.taskId,account:error.account,role:task.role,state:"WEB_COOLDOWN",reason:"CHATGPT_RATE_LIMIT"}); continue; }
@@ -3134,7 +3164,7 @@ async function pruneProjectSpace(reg, project, account=null) {
     const tab=tabs.find(item=>item.label===page.label);
     if(!tab || tab.active || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
+    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
     if(Object.values(reg.chats||{}).some(chat=>samePhysicalSpace(chat,binding,task) && (chat.page===page.label || sameConversationUrl(tab.url,chat.url)) && imageSessionOccupancy(reg,chat).occupied)) continue;
     try { await page.close(); }
     catch { continue; }

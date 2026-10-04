@@ -20,7 +20,7 @@ async function harness(f={}) {
     const reg={chats:{}};
     assertImagePageFree=async()=>{};
     detectWebRateLimit=async()=>{};
-    state=async(_page,mode)=>{f.calls.push(['state',mode]);if(f.stateErrorAt===f.calls.filter(([kind])=>kind==='state').length)throw f.stateError;return f.snapshots.shift()||f.latest||f.snapshots.at(-1);};
+    state=async(_page,mode,controlAction)=>{if(controlAction==="approval"){f.calls.push(["approval-state"]);return {approvalRequired:false};}f.calls.push(['state',mode]);if(f.stateErrorAt===f.calls.filter(([kind])=>kind==='state').length)throw f.stateError;return f.snapshots.shift()||f.latest||f.snapshots.at(-1);};
     expandEvidenceMessages=async()=>{};
     nativeSubmissionWitness=async()=>{if(f.witnessError)throw f.witnessError;return f.witness||null;};
     if(f.shortWait) waitForDelivery=async()=>f.latest;
@@ -103,7 +103,7 @@ test('an unacknowledged click or Enter never falls back to another send action',
     const page={evaluate:async()=>hasSend,click:()=>action('click'),press:()=>action('enter'),
       keyboard:{press:async()=>f.calls.push(['keyboard-enter'])},focus:async()=>{}};
     await assert.rejects(api.triggerSend(page),/lost action acknowledgement/);
-    assert.deepEqual(f.calls,[[hasSend?'click':'enter']]);
+    assert.deepEqual(f.calls,[['approval-state'],[hasSend?'click':'enter']]);
     assert.equal(api.attempted(),true);
   }
 });

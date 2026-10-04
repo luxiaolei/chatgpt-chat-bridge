@@ -1,0 +1,19 @@
+{
+  "observedAt": "2026-10-04T10:58:40.984Z",
+  "provenance": "Current visible card observed read-only; not a reconstruction of the earlier pending call.",
+  "node": {
+    "tag": "DIV",
+    "role": "alert",
+    "ariaAtomic": "true",
+    "testid": null
+  },
+  "visible": true,
+  "currentUi": true,
+  "messageAncestor": null,
+  "messageDescendants": [],
+  "heading": [
+    "Codex Tasks",
+    "Allow ChatGPT to use Codex Tasks?"
+  ],
+  "description": "[Business description redacted] See details"
+}

@@ -39,3 +39,9 @@ test("orphan reclaim preserves a drafted page and closes a blank page",async()=>
   assert.equal(blank.closed,1);
   assert.deepEqual(blank.result,{page:"p1",reason:"orphan-managed"});
 });
+
+test("orphan reclaim preserves a pending permission card with empty composer",async()=>{
+  const out=await run({approvalRequired:true,generating:false,composerText:""});
+  assert.equal(out.closed,0);
+  assert.equal(out.result,null);
+});
