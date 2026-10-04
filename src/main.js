@@ -957,6 +957,12 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       let fiber=outer[0][Object.keys(outer[0]).find(k=>k.startsWith('__reactFiber'))];
       for(let i=0;fiber&&i<32;i++,fiber=fiber.return) {
         const props=fiber.memoizedProps||{};
+        if(sourceFiber) {
+          if(foreignOwner(props)) break;
+          if(props.messageId===id && props.copyPlainTextFromSource===true && typeof props.message==='string' && props.conversationId)
+            return fail('SOURCE_OWNER_AMBIGUOUS');
+          continue;
+        }
         if(foreignOwner(props)) return fail('FOREIGN_MESSAGE_OWNER');
         if(props.conversationId) {
           if(sourceConversation && sourceConversation!==props.conversationId) return fail('SOURCE_CONVERSATION_CONFLICT');
@@ -969,7 +975,6 @@ async function state(page, includeUserMessages=false, controlAction=null) {
               !(temporary(props.conversationId) && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(conversationId)))) return fail('SOURCE_OWNER_TUPLE_UNVERIFIED');
           sourceFiber=fiber;
           source={text:props.message,messageId:id,conversationId:props.conversationId};
-          break;
         }
       }
       if(!sourceFiber) return fail('SOURCE_OWNER_NOT_FOUND');

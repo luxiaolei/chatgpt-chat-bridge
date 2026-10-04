@@ -158,6 +158,7 @@ test('owned source still rejects arbitrary controls, skipped content, foreign ow
     f=>f.copyFrames[4].memoizedProps.messageId='foreign-copy-owner',
     f=>f.copyFrames[16].return={memoizedProps:{...f.source},return:null},
     f=>f.copyFrames[9].memoizedProps={},
+    f=>f.frames[15].memoizedProps={...f.source},
     f=>f.source.copyPlainTextFromSource=false,
     f=>f.source.messageId='foreign-message-owner',
     f=>delete f.source.conversationId,
