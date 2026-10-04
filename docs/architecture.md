@@ -206,6 +206,16 @@ When the current visible effort exactly matches the requested level, effort sele
 
 ## Message lifecycle
 
+### Evidence window
+
+The read-only `evidence` response adds `evidenceWindow` from the same observed page, after the existing bounded disclosure expansion and account check. Existing `matches`, normalization, identity gates and ordinary `read` output are unchanged. This metadata does not initiate history traversal.
+
+`nodes` lists recognized, rendered user/assistant DOM containers in document order, with each container's directly observed `messageIds`, role and `nested` flag. Hidden/search clones are excluded; offscreen rendered history can be included. `roleNodeCounts` counts containers, **not unique conversation turns**. Nested containers and duplicate IDs remain visible. `missingIdNodeCount`, `duplicateMessageIds` (per-role container occurrences), and `nestedNodeCount` expose identity gaps. `firstIdentifiedMessageIds` and `lastIdentifiedMessageIds` are the first/last identified containers in this DOM observation, not the conversation's historical endpoints. Unidentified containers are retained with empty ID lists.
+
+`userBodyCounts` counts the existing extractor's `extracted`, `empty`, `ambiguous` and `unavailable` outcomes per container. Extracted text can still be clipped; these outcomes do not certify full authored content or delivery eligibility. `userDisclosureCounts` counts `collapsed`, `expanded`, `mixed` or `unknown` from rendered disclosure buttons owned by that container and their explicit `aria-expanded` values. No control, an unrecognized/missing value, or a layout without observable ownership yields `unknown`; labels alone do not certify expansion. These are current UI observations, not an expansion-action log. No raw body or control text is exported in the new metadata.
+
+`historyComplete` and `authoredBodyCompleteness` are always `unknown`. The interface cannot establish virtualized/unloaded history, total conversation message count, earliest message, or full-body coverage. Zero matches, a stable count, or an expanded button cannot establish non-delivery or complete history.
+
 ### Dispatch
 
 ```text

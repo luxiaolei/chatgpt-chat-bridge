@@ -966,21 +966,22 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       // Offscreen conversation history is valid; display:none fallback/search clones are not.
       return style.display!=="none" && style.visibility!=="hidden" && rect.width>0 && rect.height>0;
     }
-    function userMessageText(node) {
+    function userMessageText(node, details=null) {
+      const unavailable=status=>{ if(details) details.status=status; return null; };
       const bubbles=[...(node.getAttribute('data-user-message-bubble')==='true'?[node]:[]),
         ...node.querySelectorAll('[data-user-message-bubble="true"]')];
-      if(bubbles.length>1) return null;
+      if(bubbles.length>1) return unavailable('ambiguous');
       const bubble=bubbles[0]||null;
       if(!bubble) return node.getAttribute('data-message-author-role')==='user' &&
-        !node.querySelector('button, [data-thread-find-skip]') ? (node.innerText||'').trim() : null;
+        !node.querySelector('button, [data-thread-find-skip]') ? (node.innerText||'').trim() : unavailable('unavailable');
       const targets=[...bubble.querySelectorAll('[data-search-result-target]')];
       const outer=targets.filter(target=>{
         const parent=target.parentElement?.closest('[data-search-result-target]');
         return !parent || !bubble.contains(parent);
       });
-      if(outer.length>1 || (outer.length===1 && outer[0].tagName!=='DIV')) return null;
+      if(outer.length>1 || (outer.length===1 && outer[0].tagName!=='DIV')) return unavailable('ambiguous');
       const content=outer[0]||bubble;
-      if(content.querySelector('button, [data-thread-find-skip]')) return null;
+      if(content.querySelector('button, [data-thread-find-skip]')) return unavailable('unavailable');
       return (content.innerText||'').trim();
     }
     const legacy=[...document.querySelectorAll('[data-message-author-role]')].filter(renderedMessage).map(e=>({
@@ -1025,6 +1026,49 @@ async function state(page, includeUserMessages=false, controlAction=null) {
     const roleOf=node=>node?.getAttribute('data-message-author-role') ||
       /:(user|assistant)$/.exec(node?.getAttribute('data-chatgpt-search-unit-key')||node?.getAttribute('data-content-search-unit-key')||'')?.[1];
     const containers=[...document.querySelectorAll(messageSelector)].filter(node=>['user','assistant'].includes(roleOf(node)));
+    let evidenceWindow;
+    if(includeUserMessages===true) {
+      const nodes=containers.filter(renderedMessage).map(node=>{
+        const role=roleOf(node);
+        const messageIds=[...new Set([
+          node.getAttribute('data-message-id'),node.getAttribute('data-chatgpt-selection-message-id'),
+          ...(node.getAttribute('data-chatgpt-search-message-ids')||'').split(/\s+/),
+          ...[...node.querySelectorAll('[data-chatgpt-selection-message-id]')]
+            .filter(child=>child.closest(messageSelector)===node && renderedMessage(child)).map(child=>child.getAttribute('data-chatgpt-selection-message-id'))
+        ].filter(Boolean).map(id=>id.trim()).filter(Boolean))];
+        let parent=node.parentElement?.closest(messageSelector);
+        while(parent && !['user','assistant'].includes(roleOf(parent))) parent=parent.parentElement?.closest(messageSelector);
+        const entry={role,messageIds,nested:!!parent && renderedMessage(parent)};
+        if(role==='user') {
+          const details={},text=userMessageText(node,details);
+          const controls=[...node.querySelectorAll('button')].filter(button=>renderedMessage(button) &&
+            button.closest(messageSelector)===node &&
+            /^(?:Show more|Show less|显示更多|展开|收起)$/i.test((button.innerText||button.getAttribute('aria-label')||'').trim()));
+          const states=new Set(controls.map(button=>button.getAttribute('aria-expanded')));
+          const disclosure=!states.size || [...states].some(value=>value!=='true'&&value!=='false')?'unknown':
+            states.size>1?'mixed':states.has('true')?'expanded':'collapsed';
+          entry.userBody={status:text===null?details.status:text?'extracted':'empty',disclosure};
+        }
+        return entry;
+      });
+      const roleNodeCounts={user:0,assistant:0},userBodyCounts={extracted:0,empty:0,ambiguous:0,unavailable:0},
+        userDisclosureCounts={collapsed:0,expanded:0,mixed:0,unknown:0},ids=new Map();
+      for(const node of nodes) {
+        roleNodeCounts[node.role]++;
+        if(node.userBody) { userBodyCounts[node.userBody.status]++; userDisclosureCounts[node.userBody.disclosure]++; }
+        for(const messageId of node.messageIds) {
+          const key=JSON.stringify([node.role,messageId]);
+          if(!ids.has(key)) ids.set(key,{role:node.role,messageId,nodeCount:0});
+          ids.get(key).nodeCount++;
+        }
+      }
+      const identified=nodes.filter(node=>node.messageIds.length);
+      evidenceWindow={source:'rendered-dom',historyComplete:'unknown',authoredBodyCompleteness:'unknown',nodes,
+        roleNodeCounts,firstIdentifiedMessageIds:identified[0]?.messageIds||[],lastIdentifiedMessageIds:identified.at(-1)?.messageIds||[],
+        missingIdNodeCount:nodes.filter(node=>!node.messageIds.length).length,
+        duplicateMessageIds:[...ids.values()].filter(value=>value.nodeCount>1),
+        nestedNodeCount:nodes.filter(node=>node.nested).length,userBodyCounts,userDisclosureCounts};
+    }
     const lastContainer=containers[containers.length-1];
     const currentUi=node=>{
       const owner=node.closest(messageSelector);
@@ -1090,6 +1134,7 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       lastUserSource:includeUserMessages?lastUserMsg?.userSource||null:null,
       userMessages:includeUserMessages===true?ms.filter(x=>x.role==='user'):undefined,
       userMessageIds:includeUserMessages?ms.filter(x=>x.role==='user').map(x=>x.id).filter(Boolean):undefined,
+      evidenceWindow,
       messageCount:ms.length,assistantCount:ms.filter(x=>x.role==='assistant').length,
       assistantChars:lastAssistant?.length||0,
       mutationSeq:globalThis.__CHAT_BRIDGE_WATCH.seq,
@@ -3509,7 +3554,8 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
       crypto.createHash("sha256").update(normalizedEvidenceText(message.text)).digest("hex")===expected);
     print({ok:true,project:chat.project,account:chat.account,accountId:accountScope(reg,chat.account),
       sessionRef:chat.id,url:observed.url,observedAt:new Date().toISOString(),
-      messageCount:observed.messageCount,matches:matches.map(message=>({messageId:message.id,textHash:expected}))});
+      messageCount:observed.messageCount,matches:matches.map(message=>({messageId:message.id,textHash:expected})),
+      evidenceWindow:observed.evidenceWindow});
   }
   if(cmd==="status"){
     const rt=await loadRuntime();
