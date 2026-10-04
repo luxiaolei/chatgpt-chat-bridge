@@ -2,7 +2,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+cleanup() {
+  touch "$TMP/release"
+  if [[ -n "${P1:-}" ]]; then wait "$P1" 2>/dev/null || true; fi
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
 FAKE="$TMP/ego-browser"
 LOG="$TMP/times.log"
 
@@ -15,7 +20,14 @@ import pathlib,sys,time
 p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True)
 with p.open("a") as f: f.write(f"{time.time():.6f}\n")
 PY
-sleep "${CHAT_BRIDGE_FAKE_SLEEP_SEC:-0}"
+if [[ -n "${CHAT_BRIDGE_FAKE_RELEASE_FILE:-}" ]]; then
+  for _ in {1..600}; do
+    [[ -f "$CHAT_BRIDGE_FAKE_RELEASE_FILE" ]] && exit 0
+    sleep 0.05
+  done
+  echo "pacing fixture release was not signalled" >&2
+  exit 1
+fi
 EOF
 chmod +x "$FAKE"
 
@@ -32,19 +44,22 @@ PACE_SCOPE="$(python3 "$ROOT/src/web-preflight.py" scope "$CHAT_BRIDGE_CONFIG_DI
 
 # Concurrent commands cannot both enter Ego/browser work.
 export CHAT_BRIDGE_STATE_DIR="$TMP/concurrent-state"
-export CHAT_BRIDGE_FAKE_SLEEP_SEC=2
+export CHAT_BRIDGE_FAKE_RELEASE_FILE="$TMP/release"
+echo "pacing phase: concurrent lock"
 "$ROOT/bin/chat-bridge" projects >/dev/null &
 P1=$!
-for _ in {1..40}; do
+for _ in {1..600}; do
   [[ -s "$LOG" ]] && break
   sleep 0.05
 done
+[[ -s "$LOG" ]] || { echo "pacing fixture did not enter mock Ego" >&2; exit 1; }
 set +e
 CHAT_BRIDGE_LOCK_WAIT_SEC=0.5 "$ROOT/bin/chat-bridge" projects >/dev/null 2>"$TMP/concurrent.err"
 RC=$?
 set -e
+touch "$TMP/release"
 wait "$P1"
-unset CHAT_BRIDGE_FAKE_SLEEP_SEC
+unset CHAT_BRIDGE_FAKE_RELEASE_FILE
 [[ "$RC" == "75" ]]
 python3 - "$TMP/concurrent.err" <<'PY'
 import json,pathlib,sys
@@ -179,6 +194,7 @@ PY
 [[ "$(wc -l < "$LOG" | tr -d ' ')" == "3" ]]
 
 # A busy pacing lock also fails fast.
+echo "pacing phase: explicit busy lock"
 mkdir -p "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.lock"
 echo "$$" > "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.lock/pid"
 set +e
