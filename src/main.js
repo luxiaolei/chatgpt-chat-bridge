@@ -836,6 +836,61 @@ async function reattachTask(reg, chat, taskId, options={}) {
     messageSent:false,oldTabUntouched:true,resumeWatch:options.resumeWatch===true,observed};
 }
 
+
+async function observeOperation(reg, operationId, candidate=null) {
+  const query={operationId,candidate};
+  const scope=coordinated("observation-context",query);
+  if(opt("project",null)!==scope.project || opt("account",null)!==scope.account)
+    throw new Error("OPERATION_OBSERVATION_ROUTE_MISMATCH");
+  const binding=scope.binding, identity=scope.accountIdentity;
+  const info=(await listTaskSpaces()).find(x=>x.name===binding.spaceName);
+  if(!info || info.ownership!=="agent" || info.createdBy!=="agent" ||
+     !info.name.startsWith("chat-bridge-agent-") || info.profileId!==binding.profileId)
+    throw new Error("OPERATION_OBSERVATION_REQUIRES_MANAGED_SPACE");
+  const runtime=await loadRuntime();
+  if(runtime.sessions?.[scope.sessionRef]?.watchdogPausedForUserControl ||
+     Object.values(runtime.tasks||{}).some(t=>t.sessionId===scope.sessionRef && t.watchdogPausedForUserControl))
+    throw new Error("OPERATION_OBSERVATION_USER_CONTROL_PAUSED");
+  await assertWebAvailable(scope.account);
+  const task=await taskSpace(info.id), tabs=await task.tabs();
+  const prior=taskAccounts.get(Number(task.spaceId));
+  if(prior && accountScope(reg,prior)!==scope.accountId) throw new Error("OPERATION_OBSERVATION_ACCOUNT_CONFLICT");
+  taskAccounts.set(Number(task.spaceId),scope.account);
+  const matching=tabs.filter(x=>x.openedBy==="agent" && sameConversationUrl(x.url,scope.url));
+  let page=matching.length?task.page(matching[0].label):null;
+  if(!page) {
+    // Only open the already identified conversation; never reclaim existing pages.
+    page=await task.newPage();
+    await page.goto(scope.url,{waitUntil:"domcontentloaded",timeout:20000});
+  }
+  await waitForConversationReady(page,20000);
+  await page.waitForFunction(()=>!!document.querySelector(
+    '[data-message-author-role], [data-chatgpt-search-unit-key$=":user"], [data-chatgpt-search-unit-key$=":assistant"]'
+  ),undefined,{timeout:15000});
+  if(!sameConversationUrl(await page.url(),scope.url) || projectKey(await page.url())!==scope.projectId)
+    throw new Error("OPERATION_OBSERVATION_CONVERSATION_MISMATCH");
+  const login=await page.evaluate(async()=>{
+    if(location.origin!=="https://chatgpt.com") throw new Error("OPERATION_OBSERVATION_ORIGIN_MISMATCH");
+    const response=await fetch("/api/auth/session",{credentials:"same-origin",signal:AbortSignal.timeout(5000)});
+    if(!response.ok) throw new Error("OPERATION_OBSERVATION_LOGIN_UNAVAILABLE");
+    return (await response.json())?.user?.id||null;
+  });
+  if(login!==identity) throw new Error("OPERATION_OBSERVATION_LOGIN_MISMATCH");
+  // Native source text does not require expanding or clicking a rendered message.
+  const snapshot=await state(page,true);
+  if(!sameConversationUrl(snapshot.url,scope.url) || projectKey(snapshot.url)!==scope.projectId)
+    throw new Error("OPERATION_OBSERVATION_CONVERSATION_CHANGED");
+  if(coordinated("observation-context",query).anchor!==scope.anchor)
+    throw new Error("OPERATION_CHANGED_DURING_OBSERVATION");
+  return {ok:true,format:"operation-native-observation-v1",operationId,taskId:scope.taskId,
+    project:scope.project,account:scope.account,accountId:scope.accountId,sessionRef:scope.sessionRef,
+    anchor:scope.anchor,url:snapshot.url,observedAt:snapshot.observedAt,messageSent:false,
+    userMessages:snapshot.userMessages,generating:snapshot.generating,draftChars:snapshot.composerText.length,
+    lastAssistantId:snapshot.lastAssistantId,lastAssistant:snapshot.lastAssistant,
+    lastAssistantTextSource:snapshot.lastAssistantTextSource,
+    messageCount:snapshot.messageCount,readOnly:true};
+}
+
 async function ensurePage(reg, chat, options={}) {
   const configured=reg.projects?.[chat.project]?.bindings?.[chat.account];
   const spaceOverride=chat.spaceName && configured?.spaceName!==chat.spaceName
@@ -3489,6 +3544,9 @@ else if(cmd==="space"){
       print(result);
     } else throw new Error("space subcommand must be show, bind, prune, gc, or consolidate");
   }
+}
+else if(cmd==="operation-evidence") {
+  print(await observeOperation(reg,opt("operation",null),opt("candidate",null)));
 }
 else if(cmd==="reattach") {
   const chat=resolveChat(reg,args[1],project,accountArg);

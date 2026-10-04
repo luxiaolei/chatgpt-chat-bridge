@@ -106,3 +106,36 @@ test('message selection excludes zero-area hidden history clones but retains off
   assert.equal(fn(node('css-hidden',768,30,{visibility:'hidden'})),false);
   assert.equal(fn(node('display-none',768,30,{display:'none'})),false);
 });
+
+const observerStart=source.indexOf("async function observeOperation(");
+const observerCode=source.slice(observerStart,source.indexOf("\nasync function ensurePage",observerStart));
+async function operationFixture(change={}) {
+  const cid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", projectId="g-p-"+"a".repeat(32);
+  const scope={operationId:"op",taskId:"legacy-no-runtime",project:"P",account:"a",accountId:"scope-a",
+    sessionRef:cid,projectId,anchor:"anchor",accountIdentity:"login",url:"https://chatgpt.com/g/"+projectId+"/c/"+cid,
+    binding:{spaceName:"chat-bridge-agent-a",profileId:"Profile 1"}};
+  let contextReads=0, opened=0;
+  const snapshot={url:scope.url,observedAt:new Date().toISOString(),userMessages:[],composerText:"untouched draft",
+    generating:true,lastAssistantId:"assistant",lastAssistant:"body",messageCount:2};
+  const page={label:"p1",url:async()=>change.url||scope.url,waitForFunction:async()=>{},
+    evaluate:async()=>change.login||"login",goto:async()=>opened++};
+  const params={coordinated:()=>({...scope,anchor:change.race&&contextReads++?"changed":"anchor"}),
+    opt:key=>key==="project"?"P":"a",listTaskSpaces:async()=>[{id:1,name:scope.binding.spaceName,ownership:change.ownership||"agent",createdBy:"agent",profileId:"Profile 1"}],
+    loadRuntime:async()=>({tasks:change.paused?{x:{sessionId:cid,watchdogPausedForUserControl:true}}:{},sessions:{}}),
+    assertWebAvailable:async()=>{},taskSpace:async()=>({spaceId:1,tabs:async()=>[{label:"p1",url:scope.url,openedBy:"agent"}],page:()=>page,newPage:async()=>{throw Error("unexpected allocation");}}),
+    taskAccounts:new Map(),accountScope:()=>scope.accountId,waitForConversationReady:async()=>{},
+    sameConversationUrl:(a,b)=>a===b,projectKey:url=>url.match(/g-p-[a-f0-9]{32}/)?.[0],state:async()=>snapshot};
+  const fn=await new AsyncFunction(...Object.keys(params),observerCode+";return observeOperation;")(...Object.values(params));
+  return {run:()=>fn({},"op"),get opened(){return opened;}};
+}
+test("operation observer reads existing conversation without runtime task, send or draft changes",async()=>{
+  const f=await operationFixture(), result=await f.run();
+  assert.equal(result.messageSent,false);assert.equal(result.draftChars,15);
+  assert.equal(result.generating,true);assert.equal(result.readOnly,true);assert.equal(f.opened,0);
+});
+test("operation observer rejects wrong login, URL, user Space, pause and changed anchor",async()=>{
+  for(const [change,reason] of [[{login:"wrong"},/LOGIN/],[{url:"https://chatgpt.com/c/wrong"},/CONVERSATION/],
+      [{ownership:"user"},/MANAGED_SPACE/],[{paused:true},/USER_CONTROL/],[{race:true},/CHANGED/]]) {
+    const f=await operationFixture(change);await assert.rejects(f.run(),reason);assert.equal(f.opened,0);
+  }
+});

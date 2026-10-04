@@ -2138,6 +2138,8 @@ def rotation_ack(db, payload, config, state):
     origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
     if origin and (not identity or account_id(identity) != origin):
         raise ValueError("ROTATION_ACK_ORIGIN_MISMATCH")
+    if successor_chat.get("rotationRecovery") and (not origin or payload.get("callerRef") != successor or not message):
+        raise ValueError("ROTATION_RECOVERY_ACK_SUCCESSOR_REQUIRED")
     old_ref = row["current_session_ref"]
     base = reg
     next_reg = json.loads(json.dumps(reg))
@@ -2156,6 +2158,7 @@ def rotation_ack(db, payload, config, state):
     now = stamp()
     runtime_row=db.execute("SELECT payload FROM documents WHERE kind='runtime'").fetchone()
     next_rt=json.loads(runtime_row[0]) if runtime_row else {"version":2,"projects":{},"tasks":{},"sessions":{}}
+    runtime_before = runtime_row[0] if runtime_row else None
     resume_ops=[]
     for task_id,live in (next_rt.get("tasks") or {}).items():
         if live.get("sessionId")!=old_ref or str(live.get("blockedReason") or "")!="CONTEXT_EXHAUSTED":
@@ -2194,6 +2197,11 @@ def rotation_ack(db, payload, config, state):
                            live.get("workgroupId"),live.get("affinityKey"),None,resume_message))
     begin_immediate(db)
     try:
+        current_row = db.execute("SELECT * FROM logical_sessions WHERE logical_ref=?", (row["logical_ref"],)).fetchone()
+        current_rt = db.execute("SELECT payload FROM documents WHERE kind='runtime'").fetchone()
+        if (not current_row or dict(current_row) != dict(row) or registry(db) != base
+                or (current_rt[0] if current_rt else None) != runtime_before):
+            raise ValueError("ROTATION_ACK_CAS_CHANGED")
         db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(next_reg,ensure_ascii=False),))
         db.execute("UPDATE documents SET payload=? WHERE kind='runtime'",(json.dumps(next_rt,ensure_ascii=False),))
         db.execute("""INSERT OR REPLACE INTO session_successors(
@@ -2559,6 +2567,8 @@ def parse_worker_receipt(completed):
                 valid = (ok is None or ok is True) and isinstance(value["delivered"], bool)
             elif "matches" in value:
                 valid = ok is True and isinstance(value["matches"], list)
+            elif value.get("format") == "operation-native-observation-v1":
+                valid = ok is True and value.get("messageSent") is False and isinstance(value.get("userMessages"), list)
             elif "nativeTarget" in value:
                 target = value["nativeTarget"]
                 valid = ok is True and isinstance(target, dict) and all(isinstance(target.get(key), str) and target[key]
@@ -2638,6 +2648,195 @@ def retired_management_successor(db, row):
         "project": row["project"],
         "eventId": row["event_id"],
     }
+
+
+
+def recovery_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def observation_context(db, operation_id, candidate=None):
+    """Local identity anchor only. No runtime fabrication or delivery decision."""
+    if os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID") or os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+        raise ValueError("OBSERVATION_HOST_LOCAL_REQUIRED")
+    row = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+    if not row or row["status"] != "DELIVERY_UNKNOWN" or row["native_target"]:
+        raise ValueError("OBSERVATION_REQUIRES_UNKNOWN_BROWSER_OPERATION")
+    reg = registry(db)
+    identity = ((reg.get("accounts") or {}).get(row["account_alias"]) or {}).get("identity")
+    binding = ((reg.get("projects") or {}).get(row["project"]) or {}).get("bindings", {}).get(row["account_alias"])
+    if not identity or account_id(identity) != row["account_id"] or not binding:
+        raise ValueError("OBSERVATION_ACCOUNT_PROJECT_MISMATCH")
+    project_id = (re.search(r"g-p-[0-9a-f]{32}", binding.get("projectUrl") or "") or [None])[0]
+    session = row["session_ref"]
+    if candidate:
+        if row["kind"] != "rotation" or session:
+            raise ValueError("OBSERVATION_CANDIDATE_REQUIRES_UNBOUND_ROTATION")
+        session = candidate
+    if not session or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", session) or not project_id:
+        raise ValueError("OBSERVATION_PERSISTENT_SESSION_REQUIRED")
+    chat = (reg.get("chats") or {}).get(session)
+    if row["session_ref"] and not chat:
+        raise ValueError("OBSERVATION_SESSION_NOT_REGISTERED")
+    if chat and (chat.get("project") != row["project"] or chat.get("account") != row["account_alias"]
+                 or chat.get("id") != session):
+        raise ValueError("OBSERVATION_REGISTRY_IDENTITY_MISMATCH")
+    anchor = recovery_digest({"operation":dict(row), "registry":reg})
+    return {"operationId":row["id"], "kind":row["kind"], "taskId":row["task_id"],
+            "project":row["project"], "account":row["account_alias"], "accountId":row["account_id"],
+            "sessionRef":session, "projectId":project_id, "binding":binding, "accountIdentity":identity,
+            "url":"https://chatgpt.com/g/" + project_id + "/c/" + session, "anchor":anchor}
+
+
+def observe_operation(db, operation_id, candidate=None):
+    context = observation_context(db, operation_id, candidate)
+    bridge = os.environ.get("CHAT_BRIDGE_BIN") or str(pathlib.Path.home() / ".local/bin/chat-bridge")
+    command = [bridge, "operation-evidence", "--operation", operation_id,
+               "--project", context["project"], "--account", context["account"], "--background"]
+    if candidate:
+        command += ["--candidate", candidate]
+    completed = run_bridge(command)
+    evidence = parse_worker_receipt(completed) if completed.returncode == 0 else None
+    if not evidence:
+        raise ValueError("OPERATION_OBSERVATION_UNAVAILABLE")
+    latest = observation_context(db, operation_id, candidate)
+    if latest["anchor"] != context["anchor"] or evidence.get("anchor") != context["anchor"]:
+        raise ValueError("OPERATION_CHANGED_DURING_OBSERVATION")
+    url = re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/c/([0-9a-f-]{36})/?", str(evidence.get("url") or ""))
+    if (not url or url[1] != context["projectId"] or url[2] != context["sessionRef"]
+            or any(evidence.get(k) != context[k] for k in ("operationId","taskId","project","account","accountId","sessionRef"))
+            or evidence.get("format") != "operation-native-observation-v1"
+            or evidence.get("messageSent") is not False):
+        raise ValueError("OPERATION_OBSERVATION_IDENTITY_MISMATCH")
+    return evidence
+
+
+def rotation_recover(db, payload):
+    operation_id, candidate = payload.get("operationId"), payload.get("candidate")
+    context = observation_context(db, operation_id, candidate)
+    row = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
+    logical = db.execute("SELECT * FROM logical_sessions WHERE rotation_id=?", (row["rotation_id"],)).fetchall()
+    if (row["kind"] != "rotation" or not row["force_new"] or row["session_ref"] or len(logical) != 1):
+        raise ValueError("ROTATION_RECOVERY_ORIGINAL_REQUIRED")
+    logical = logical[0]
+    reg = registry(db)
+    predecessor = (reg.get("chats") or {}).get(row["caller_ref"])
+    if (logical["state"] != "ROTATING" or logical["pending_session_ref"]
+            or logical["current_session_ref"] != row["caller_ref"]
+            or any(logical[k] != row[k] for k in ("project","role","workgroup_id"))
+            or not predecessor or predecessor.get("status","active") != "active"
+            or predecessor.get("account") != row["account_alias"]
+            or current_controller_ref(db, reg, row["project"], row["role"], row["workgroup_id"]) != row["caller_ref"]):
+        raise ValueError("ROTATION_RECOVERY_LOGICAL_MISMATCH")
+    competing = [chat for chat in (reg.get("chats") or {}).values()
+                 if chat.get("project") == row["project"] and chat.get("role") == row["role"]
+                 and (chat.get("workgroupId") or None) == row["workgroup_id"]
+                 and chat.get("status","active") == "active" and chat.get("id") != row["caller_ref"]]
+    if competing or db.execute("SELECT count(*) FROM operations WHERE rotation_id=?", (row["rotation_id"],)).fetchone()[0] != 1:
+        raise ValueError("ROTATION_RECOVERY_COMPETING_ROLE_OR_OPERATION")
+    if db.execute("SELECT 1 FROM operations WHERE session_ref=? AND id<>?", (candidate,operation_id)).fetchone():
+        raise ValueError("ROTATION_RECOVERY_CANDIDATE_OCCUPIED")
+    if candidate == row["caller_ref"] or candidate in (reg.get("chats") or {}):
+        raise ValueError("ROTATION_RECOVERY_CANDIDATE_OCCUPIED")
+    if db.execute("SELECT 1 FROM logical_sessions WHERE current_session_ref=? OR pending_session_ref=?", (candidate,candidate)).fetchone():
+        raise ValueError("ROTATION_RECOVERY_CANDIDATE_OCCUPIED")
+    handoff = row["original_message"] or ""
+    body_hash = hashlib.sha256(handoff.encode()).hexdigest()
+    envelope = "\n".join(["[CHATBRIDGE ROLE HANDOFF v1]", "rotation_id: "+row["rotation_id"],
+                          "logical_ref: "+logical["logical_ref"], "role: "+row["role"],
+                          "next_epoch: "+str(logical["epoch"]+1), "", handoff, ""])
+    if (not handoff or body_hash != row["payload_hash"] or body_hash != logical["handoff_hash"]
+            or row["request_key"] != "rotation:"+row["rotation_id"]
+            or row["task_id"] != "ROT-"+row["rotation_id"] or not row["message"].startswith(envelope)
+            or not row["message"].endswith("[/CHATBRIDGE ROLE HANDOFF]")):
+        raise ValueError("ROTATION_RECOVERY_HANDOFF_MISMATCH")
+    previous = json.loads(row["result"] or "{}")
+    witness = previous.get("nativeWitness") or {}
+    expected_request = hashlib.sha256(" ".join(row["message"].split()).encode()).hexdigest()
+    witness_url = re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/project/?", str(witness.get("url") or ""))
+    if (witness.get("format") != "chatgpt-native-getText-v1"
+            or witness.get("requestHash") != expected_request
+            or witness.get("accountIdentityHash") != hashlib.sha256(context["accountIdentity"].encode()).hexdigest()
+            or not witness_url or witness_url[1] != context["projectId"]
+            or any(not re.fullmatch(r"[0-9a-f]{64}", str(witness.get(k) or "")) for k in ("bodyHash","normalizedBodyHash","getterHash","serializerHash"))):
+        raise ValueError("ROTATION_RECOVERY_NATIVE_WITNESS_MISMATCH")
+    try:
+        witness_at = datetime.fromisoformat(witness["observedAt"].replace("Z","+00:00"))
+        if witness_at < datetime.fromisoformat(row["created_at"].replace("Z","+00:00")):
+            raise ValueError()
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("ROTATION_RECOVERY_WITNESS_TIME_INVALID")
+    evidence = observe_operation(db, operation_id, candidate)
+    matches = []
+    for item in evidence.get("userMessages") or []:
+        source = item.get("userSource") or {}
+        text = source.get("text")
+        if isinstance(text,str) and hashlib.sha256(text.encode()).hexdigest() == witness["bodyHash"]:
+            if (source.get("conversationId") != candidate or not source.get("messageId")
+                    or source.get("messageId") != item.get("id")
+                    or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", source["messageId"])
+                    or hashlib.sha256(" ".join(text.split()).encode()).hexdigest() != witness["normalizedBodyHash"]):
+                raise ValueError("ROTATION_RECOVERY_SOURCE_IDENTITY_MISMATCH")
+            matches.append(source)
+    if len(matches) != 1:
+        raise ValueError("ROTATION_RECOVERY_EXACT_MESSAGE_NOT_UNIQUE")
+    nonce_header = "\n".join(row["message"].split("\n")[:5]) + "\n\n"
+    if not matches[0]["text"].startswith(nonce_header):
+        raise ValueError("ROTATION_RECOVERY_SOURCE_NONCE_MISMATCH")
+    prior_cid = (previous.get("uncertainNewSession") or {}).get("observedConversationId")
+    if ((witness.get("messageId") and witness["messageId"] != matches[0]["messageId"])
+            or (prior_cid and prior_cid != candidate)):
+        raise ValueError("ROTATION_RECOVERY_PRIOR_IDENTITY_CONFLICT")
+    try:
+        observed_at = datetime.fromisoformat(evidence["observedAt"].replace("Z","+00:00"))
+        if observed_at < witness_at or abs((datetime.now(timezone.utc)-observed_at).total_seconds()) > 120:
+            raise ValueError()
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("ROTATION_RECOVERY_OBSERVATION_TIME_INVALID")
+    proof = {"format":"existing-rotation-native-source-v1", "operationId":operation_id,
+             "rotationId":row["rotation_id"], "logicalRef":logical["logical_ref"], "epoch":logical["epoch"],
+             "predecessor":row["caller_ref"], "candidate":candidate, "messageId":matches[0]["messageId"],
+             "bodyHash":witness["bodyHash"], "requestHash":expected_request, "handoffHash":body_hash,
+             "accountId":row["account_id"], "projectId":context["projectId"], "url":evidence["url"],
+             "historicalBeforeUserId":None, "serverMessageTimestamp":None,
+             "uniquenessScope":"observed-candidate-message-and-local-registry"}
+    token = recovery_digest({"anchor":context["anchor"], "logical":dict(logical), "proof":proof})
+    preview = {"operationId":operation_id, "rotationId":row["rotation_id"], "state":"RECOVERY_PREVIEW",
+               "expected":token, "proof":proof, "observedAt":evidence["observedAt"],
+               "readiness":{"generating":evidence.get("generating"),"draftChars":evidence.get("draftChars")},
+               "pendingSessionRef":candidate, "currentSessionRef":row["caller_ref"], "epoch":logical["epoch"]}
+    if not payload.get("confirm"):
+        return preview
+    if payload.get("expected") != token:
+        raise ValueError("ROTATION_RECOVERY_PREVIEW_CHANGED")
+    begin_immediate(db)
+    try:
+        current_logical = db.execute("SELECT * FROM logical_sessions WHERE logical_ref=?", (logical["logical_ref"],)).fetchone()
+        if (not current_logical or dict(current_logical) != dict(logical)
+                or observation_context(db, operation_id, candidate)["anchor"] != context["anchor"]):
+            raise ValueError("ROTATION_RECOVERY_CAS_CHANGED")
+        now = stamp()
+        next_reg = json.loads(json.dumps(reg))
+        next_reg.setdefault("chats",{})[candidate] = {
+            "id":candidate,"name":row["role"]+" pending rotation","role":row["role"]+"-pending",
+            "project":row["project"],"account":row["account_alias"],"status":"pending-rotation",
+            "url":evidence["url"],"workgroupId":row["workgroup_id"],"logicalRef":logical["logical_ref"],
+            "rotationId":row["rotation_id"],"predecessorSessionRef":row["caller_ref"],
+            "requestedModel":row["requested_model"],"requestedEffort":row["requested_effort"],
+            "rotationRecovery":proof,"createdAt":now}
+        previous["rotationRecovery"] = {**proof,"observedAt":evidence["observedAt"],"committedAt":now}
+        db.execute("UPDATE documents SET payload=? WHERE kind='registry'", (json.dumps(next_reg,ensure_ascii=False),))
+        db.execute("UPDATE logical_sessions SET pending_session_ref=?,updated_at=? WHERE logical_ref=?",
+                   (candidate,now,logical["logical_ref"]))
+        db.execute("UPDATE operations SET status='SENT',session_ref=?,reason='RECOVERED_EXISTING_ROTATION',result=?,updated_at=? WHERE id=?",
+                   (candidate,json.dumps(previous,ensure_ascii=False),now,operation_id))
+        db.execute("INSERT INTO reconciliation_attempts VALUES (?,?,?,?,?,?)",
+                   (str(uuid.uuid4()),operation_id,"RECOVERED_PENDING_ACK","EXACT_NATIVE_ROTATION_SOURCE",json.dumps(proof),now))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {**preview,"state":"RECOVERED_PENDING_ACK","ownerChanged":False}
 
 
 def reconcile_delivery(db, operation_id):
@@ -3764,7 +3963,10 @@ def main():
     if command in {"image-session-occupancy", "image-io-admission", "image-output-io-admission", "image-delivery-io-admission", "image-delivery-receipt"}:
         print(json.dumps(image_local_read(config, state, command, json.load(sys.stdin))))
         return
-    if command in {"admission-check", "local-owner-contract"} and (state / "bridge.sqlite3").exists():
+    if command in {"observe", "observation-context"}:
+        db = connection(config, state, initialize=False)
+        db.execute("PRAGMA query_only=ON")
+    elif command in {"admission-check", "local-owner-contract"} and (state / "bridge.sqlite3").exists():
         db = connection(config, state, initialize=False)
         db.execute("PRAGMA query_only=ON")
         table = "control_state" if command == "admission-check" else "operations"
@@ -3885,6 +4087,14 @@ def main():
             else:
                 payload = json.load(sys.stdin)
             value = result_ack(db, payload)
+        elif command == "observation-context":
+            payload = json.load(sys.stdin)
+            value = observation_context(db, payload.get("operationId"), payload.get("candidate"))
+        elif command == "observe":
+            opts = dict(zip(args[::2], args[1::2]))
+            if len(args) % 2 or set(opts) - {"--operation", "--candidate"} or not opts.get("--operation"):
+                raise ValueError("observe requires --operation ID [--candidate CID]")
+            value = observe_operation(db, opts["--operation"], opts.get("--candidate"))
         elif command == "reattach-commit":
             value = reattach_commit(db, json.load(sys.stdin))
         elif command == "configure":
@@ -4031,9 +4241,13 @@ def main():
                     "model": opts.get("--model"),
                     "effort": opts.get("--effort"),
                 })
+            elif sub == "rotation-recover":
+                value = rotation_recover(db, {"operationId":opts.get("--operation"), "candidate":opts.get("--candidate"),
+                    "expected":opts.get("--expected"), "confirm":"--confirm" in flags})
             elif sub == "rotation-ack":
                 value = rotation_ack(db,{
                     "rotationId": opts.get("--rotation"),
+                    "callerRef": opts.get("--caller-ref"),
                     "message": opts.get("--message") or "",
                 },config,state)
             else:

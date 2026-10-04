@@ -152,7 +152,7 @@ fi
 ORIGIN_ROUTED=0
 case "$CMD" in
   image) ORIGIN_ROUTED=1 ;;
-  reattach|send|ask|stream|new|read|evidence|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete|projects|discover|list|event|task|project)
+  operation-evidence|reattach|send|ask|stream|new|read|evidence|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete|projects|discover|list|event|task|project)
     ORIGIN_ROUTED=1 ;;
   space)
     [[ "$SUB" == "show" || "$SUB" == "prune" || "$SUB" == "consolidate" ]] && ORIGIN_ROUTED=1 ;;
@@ -168,7 +168,7 @@ elif (( ORIGIN_ROUTED )) && [[ -n "${CHAT_BRIDGE_FROM_SPACE:-}" && " ${*} " != *
 fi
 if [[ -z "${CHAT_BRIDGE_FROM_SPACE:-}" && -z "${CHAT_BRIDGE_FROM_ACCOUNT_ID:-}" && " ${*} " != *" --account "* ]]; then
   case "$CMD" in
-    reattach|send|ask|stream|new|read|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete)
+    operation-evidence|reattach|send|ask|stream|new|read|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete)
       python3 "$PREFLIGHT" unambiguous "$CONFIG_DIR" "$STATE_DIR" "$@"
       ;;
   esac
@@ -199,7 +199,7 @@ TOUCH_UI=0
 HEAVY_UI=0
 case "$CMD" in
   image) TOUCH_UI=1 ;;
-  reattach|projects|sync|discover|read|evidence|status|send|ask|stream|model|effort|stop|retry|recover|resend|new|archive|retire|delete|watch)
+  operation-evidence|reattach|projects|sync|discover|read|evidence|status|send|ask|stream|model|effort|stop|retry|recover|resend|new|archive|retire|delete|watch)
     TOUCH_UI=1
     ;;
   space)
