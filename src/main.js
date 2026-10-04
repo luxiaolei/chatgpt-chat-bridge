@@ -1252,9 +1252,10 @@ function classifySnapshot(raw, heartbeat, task=null, effort=null) {
   return {sessionState,recommendation,...budget,quietForSec};
 }
 
-async function observeSession(chat,page,task=null) {
+async function observeSession(chat,page,task=null,{includeUserSource=false}={}) {
   await detectWebRateLimit(page,"observe-session");
-  const raw=await state(page), rt=await loadRuntime(), now=new Date(), nowMs=now.getTime();
+  // Existing status consumers need exact latest-user source, not full history.
+  const raw=await state(page,includeUserSource?"ids":false), rt=await loadRuntime(), now=new Date(), nowMs=now.getTime();
   const prev=rt.sessions[chat.id]||{};
   const assistantHash=hashText(raw.lastAssistant||"");
   const monitorChanged=prev.observerStartedAt && prev.observerStartedAt!==raw.observerStartedAt;
@@ -1276,7 +1277,14 @@ async function observeSession(chat,page,task=null) {
     if(!liveTask.baselineAssistantId) liveTask.baselineAssistantId=raw.lastAssistantId||null;
   }
   Object.assign(hb,classifySnapshot(raw,hb,liveTask,chat.effort));
-  rt.sessions[chat.id]=hb;
+  // Evidence is returned to the caller, not promoted to cached current proof.
+  // Keep the heartbeat cache at its existing body/ID retention level.
+  const cached={...hb};
+  if(includeUserSource) {
+    cached.lastUserSource=null; cached.lastUserSourceCondition=null;
+    delete cached.userMessageIds;
+  }
+  rt.sessions[chat.id]=cached;
   if(liveTask?.taskId && rt.tasks[liveTask.taskId]) {
     Object.assign(liveTask,{sessionState:hb.sessionState,recommendation:hb.recommendation,lastProgressAt:hb.lastProgressAt,
       quietForSec:hb.quietForSec,runningForSec:hb.runningForSec,stateUpdatedAt:hb.observedAt,
@@ -3777,7 +3785,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     const rt=await loadRuntime();
     const taskId=opt("task",null);
     const linked=taskId?rt.tasks[taskId]:Object.values(rt.tasks||{}).filter(t=>activeTaskStatus(t.status) && t.project===chat.project && (t.sessionId===chat.id || (!t.sessionId&&t.role===chat.role))).sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")))[0];
-    const observed=await observeSession(chat,page,linked||null);
+    const observed=await observeSession(chat,page,linked||null,{includeUserSource:true});
     const foldedSelection=observedModel(observed.mode);
     print({...observed,modelSelection:foldedSelection,verifiedResourceSelection:{
       model:chat.verifiedModel||null,effort:chat.verifiedEffort||null,verifiedAt:chat.resourceVerifiedAt||null

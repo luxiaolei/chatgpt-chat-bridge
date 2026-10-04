@@ -354,3 +354,25 @@ This is an empirically bounded representation relation, not proof of the platfor
 internal downstream transformation. Saved receipts do not recover an absent
 before-ID baseline; historical UNKNOWN operations remain UNKNOWN. It supplies
 neither assistant-parent evidence nor a reconciliation or resend permission.
+
+
+### Exact latest-user source on ordinary status
+
+`status` requests the existing source-aware `state` observation mode and returns
+`lastUserSource` and `lastUserSourceCondition` without a consumer-specific flag.
+This closes the `Quant _chat_status -> Bridge status -> observeSession -> state`
+interface gap. It does not return full user-message history, expand a disclosure,
+reload, send, or change either native source predicate. The newly exposed source
+body and user-ID list are not retained in the heartbeat cache; a cached runtime
+record is not a substitute for a current source observation. Watchdog observation
+keeps its existing lightweight default.
+
+`BOUND_SOURCE` binds the returned source tuple, not a temporary-to-persistent alias.
+When the source still names `local-chatgpt:*`, its actual ID remains unchanged and
+persistent-CID consumers must keep the delivery unknown. A later observation with
+a directly bound persistent CID can establish current delivery evidence using the
+consumer's exact account, original user UID/claim, full bytes, hash and observation
+window checks. It does not backfill an absent historical alias witness. Complete
+source bytes are neither rendered-text normalization nor native assistant-parent
+proof. Delivery reconciliation and safe continuation require separate acceptance;
+`assistantMessageBinding` remains null with its existing explicit condition.
