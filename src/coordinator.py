@@ -3073,6 +3073,16 @@ def reconcile_delivery(db, operation_id):
 
 
 def work_one(db):
+    # Idle polls must not compete for the writer lock; the existing transactions recheck eligible work.
+    now = time.time()
+    if (not db.execute("""SELECT 1 FROM operations WHERE
+            (status='QUEUED' AND not_before<=?)
+            OR (status='DISPATCHING' AND claimed_at<?)
+            OR (status='WAITING_ROUTE' AND kind IN ('callback','management')) LIMIT 1""",
+            (now, now - interrupted_claim_timeout())).fetchone()
+            and not db.execute("""SELECT 1 FROM task_results WHERE callback_operation_id IS NULL
+                AND (callback_status IS NULL OR callback_status='WAITING_ROUTE') LIMIT 1""").fetchone()):
+        return {"status": "IDLE"}
     materialize_pending_callbacks(db)
     refresh_waiting_routes(db)
     row = claim(db)
