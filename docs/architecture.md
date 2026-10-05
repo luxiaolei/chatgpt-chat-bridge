@@ -256,7 +256,7 @@ The bridge exposes:
 
 - `status`: inspect generation state and latest messages
 - `stop`: stop an active generation
-- `retry`: use a visible Retry/Regenerate control
+- `retry`: use one exact current-conversation Retry/Try again control; never fall back to Regenerate or Continue
 - `resend`: resend the latest user message
 - `recover`: inspect current task/UI; use native recovery for errors, guarded continuation for incomplete turns, and defer quiet generation without stopping unless explicitly aggressive
 
@@ -376,3 +376,33 @@ window checks. It does not backfill an absent historical alias witness. Complete
 source bytes are neither rendered-text normalization nor native assistant-parent
 proof. Delivery reconciliation and safe continuation require separate acceptance;
 `assistantMessageBinding` remains null with its existing explicit condition.
+
+
+### Recovery UI scope and durable claim evidence
+
+History/sidebar Retry is not current-turn recovery. Visible controls under a
+sidebar section, navigation, or aside are excluded. Unowned turn-error controls
+must be within the actual main conversation. Global permission alerts are still
+checked independently, including portal-rendered cards. Real current-turn errors
+continue to block completion; this is not a last-reply-wins override. Exact Retry
+and Try again labels require a unique candidate; only explicit recovery may also
+choose Continue generating. Regenerate is never an automatic fallback.
+
+The queue creates `delivery-attempts/OPERATION/CLAIM_ORDINAL/manifest.json` before
+Popen. Each claim has its own immutable private files, preserving old claims.
+The wrapper passes only a hash-bound descriptor to the existing native runtime.
+Browser evidence is synced before input and before Send, retaining original user
+baselines and complete source observations without publishing them. A second
+SEND_INTENT in the same claim is rejected. Failure to persist required evidence
+prevents the trigger, while an existing or uncertain intent remains UNKNOWN.
+The journal does not weaken the native submission or account/session predicates.
+
+Child output is captured to private files and synced during waits. Cleanup keeps
+the old process-group boundary and records only observed local facts; it never
+claims that remote execution stopped. Timeout diagnostics retain the full parsed
+native witness when available and the raw capture, even when no routable new
+session could be registered. A captured success on a timeout is not auto-delivery.
+The local-only `queue delivery-attempts --operation ID` returns file hashes and
+explicit evidence/UNKNOWN limits, not a new recovery or acceptance action. It
+returns at most the latest 128 claim directories and flags truncation. Direct
+non-queue consumers are not silently assigned a new operation or sender ticket.

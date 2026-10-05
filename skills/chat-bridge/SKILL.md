@@ -343,7 +343,7 @@ Install the macOS launchd watchdog (all projects, one-shot scan every 60 seconds
 
 Remove it with `~/.local/share/chatgpt-chat-bridge/uninstall-watchdog.sh`.
 
-Recovery uses current visible native Continue/Try again/Retry/Regenerate controls, then a guarded `continue` for an actually incomplete/error turn. Quiet generation alone is never stopped automatically. Stop + guarded continue and original-task replay require explicit `--aggressive`; inspect current durable/tool progress first. Recovery rechecks task state and will skip results already recorded or accepted. Repeated failures mark the task `BLOCKED` and wake the owning controller/root escalation chain for GitHub reconciliation.
+Recovery uses a unique exact current-conversation native Continue/Try again/Retry control, then a guarded `continue` for an actually incomplete/error turn. Quiet generation alone is never stopped automatically. Stop + guarded continue and original-task replay require explicit `--aggressive`; inspect current durable/tool progress first. Recovery rechecks task state and will skip results already recorded or accepted. Repeated failures mark the task `BLOCKED` and wake the owning controller/root escalation chain for GitHub reconciliation.
 
 ChatGPT-Web-touching commands are serialized per verified login identity, including aliases of the same account; different logins have separate pacing gates. Normal UI work cannot run faster than 10 seconds; `new`, `archive`, `retire`, and `delete` cannot run faster than 30 seconds. The default UI pacing inline budget is 12 seconds and the separate lock-wait budget is at most 5 seconds; longer waits return `PACING_DEFERRED` (exit 75). Watchdog separates tasks on the same login by at least 10 seconds. `Too many requests` creates an adaptive 3–15 minute account-scoped cooldown; manual commands return `WEB_COOLDOWN_ACTIVE`. Watchdog skips that identity but continues others, and never starts Ego when no eligible tasks remain. Use `cooldown status --account ALIAS` (or `--project NAME`) and `cooldown clear --account ALIAS --confirm`. Legacy global cooldown protects only the default account. A pacing lock is not an account quota.
 
@@ -353,7 +353,7 @@ Stop an active generation:
 chat-bridge stop AGENT_ALIAS --project "PROJECT NAME"
 ```
 
-Use a native retry/regenerate control when exposed:
+Use a unique exact current-conversation Retry/Try again control; this never falls back to Regenerate or Continue:
 
 ```bash
 chat-bridge retry AGENT_ALIAS --project "PROJECT NAME"
@@ -439,3 +439,20 @@ Management authority is distinct from a normal task `callerRef`. Host-local admi
 External RPC extraction prefers the exact message-bound Markdown source where available; `lastAssistantTextSource` states whether the source or rendered DOM was used. Unknown source layouts remain explicit fallbacks, never heuristically unescaped or JSON-repaired.
 
 Existing UNKNOWN recovery: see docs/architecture.md, "Recovery of an already created, unregistered rotation". Use operation-anchored queue observe for missing runtime tasks; rotation-recover defaults to preview. Never treat recovery binding as successor ACK.
+
+
+## Per-claim delivery evidence
+
+Queued Web `send`/`new` attempts now create a private immutable claim directory
+before starting a child. It retains the claim identity, child PID and configured
+timeout, raw stdout/stderr, browser target/baseline, input witness, exclusive
+pre-trigger intent, observed source, and termination diagnostics when available.
+Use `chat-bridge queue delivery-attempts --operation ID` for a local read-only
+file/hash index. This does not start Ego, reconcile, register a candidate or resend.
+
+The synced `SEND_INTENT` is an uncertainty barrier, not proof that the click ran.
+Missing stages or empty output never prove absence of delivery. A timeout stays
+UNKNOWN even if cleanup captures a successful-looking receipt. Prior attempts are
+not overwritten. Direct non-queue callers retain their existing receipt contract;
+this journal is not a native parent/alias capability or an RPC execution ticket.
+Files are private and may contain complete source; do not upload them to GitHub.

@@ -13,6 +13,7 @@ function node(text="",attributes={},options={}) {
   const item={innerText:text,textContent:text,disabled:!!options.disabled,
     getAttribute:name=>attributes[name]??null,
     getClientRects:()=>options.hidden?[]:[{}],
+    getBoundingClientRect:()=>({width:options.hidden?0:100,height:options.hidden?0:40}),
     closest:selector=>selector.includes("data-message")||selector.includes("search-unit")?options.message||null:null,
     querySelector:()=>options.containsMessage||null,
     querySelectorAll:()=>[],
@@ -23,6 +24,8 @@ function node(text="",attributes={},options={}) {
 }
 async function withDom({buttons=[],errors=[],known=[],messages=[]},fn) {
   const root=node(), composer=node(), form=node();
+  root.matches=selector=>selector==='main, [role="main"]';
+  root.contains=other=>other===root||buttons.includes(other)||errors.includes(other)||known.includes(other)||messages.includes(other);
   form.querySelectorAll=()=>buttons;
   const document={title:"ChatGPT",visibilityState:"visible",wasDiscarded:false,
     querySelector:selector=>selector==="main"?root:selector==="form"?form:selector.includes("prompt-textarea")?composer:null,
@@ -59,14 +62,14 @@ test("history Retry controls cannot make a healthy current turn recoverable",asy
   assert.deepEqual(snapshot.recoveryControls,[]);
 });
 
-test("native recovery never selects a historical Retry over the current response",async()=>{
+test("strict Retry selects neither a historical Retry nor current Regenerate",async()=>{
   const old=node("old",{"data-message-author-role":"assistant","data-message-id":"old"});
   const current=node("current",{"data-message-author-role":"assistant","data-message-id":"new"});
   const oldButton=node("Retry",{}, {message:old});
   const currentButton=node("Regenerate response",{}, {message:current});
   await withDom({messages:[old,current],buttons:[oldButton,currentButton]},retry);
   assert.equal(!!oldButton.clicked,false);
-  assert.equal(currentButton.clicked,true);
+  assert.equal(!!currentButton.clicked,false);
 });
 
 test("stream restoration error is recognized outside a role=alert container",async()=>{

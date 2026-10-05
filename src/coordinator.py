@@ -2344,18 +2344,42 @@ def stop_bridge(process):
         return pending.output or stdout, pending.stderr or stderr
 
 
-def run_bridge(args, timeout=None, capture=True):
+def delivery_attempt_module():
+    # Load from this exact installed release, not the caller's Python search path.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("chat_bridge_delivery_attempt", pathlib.Path(__file__).with_name("delivery_attempt.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_bridge(args, timeout=None, capture=True, attempt=None):
     timeout = bridge_timeout() if timeout is None else timeout
+    evidence = delivery_attempt_module() if attempt else None
     with bridge_cancellation():
         if _bridge_interrupted is not None:
             raise InterruptedError("BRIDGE_CANCELLED")
-        process, timed_out, original_error = None, False, None
-        stdout, stderr = None, None
+        process, timed_out, original_error, cleanup_error = None, False, None, None
+        stdout, stderr, files, references = None, None, {}, {}
+        child_env = None
         try:
-            # Signals only latch here, including between real spawn and assignment.
-            process = subprocess.Popen(args, stdout=subprocess.PIPE if capture else None,
-                                       stderr=subprocess.PIPE if capture else None,
-                                       text=True, errors="replace", start_new_session=True)
+            if evidence:
+                if not capture:
+                    raise ValueError("DELIVERY_EVIDENCE_REQUIRES_CAPTURE")
+                for name in ("stdout", "stderr"):
+                    files[name] = evidence.create_private_file(pathlib.Path(attempt["directory"]) / (name + ".bin"))
+                evidence.record(attempt, "worker-starting", {"timeoutSec": timeout,
+                    "command": pathlib.Path(args[0]).name,
+                    "argvSha256": hashlib.sha256(json.dumps(args, ensure_ascii=False).encode()).hexdigest()})
+                child_env = dict(os.environ, CHAT_BRIDGE_DELIVERY_ATTEMPT=json.dumps(attempt))
+            # The production evidence path uses files: parent loss does not discard
+            # pipe buffers. The legacy no-context path retains its prior contract.
+            process = subprocess.Popen(args, stdout=files.get("stdout") or (subprocess.PIPE if capture else None),
+                                       stderr=files.get("stderr") or (subprocess.PIPE if capture else None),
+                                       text=True, errors="replace", start_new_session=True, env=child_env)
+            if evidence:
+                evidence.record(attempt, "worker-started", {"leaderPid": process.pid, "groupId": process.pid,
+                                                          "timeoutSec": timeout})
             deadline = time.monotonic() + timeout
             while _bridge_interrupted is None:
                 remaining = deadline - time.monotonic()
@@ -2367,27 +2391,57 @@ def run_bridge(args, timeout=None, capture=True):
                     break
                 except subprocess.TimeoutExpired as pending:
                     stdout, stderr = pending.output, pending.stderr
+                    for stream in files.values():
+                        os.fsync(stream.fileno())
         except OSError as error:
             original_error = error
             error.bridge_phase = "SPAWN" if process is None else "CAPTURE"
-            raise
         finally:
             if process is not None:
-                # Repeated signals stay latched throughout cleanup, including normal EOF.
                 try:
                     stdout, stderr = stop_bridge(process)
-                except PermissionError as cleanup_error:
-                    stdout = getattr(cleanup_error, "output", None) or stdout
-                    stderr = getattr(cleanup_error, "stderr", None) or stderr
-                    error = original_error or (subprocess.TimeoutExpired("chat-bridge", timeout) if timed_out else cleanup_error)
-                    error.output, error.stderr = stdout, stderr
-                    error.cleanup, error.timed_out = cleanup_error.cleanup, timed_out
-                    raise error from None
+                except PermissionError as error:
+                    cleanup_error = error
+                    stdout = getattr(error, "output", None) or stdout
+                    stderr = getattr(error, "stderr", None) or stderr
+            if evidence:
+                try:
+                    for name, stream in files.items():
+                        try:
+                            os.fsync(stream.fileno())
+                        finally:
+                            stream.close()
+                        text, references[name] = evidence.read_capture(pathlib.Path(attempt["directory"]) / (name + ".bin"))
+                        if name == "stdout":
+                            stdout = text
+                        else:
+                            stderr = text
+                    evidence.record(attempt, "worker-ended", {
+                        "leaderPid": process.pid if process else None,
+                        "leaderReturnCode": process.returncode if process else None,
+                        "timedOut": timed_out, "interrupted": _bridge_interrupted,
+                        "localCleanupAttempted": process is not None, "remoteExecutionStopped": False,
+                        "cleanup": getattr(cleanup_error, "cleanup", None), "streams": references,
+                        "errorType": type(original_error).__name__ if original_error else None})
+                except (OSError, ValueError) as error:
+                    if original_error is None:
+                        original_error = error
+                finally:
+                    for stream in files.values():
+                        if not stream.closed:
+                            stream.close()
+        if cleanup_error is not None:
+            error = original_error or (subprocess.TimeoutExpired("chat-bridge", timeout) if timed_out else cleanup_error)
+            error.output, error.stderr = stdout, stderr
+            error.cleanup, error.timed_out = cleanup_error.cleanup, timed_out
+            raise error from None
+        if original_error is not None:
+            original_error.output, original_error.stderr = stdout, stderr
+            raise original_error
         if _bridge_interrupted is not None:
             raise InterruptedError("BRIDGE_CANCELLED")
         if timed_out:
-            # Never stringify the original argv, which contains the prompt. Cleanup
-            # can obtain a successful receipt, but cannot upgrade timeout to success.
+            # Captured success is retained but cannot upgrade an expired send.
             raise subprocess.TimeoutExpired("chat-bridge", timeout, output=stdout, stderr=stderr) from None
         return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
@@ -2428,7 +2482,12 @@ def worker_diagnostic(returncode, stderr, phase, error=None, stdout=None):
         worker["capturedReceipt"] = {"deliveryStage": receipt["deliveryStage"]}
         if re.fullmatch(r"[A-Z0-9_]{1,100}", str(receipt.get("code") or "")):
             worker["capturedReceipt"]["code"] = receipt["code"]
-    return {"worker": worker}
+    result = {"worker": worker}
+    # Full parsed witness is private diagnostic evidence, not a delivery upgrade.
+    # In particular, timeout used to throw this away before uncertain_new_session.
+    if receipt and receipt.get("deliveryStage") == "SEND_ATTEMPTED" and isinstance(receipt.get("nativeWitness"), dict):
+        result["nativeWitness"] = receipt["nativeWitness"]
+    return result
 
 
 def claim(db):
@@ -2504,6 +2563,8 @@ def uncertain_new_session(db, row, result):
 def finish(db, row, status, reason=None, retry_after=0, result=None, session_ref=None, pre_send_failure=False):
     begin_immediate(db)
     try:
+        if isinstance(row, dict) and row.get("_attemptEvidence"):
+            result = {**(result or {}), "attemptEvidence": row["_attemptEvidence"]}
         if status == 'DELIVERY_UNKNOWN' and row['kind'] in {'dispatch', 'rotation'} and not row['session_ref'] and not session_ref:
             result = dict(result or {})
             result['newSession'] = uncertain_new_session(db, row, result)
@@ -3065,8 +3126,17 @@ def work_one(db):
         if row["kind"] == "rotation":
             args += ["--background"]
     try:
-        completed = run_bridge(args)
-    except (OSError, subprocess.TimeoutExpired) as error:
+        attempt = None
+        if args[1] in {"send", "new"}:
+            # claim() is already committed. Publish the exact claim before any
+            # external child starts; no UNKNOWN or expired claim can reuse it.
+            current = db.execute("SELECT * FROM operations WHERE id=?", (row["id"],)).fetchone()
+            if not current or any(current[k] != row[k] for k in ("status", "attempts", "claimed_at", "message", "payload_hash", "account_id", "session_ref")):
+                raise ValueError("DELIVERY_CLAIM_CHANGED_BEFORE_SPAWN")
+            attempt = delivery_attempt_module().prepare(state_dir_for(db), row)
+            row = {**dict(row), "_attemptEvidence": attempt}
+        completed = run_bridge(args, **({"attempt": attempt} if attempt else {}))
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
         return finish(db, row, "DELIVERY_UNKNOWN", type(error).__name__,
                       result=worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "dispatch", error=error))
     receipt = parse_worker_receipt(completed)
@@ -4024,7 +4094,7 @@ def main():
     if command in {"image-session-occupancy", "image-io-admission", "image-output-io-admission", "image-delivery-io-admission", "image-delivery-receipt"}:
         print(json.dumps(image_local_read(config, state, command, json.load(sys.stdin))))
         return
-    if command in {"observe", "observation-context"}:
+    if command in {"observe", "observation-context", "delivery-attempts", "delivery-admission"}:
         db = connection(config, state, initialize=False)
         db.execute("PRAGMA query_only=ON")
     elif command in {"admission-check", "local-owner-contract"} and (state / "bridge.sqlite3").exists():
@@ -4313,6 +4383,28 @@ def main():
                 },config,state)
             else:
                 raise ValueError("UNKNOWN_CONTROL_COMMAND")
+        elif command == "delivery-admission":
+            context = json.load(sys.stdin)
+            row = delivery_attempt_module().verify_current(state, db, context)
+            origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+            if origin and origin != row["account_id"]:
+                raise ValueError("DELIVERY_EVIDENCE_ORIGIN_MISMATCH")
+            if row["kind"] in {"dispatch", "rotation"}:
+                mode = management_mode(db, row["project"], row["workgroup_id"])
+                if mode["mode"] in {"PAUSED", "DRAINING"} or mode.get("scope") != row["control_scope"] or int(mode.get("epoch") or 0) != int(row["control_epoch"] or 0):
+                    raise ValueError("DELIVERY_ADMISSION_CHANGED")
+            value = {"ok": True, "operationId": row["id"], "claimOrdinal": row["attempts"]}
+        elif command == "delivery-attempts":
+            if len(args) != 2 or args[0] != "--operation":
+                raise ValueError("delivery-attempts requires --operation ID")
+            row = db.execute("SELECT * FROM operations WHERE id=?", (args[1],)).fetchone()
+            if not row:
+                raise ValueError("OPERATION_NOT_FOUND")
+            origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+            if origin and origin != row["account_id"]:
+                raise ValueError("DELIVERY_EVIDENCE_ORIGIN_MISMATCH")
+            value = delivery_attempt_module().inspect(state, row["id"])
+            value["operationStatus"] = row["status"]
         elif command == "status":
             value = observed_response(db.execute("SELECT * FROM operations WHERE id=?", (args[0],)).fetchone(), {**(runtime(db).get("tasks") or {}), **native_tasks(db)})
         elif command == "reconcile":

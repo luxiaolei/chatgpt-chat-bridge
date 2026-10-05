@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import {readFile} from 'node:fs/promises';
+import {readFile,mkdtemp,mkdir,writeFile,readdir,rm,realpath} from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import {fileURLToPath} from 'node:url';
 
 for(const file of ['control-routing','page-pool','liveness-policy','task-policy','lifecycle-policy','web-policy','model-policy','session-policy'])
   await import('../src/'+file+'.js');
@@ -94,7 +97,10 @@ async function inBrowser(f,fn){
     navigator:{onLine:true},MutationObserver:class{observe(){}disconnect(){}},Node:{ELEMENT_NODE:1},
     getComputedStyle:()=>({display:'block',visibility:'visible',opacity:'1'}),
     fetch:async()=>({json:async()=>({user:{id:'verified-user'}})}),
-    __CHAT_BRIDGE_ARGS__:['new','--project','P','--account','a','--role','canary','--name','canary','--message',request,'--strict-model']};
+    __CHAT_BRIDGE_ARGS__:['new','--project','P','--account','a','--role','canary','--name','canary','--message',request,'--strict-model'],
+    ...(f.attempt?{__CHAT_BRIDGE_DELIVERY_ATTEMPT__:f.attempt.descriptor,
+      __CHAT_BRIDGE_STATE_DIR__:f.attempt.state,
+      __CHAT_BRIDGE_COORDINATOR_PATH__:fileURLToPath(new URL('../src/coordinator.py',import.meta.url))}:{})};
   const prior=new Map(Object.keys(globals).concat('__CHAT_BRIDGE_WATCH').map(k=>[k,Object.getOwnPropertyDescriptor(globalThis,k)]));
   const now=Date.now;
   try{
@@ -102,6 +108,7 @@ async function inBrowser(f,fn){
     delete globalThis.__CHAT_BRIDGE_WATCH;Date.now=()=>f.now;
     const setup=[
       'const reg=f.reg;',
+      'if(f.attempt)coordinated=(command,context)=>{if(command!=="delivery-admission"||context.operationId!==f.attempt.descriptor.operationId)throw new Error("TEST_UNEXPECTED_ADMISSION"); f.admissions=(f.admissions||0)+1;if(f.denyAdmission)throw new Error("DELIVERY_ATTEMPT_NO_LONGER_CURRENT");return {ok:true};};',
       'assertImagePageFree=async()=>{};',
       'detectWebRateLimit=async()=>{};',
       'openBoundTask=async()=>({task:{spaceId:2},binding:f.binding});',
@@ -386,4 +393,58 @@ test('permanently unowned Copy source remains unconfirmed with or without an ear
     assert.equal(f.trace.some(s=>s.url===transient&&s.lastUserSource?.messageId===messageId),!missingAtStart,'anchor requirement is unchanged');
     assert.equal(f.sends,1);assert.equal(f.persisted.length,0);assert.deepEqual(f.reg.chats,{});
   }
+});
+
+
+async function journalFixture(){
+  const state=await realpath(await mkdtemp(path.join(os.tmpdir(),'bridge-send-journal-')));
+  const op='77777777-7777-4777-8777-777777777777',directory=path.join(state,'delivery-attempts',op,'1');
+  await mkdir(directory,{recursive:true,mode:0o700});
+  const manifest={format:'chat-bridge-delivery-attempt-v1',operationId:op,claimOrdinal:1,
+    messageSha256:sha(request),project:'P',account:'a',sessionRef:null};
+  const raw=JSON.stringify(manifest)+'\n';await writeFile(path.join(directory,'manifest.json'),raw,{mode:0o600});
+  return {state,directory,descriptor:{format:manifest.format,operationId:op,claimOrdinal:1,directory,manifestSha256:sha(raw)}};
+}
+
+test('actual native send persists original baseline, intent and source before a final receipt exists',async()=>{
+  const journal=await journalFixture();
+  try{
+    const f=fixture(x=>x.attempt=journal);await inBrowser(f,async({runNew})=>runNew());
+    assert.equal(f.sends,1);assert.equal(f.admissions,1);
+    const files=await readdir(journal.directory);
+    for(const name of ['10-TARGET_OBSERVED.json','20-BEFORE_INPUT.json','30-INPUT_VERIFIED.json','40-SEND_INTENT.json','50-SEND_RETURNED.json','70-DELIVERY_CONFIRMED.json'])assert.ok(files.includes(name),name);
+    const verified=JSON.parse(await readFile(path.join(journal.directory,'30-INPUT_VERIFIED.json'),'utf8'));
+    assert.equal(verified.data.nativeBody,request);assert.equal(verified.data.nativeWitness.bodyHash,sha(request));
+    const samples=await Promise.all(files.filter(n=>n.includes('-OBSERVED-')).map(async n=>JSON.parse(await readFile(path.join(journal.directory,n),'utf8'))));
+    assert.ok(samples.some(x=>x.data.snapshot.lastUserId===messageId&&x.data.snapshot.lastUserSource.text===request));
+    assert.ok(samples.some(x=>x.data.snapshot.url===permanent));
+    const repeat=fixture(x=>x.attempt=journal);
+    await inBrowser(repeat,async({runNew})=>assert.rejects(runNew(),/EEXIST/));
+    assert.equal(repeat.sends,0,'same persisted claim does not trigger another Send');
+    assert.equal(repeat.closed,0,'an uncertain prior send never licenses closing its page');
+  }finally{await rm(journal.state,{recursive:true,force:true});}
+});
+
+test('current-claim admission refusal stops the native send and retains the original input evidence',async()=>{
+  const journal=await journalFixture();
+  try{
+    const f=fixture(x=>{x.attempt=journal;x.denyAdmission=true;});
+    await inBrowser(f,async({runNew})=>assert.rejects(runNew(),/NO_LONGER_CURRENT/));
+    assert.equal(f.sends,0);assert.equal(f.admissions,1);
+    const files=await readdir(journal.directory);assert.ok(files.includes('30-INPUT_VERIFIED.json'));assert.ok(!files.includes('40-SEND_INTENT.json'));
+  }finally{await rm(journal.state,{recursive:true,force:true});}
+});
+
+test('unconfirmed persistent URL with temporary source keeps full evidence without registering or resending',async()=>{
+  const journal=await journalFixture();
+  try{
+    const f=fixture(x=>{x.attempt=journal;x.skipTemporary=true;});
+    await inBrowser(f,async({runNew})=>assert.rejects(runNew(),e=>e.code==='DELIVERY_UNCONFIRMED'));
+    assert.equal(f.sends,1);assert.equal(f.persisted.length,0);
+    const saved=JSON.parse(await readFile(path.join(journal.directory,'90-ERROR.json'),'utf8'));
+    assert.equal(saved.data.nativeWitness.postSend.lastUserId,messageId);
+    assert.equal(saved.data.nativeWitness.postSend.afterUrl,permanent);
+    assert.equal(saved.data.nativeWitness.postSend.sourceConversationId,temporary);
+    assert.equal(saved.data.nativeWitness.postSend.missingCondition,'NATIVE_TEMPORARY_SOURCE_PROOF_MISSING');
+  }finally{await rm(journal.state,{recursive:true,force:true});}
 });
