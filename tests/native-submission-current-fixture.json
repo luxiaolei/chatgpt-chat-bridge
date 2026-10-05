@@ -8,5 +8,7 @@
   "getter": "getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,M.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}",
   "submitSha256": "8dcd9e4ee5c41e9d9012b95c832f2813f3d63119bf45b650564c998bed2ea428",
   "getterSha256": "ce893debd58fa25e54f219f9114c4c43fa80cf58cdf016ab798329bf0e681ca5",
-  "serializerSha256": "231c5ee71de23d9394cdf406f804b3f36f391d456a5a1ffd32a48501af35e3c2"
+  "serializerSha256": "231c5ee71de23d9394cdf406f804b3f36f391d456a5a1ffd32a48501af35e3c2",
+  "serializerSource": "(n,a)=>{var r;let i,l=((r=new C.m((0,s.b)(n)).removeMark(0,n.content.size,n.type.schema.marks.literalPaste).doc).descendants((e,t,n,a)=>{if(!e.isText||null==n)return;let l=e.marks.find(A.g);if(null==l)return;let s=0===a?void 0:n.child(a-1).marks.find(A.g);if(null!=s&&l.eq(s))return;let c=e.text??\"\",d=t+e.nodeSize;for(let e=a+1;e<n.childCount;e++){let t=n.child(e),a=t.marks.find(A.g);if(!t.isText||null==a||!l.eq(a))break;c+=t.text??\"\",d+=t.nodeSize}let u=(0,o.b)(c);(d!==t+e.nodeSize||null==u)&&(null==i&&(i=new C.m(r)),null==u?i.removeMark(t,d,l):i.addMark(t,d,l.type.create({...l.attrs,href:u})))}),i?.doc??r);return!a?.preserveParagraphSpacing&&l.childCount>0&&l.content.content.every(e=>\"paragraph\"===e.type.name)?Array.from({length:l.childCount},(n,a)=>{let r=l.child(a),o=t.get(r);return null==o&&(o=e.serialize(r).replace(/\\n$/,\"\"),t.set(r,o)),o}).join(\"\\n\"):e.serialize(l).replace(/\\n$/,\"\")}",
+  "terminalLfProvenance": "Exact existing VPN conversation source equals native body minus one terminal LF on 2026-10-05; full getter/serializer source captured with zero Send at 2026-10-05T15:32:17.021Z, one composer/editor with unchanged view/doc/dictation. Bodies in tests are synthetic."
 }

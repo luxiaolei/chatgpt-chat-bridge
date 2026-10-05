@@ -222,9 +222,11 @@ test('successful and pre-send receipts keep their existing shape; native observa
 
 const terminalLfFormat=JSON.parse(await readFile(new URL('./native-terminal-lf-format.json',import.meta.url),'utf8'));
 const digest=value=>crypto.createHash('sha256').update(value).digest('hex');
-function terminalLfFixture(body='Synthetic management request\nExact footer.\n') {
+const currentNativeFormat=JSON.parse(await readFile(new URL('./native-submission-current-fixture.json',import.meta.url),'utf8'));
+const currentTerminalLfFormat={getterSource:currentNativeFormat.getter,serializerSource:currentNativeFormat.serializerSource};
+function terminalLfFixture(body='Synthetic management request\nExact footer.\n',format=terminalLfFormat) {
  const now=new Date().toISOString(),identity='verified@example.test';
- const witness={...terminalLfFormat,format:'chatgpt-native-getText-v1',body,url,accountIdentity:identity,
+ const witness={...format,format:'chatgpt-native-getText-v1',body,url,accountIdentity:identity,
   observedAt:now,requestHash:digest(body.replace(/\s+/g,' ').trim()),bodyHash:digest(body)};
  const original={...before,expectedMessage:body,expectedIdentity:identity,nativeWitness:witness};
  const observed={...after,observedAt:now,lastUserSourceCondition:'BOUND_SOURCE',
@@ -248,10 +250,28 @@ test('characterized persistent send binds exactly one terminal LF and retains bo
  assert.equal(JSON.stringify(result.nativeWitness).includes('Synthetic management request'),false);
 });
 
+test('current captured native format binds one terminal LF and rejects mixed format pairs',async()=>{
+ assert.equal(digest(currentTerminalLfFormat.getterSource),currentNativeFormat.getterSha256);
+ assert.equal(digest(currentTerminalLfFormat.serializerSource),currentNativeFormat.serializerSha256);
+ const n=terminalLfFixture(undefined,currentTerminalLfFormat),f={witness:n.witness,shortWait:true,latest:n.observed},api=await harness(f);
+ assert.equal(api.deliveryObserved(n.original,n.observed,n.body),true);
+ const result=await api.sendMessage(failurePage(f),n.body,url,n.identity);
+ assert.equal(result.nativeWitness.getterHash,currentNativeFormat.getterSha256);
+ assert.equal(result.nativeWitness.serializerHash,currentNativeFormat.serializerSha256);
+ assert.equal(result.nativeWitness.bodyHash,digest(n.body));
+ assert.equal(result.nativeWitness.bodyBinding.sourceBodyHash,digest(n.body.slice(0,-1)));
+ for(const format of [
+  {getterSource:terminalLfFormat.getterSource,serializerSource:currentTerminalLfFormat.serializerSource},
+  {getterSource:currentTerminalLfFormat.getterSource,serializerSource:terminalLfFormat.serializerSource},
+ ]) assert.equal(api.deliveryObserved({...n.original,nativeWitness:{...n.witness,...format}},n.observed,n.body),false);
+});
+
 test('terminal LF compatibility rejects other whitespace, uncharacterized formats and weakened evidence',async()=>{
- const {deliveryObserved}=await harness(),n=terminalLfFixture();
+ const {deliveryObserved}=await harness();
+ for(const format of [terminalLfFormat,currentTerminalLfFormat]) {
+ const n=terminalLfFixture(undefined,format);
  for(const body of ['body\r\n','body\n\n','body \n','body\t\n','body\n \n','body','body ']) {
-  const f=terminalLfFixture(body);
+  const f=terminalLfFixture(body,format);
   assert.equal(deliveryObserved(f.original,f.observed,body),false,JSON.stringify(body));
  }
  for(const text of [n.body.slice(0,-2),n.body.trim().replace('\n',' '),' '+n.body.slice(0,-1),n.body.slice(0,-1)+' ','changed\nExact footer.']) {
@@ -273,4 +293,5 @@ test('terminal LF compatibility rejects other whitespace, uncharacterized format
   {url:'https://chatgpt.com/g/'+project+'/project',nativeWitness:{...n.witness,url:'https://chatgpt.com/g/'+project+'/project'}}])
   assert.equal(deliveryObserved({...n.original,...change},n.observed,n.body),false,JSON.stringify(change));
  assert.equal(deliveryObserved(n.original,{...n.observed,lastUserSource:{...n.observed.lastUserSource,text:n.body}},n.body),true);
+ }
 });
