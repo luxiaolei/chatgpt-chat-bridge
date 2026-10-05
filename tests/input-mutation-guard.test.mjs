@@ -1,0 +1,168 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+for(const file of ['control-routing','page-pool','liveness-policy','task-policy','lifecycle-policy','web-policy','model-policy','session-policy'])
+  await import('../src/'+file+'.js');
+const main=await readFile(new URL('../src/main.js',import.meta.url),'utf8');
+const prefix=main.split('const cmd=args[0] || "help";')[0];
+const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+const url='https://chatgpt.com/g/g-p-'+ 'a'.repeat(32)+'/c/11111111-1111-4111-8111-111111111111';
+const home=url.replace(/\/c\/[^/]+$/,'/project'), message='Complete synthetic request\nExact footer.';
+const section=(start,end)=>main.slice(main.indexOf(start)+start.length,main.indexOf(end));
+const modelBody=section('if(cmd==="model"){','\n  if(cmd==="effort"){').replace(/\n  }\s*$/,'');
+const effortBody=section('if(cmd==="effort"){','\n  if(cmd==="stop")').replace(/\n  }\s*$/,'');
+const newBody=section('else if(cmd==="new"){','\n}\nelse throw new Error("Unknown command:');
+function node(text='',options={}) {
+  const attrs=options.attrs||{};
+  const item={innerText:text,textContent:text,disabled:!!options.disabled,parentElement:null,
+    getAttribute:k=>attrs[k]??null,setAttribute:(k,v)=>{attrs[k]=v;},removeAttribute:k=>{delete attrs[k];},
+    getClientRects:()=>options.hidden?[]:[{}],getBoundingClientRect:()=>({left:0,top:0,width:100,height:40}),
+    closest:s=>s.includes('data-message')||s.includes('search-unit')?options.message||null:
+      s.includes('nav')?options.sidebar||null:null,
+    matches:s=>s==='main, [role="main"]'&&!!options.root,contains:n=>n===item||!!options.contains?.includes(n),
+    querySelector:()=>options.containsMessage||null,querySelectorAll:()=>[]};
+  return item;
+}
+function fixture(change={}) {
+  const composer=node(change.raw??''), root=node('',{root:true}), form=node(), send=node('Send',{attrs:{'data-testid':'send-button'}});
+  if(change.unknownRaw)composer.textContent=undefined;
+  const composers=change.count===0?[]:change.count===2?[composer,node('')]:[composer];
+  const buttons=[send], calls=[], chat={id:'11111111-1111-4111-8111-111111111111',project:'P',account:'a',url,model:'Latest',effort:'High'};
+  root.contains=n=>n===root||n===form||composers.includes(n)||buttons.includes(n);
+  form.querySelectorAll=()=>buttons;
+  const f={composers,composer,root,buttons,calls,chat,currentUrl:url,login:change.nullLogin?null:change.login??'verified-user',change,closed:0,
+    reg:{accounts:change.noIdentity?{}:{a:{identity:'verified-user'}},chats:{[chat.id]:chat},
+      projects:{P:{activeAccount:'a',bindings:{a:{projectUrl:home}}}}}};
+  f.document={title:'Synthetic',visibilityState:'visible',body:root,querySelector:s=>
+    s==='main'||s==='[role="main"]'?root:s==='form'?form:
+    s.includes('prompt-textarea')?composers[0]||null:s==='button[data-testid="send-button"]'?send:null,
+    querySelectorAll:s=>s.includes('contenteditable="true"')?composers:s==='button'?buttons:[]};
+  f.page={label:'synthetic',spaceId:2,url:async()=>f.currentUrl,goto:async u=>{f.currentUrl=u;},waitForSelector:async()=>{},
+    fill:async(_s,text)=>{calls.push('fill');composer.textContent=composer.innerText=change.partialFill?'partial user content':change.emptyFill?'':text;if(change.loginAfterFill)f.login=change.loginAfterFill;if(change.fillFails)throw Error('fill transport failed');},
+    keyboard:{press:async key=>calls.push('key:'+key),insertText:async text=>{calls.push('insert');composer.textContent=composer.innerText=text;}},
+    focus:async()=>calls.push('focus'),waitForTimeout:async()=>{},close:async()=>{f.closed++;},
+    click:async()=>{calls.push('send');composer.textContent=composer.innerText='';},
+    evaluate:async(fn,arg)=>fn(arg)};
+  return f;
+}
+async function run(f,fn) {
+  const values={document:f.document,location:{get href(){return f.currentUrl;},get origin(){return new URL(f.currentUrl).origin;},get pathname(){return new URL(f.currentUrl).pathname;}},
+    navigator:{onLine:true},getComputedStyle:()=>({visibility:'visible',display:'block',opacity:'1'}),
+    MutationObserver:class{observe(){}disconnect(){}},Node:{ELEMENT_NODE:1},
+    fetch:async(path,options)=>{f.calls.push('auth');assert.equal(path,'/api/auth/session');assert.equal(options?.cache,'no-store');assert.equal(options?.credentials,'same-origin');if(f.change.draftDuringLogin)f.composer.textContent=f.composer.innerText='new user draft';if(f.change.loginUnavailable)throw Error('offline');
+      return {ok:!f.change.badResponse,json:async()=>({user:{id:f.login}})};},
+    __CHAT_BRIDGE_ARGS__:['new','--project','P','--account','a','--message',message,'--strict-model']};
+  const saved=new Map([...Object.keys(values),'__CHAT_BRIDGE_WATCH'].map(k=>[k,Object.getOwnPropertyDescriptor(globalThis,k)]));
+  try {
+    for(const[k,v]of Object.entries(values))Object.defineProperty(globalThis,k,{value:v,configurable:true,writable:true});
+    delete globalThis.__CHAT_BRIDGE_WATCH;
+    const setup=[
+      'const reg=f.reg, page=f.page, chat=f.chat;',
+      'assertImagePageFree=async()=>{};detectWebRateLimit=async()=>{};recordDeliveryStage=async()=>{};',
+      "applyModelSpec=async()=>{f.calls.push('model');return {model:'Latest',effort:'High'};};",
+      "setEffort=async()=>{f.calls.push('effort');return true;};saveRegistry=async()=>{};touchRuntime=async()=>{};print=()=>{};",
+      'openBoundTask=async()=>({task:{spaceId:2},binding:f.reg.projects.P.bindings.a});',
+      'newManagedPage=async()=>page;openProjectPage=async()=>{f.currentUrl=home;};',
+      "waitForDelivery=async()=>({url:f.currentUrl,lastUser:message,lastUserId:'new-user',messageCount:1,composerText:''});",
+      'return {state,send:()=>sendMessage(page,message,url),dispatch:()=>applyDispatchModel(page,chat,"Latest","High"),',
+      "model:async()=>{const positionals=()=>['Latest'],opt=()=>null;"+modelBody+'},',
+      "effort:async()=>{const positionals=()=>['High'];"+effortBody+'},',
+      "new:async()=>{const project='P',accountArg='a';"+newBody+'},',
+      'loader:()=>recoverConversationLoadError(page)};'
+    ].join('\n');
+    const api=await new AsyncFunction('f','message','url','home',prefix+setup)(f,message,url,home);
+    return await fn(api);
+  } finally {for(const[k,d]of saved){if(d)Object.defineProperty(globalThis,k,d);else delete globalThis[k];}}
+}
+test('actual input entry points reject raw drafts and unverified fresh login before all input/model effects',async t=>{
+  const cases=[['space',{raw:' '}],['tab',{raw:'\t'}],['LF',{raw:'\n'}],['NBSP',{raw:'\u00a0'}],
+    ['missing',{count:0}],['duplicate',{count:2}],['unknown raw',{unknownRaw:true}],
+    ['wrong login',{login:'other-user'}],['unavailable login',{loginUnavailable:true}],
+    ['HTTP failure',{badResponse:true}],['missing login ID',{nullLogin:true}],['missing registered identity',{noIdentity:true}],['draft arriving during login',{draftDuringLogin:true}]];
+  for(const[name,change]of cases)await t.test(name,async()=>{
+    for(const entry of ['send','dispatch','model','effort','new']) {
+      const f=fixture(change);
+      const expected=change.count===0?'CHAT_BUSY':change.noIdentity?'TARGET_IDENTITY_UNVERIFIED':change.login?'INPUT_LOGIN_MISMATCH':change.loginUnavailable||change.badResponse||change.nullLogin?'INPUT_LOGIN_UNAVAILABLE':'USER_DRAFT_PRESENT';
+      await run(f,api=>assert.rejects(api[entry](),error=>error.message===expected,entry));
+      assert.deepEqual(f.calls.filter(x=>/^(fill|key:|insert|send|model|effort)/.test(x)),[],entry);
+      if(change.raw||change.count!=null||change.unknownRaw)assert.equal(f.closed,0,entry+' retains uncertain draft');
+    }
+  });
+});
+test('semantic empty p/br allows one complete send and read-only state performs no login request',async()=>{
+  const f=fixture();f.composer.innerText='\n'; // Empty paragraph/br has no semantic textContent.
+  await run(f,async api=>{
+    const snapshot=await api.state(f.page);assert.equal(snapshot.composerText,'');assert.deepEqual(f.calls,[]);
+    const receipt=await api.send();assert.equal(receipt.delivered,true);assert.equal(receipt.lastUserId,'new-user');
+  });
+  assert.equal(f.calls.filter(x=>x==='fill').length,1);assert.equal(f.calls.filter(x=>x==='send').length,1);
+  assert.equal(f.calls.filter(x=>x==='auth').length,1);
+});
+test('empty fallback rechecks login and only an unchanged account may type and send',async()=>{
+  for(const loginAfterFill of [null,'other-user']) {
+    const f=fixture({fillFails:true,emptyFill:true,loginAfterFill});
+    await run(f,async api=>{if(loginAfterFill)await assert.rejects(api.send(),/INPUT_LOGIN_MISMATCH/);else assert.equal((await api.send()).delivered,true);});
+    assert.deepEqual(f.calls.filter(x=>/^(key:|insert|send)/.test(x)),loginAfterFill?[]:['key:ControlOrMeta+A','key:Backspace','insert','send']);
+  }
+});
+test('partial fill failure preserves unknown content without destructive keyboard fallback',async()=>{
+  const f=fixture({fillFails:true,partialFill:true});
+  await run(f,api=>assert.rejects(api.send()));
+  assert.equal(f.composer.textContent,'partial user content');
+  assert.deepEqual(f.calls.filter(x=>/^(key:|insert|send)/.test(x)),[]);
+});
+test('loader recovery selects only one current platform Retry, excludes historical prose/buttons and approval',async t=>{
+  for(const kind of ['history','sidebar','wrapper','current','duplicate','approval','disabled'])await t.test(kind,async()=>{
+    const f=fixture({count:0}), owner=node('Could not load this ChatGPT conversation',{attrs:{'data-message-author-role':'user'}});
+    const historical=['history','wrapper'].includes(kind);
+    const error=node('Could not load this ChatGPT conversation',{message:kind==='history'?owner:null,containsMessage:kind==='wrapper'?owner:null});
+    const button=node('Retry',{message:historical?owner:null,sidebar:kind==='sidebar'?{}:null,disabled:kind==='disabled'});
+    const approval=node('Codex Tasks\nAllow ChatGPT to use Codex Tasks?',{attrs:{role:'alert'}});
+    const errors=kind==='approval'?[error,approval]:[error], buttons=kind==='duplicate'?[button,node('Retry')]:[button];
+    f.document.body.innerText=owner.innerText;f.root.contains=n=>errors.includes(n)||buttons.includes(n);
+    f.document.querySelectorAll=s=>s==='button'?buttons:s.includes('data-chat-bridge-conversation-retry')?[]:
+      s.includes('[role="alert"]')?errors:s.startsWith('main div')?errors:
+      s==='[data-message-author-role]'?historical?[owner]:[]:[];
+    f.page.keyboard.press=async key=>f.calls.push('key:'+key);
+    await run(f,async api=>{
+      if(kind==='approval')await assert.rejects(api.loader(),/APPROVAL_REQUIRED/);
+      else assert.equal(await api.loader(),kind==='current');
+    });
+    assert.equal(f.calls.includes('key:Enter'),kind==='current');
+    assert.equal(button.getAttribute('data-chat-bridge-conversation-retry')==='1',kind==='current'||kind==='approval');
+  });
+});
+
+test('immutable conversation target rejects same-account navigation before every fallback effect and Send',async()=>{
+  const foreign=url.replace('11111111-1111-4111-8111-111111111111','22222222-2222-4222-8222-222222222222');
+  const prepare=()=>{
+    const f=fixture(), effects=[];
+    f.reg.chats.foreign={...f.chat,id:'22222222-2222-4222-8222-222222222222',url:foreign};
+    for(const name of ['fill','focus','click']) {
+      const original=f.page[name];f.page[name]=async(...args)=>{effects.push({effect:name,url:f.currentUrl});return original(...args);};
+    }
+    for(const name of ['press','insertText']) {
+      const original=f.page.keyboard[name];f.page.keyboard[name]=async(...args)=>{effects.push({effect:name+':'+args[0],url:f.currentUrl});return original(...args);};
+    }
+    return {f,effects};
+  };
+  for(const phase of ['fill-failure','focus','select','backspace','fill-success']) {
+    const {f,effects}=prepare();
+    const fill=f.page.fill,focus=f.page.focus,press=f.page.keyboard.press;
+    f.page.fill=async(...args)=>{
+      if(phase==='fill-success'){await fill(...args);f.currentUrl=foreign;return;}
+      f.calls.push('fill-failed');if(phase==='fill-failure')f.currentUrl=foreign;throw Error('synthetic fill failure');
+    };
+    f.page.focus=async(...args)=>{await focus(...args);if(phase==='focus')f.currentUrl=foreign;};
+    f.page.keyboard.press=async key=>{await press(key);if(phase==='select'&&key==='ControlOrMeta+A'||phase==='backspace'&&key==='Backspace')f.currentUrl=foreign;};
+    await run(f,api=>assert.rejects(api.send(),error=>error.message==='DELIVERY_TARGET_MISMATCH'&&error.deliveryStage==='PRE_SEND',phase));
+    assert.deepEqual(effects.filter(x=>x.url===foreign),[],phase+' never acts on the foreign conversation');
+    assert.equal(f.calls.includes('send'),false,phase);
+    if(phase==='fill-failure')assert.equal(f.calls.includes('focus'),false);
+  }
+  for(const entry of ['dispatch','model','effort']) {
+    const {f,effects}=prepare();f.currentUrl=foreign;
+    await run(f,api=>assert.rejects(api[entry](),/DELIVERY_TARGET_MISMATCH/,entry));
+    assert.deepEqual(effects,[]);assert.deepEqual(f.calls.filter(x=>/^(model|effort)/.test(x)),[]);
+  }
+});

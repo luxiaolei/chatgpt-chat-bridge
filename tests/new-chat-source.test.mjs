@@ -78,10 +78,10 @@ function fixture(change=()=>{}){
     if(selector==='button')return f.sends?[copy]:[send];
     return [];
   }};
-  f.page={label:'p-test',spaceId:2,url:async()=>f.url,goto:async url=>{f.url=url;},waitForSelector:async()=>{},fill:async(_selector,text)=>{assert.equal(text,request);composer.innerText=text;},
+  f.page={label:'p-test',spaceId:2,url:async()=>f.url,goto:async url=>{f.url=url;},waitForSelector:async()=>{},fill:async(_selector,text)=>{assert.equal(text,request);composer.innerText=composer.textContent=text;},
     waitForTimeout:async ms=>{f.now+=ms;if(f.sends&&ms>=150){f.polls++;f.url=f.skipTemporary||f.polls>=2?permanent:transient;f.onPoll?.(f);}},
     waitForURL:async re=>assert.match(f.url,re),close:async()=>{f.closed++;},
-    click:async selector=>{assert.equal(selector,'button[data-testid="send-button"]');f.sends++;unit.attrs['data-chatgpt-search-message-ids']=messageId;composer.innerText='';f.url=f.skipTemporary?permanent:transient;},
+    click:async selector=>{assert.equal(selector,'button[data-testid="send-button"]');f.sends++;unit.attrs['data-chatgpt-search-message-ids']=messageId;composer.innerText=composer.textContent='';f.url=f.skipTemporary?permanent:transient;},
     evaluate:async(fn,...args)=>{
       assert.ok(args.length<=1,'evaluate has exactly zero or one JSON argument');
       const arg=args.length?JSON.parse(JSON.stringify(args[0])):undefined;
@@ -93,10 +93,10 @@ function fixture(change=()=>{}){
 }
 
 async function inBrowser(f,fn){
-  const globals={document:f.document,location:{get href(){return f.url;},get pathname(){return new URL(f.url).pathname;}},
+  const globals={document:f.document,location:{get href(){return f.url;},get origin(){return new URL(f.url).origin;},get pathname(){return new URL(f.url).pathname;}},
     navigator:{onLine:true},MutationObserver:class{observe(){}disconnect(){}},Node:{ELEMENT_NODE:1},
     getComputedStyle:()=>({display:'block',visibility:'visible',opacity:'1'}),
-    fetch:async()=>({json:async()=>({user:{id:'verified-user'}})}),
+    fetch:async()=>({ok:true,json:async()=>({user:{id:'verified-user'}})}),
     __CHAT_BRIDGE_ARGS__:['new','--project','P','--account','a','--role','canary','--name','canary','--message',request,'--strict-model'],
     ...(f.attempt?{__CHAT_BRIDGE_DELIVERY_ATTEMPT__:f.attempt.descriptor,
       __CHAT_BRIDGE_STATE_DIR__:f.attempt.state,

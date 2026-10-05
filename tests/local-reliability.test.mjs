@@ -185,7 +185,7 @@ test("approval appearing at recovery action defers without watch failure account
 test("terminal detach keeps an approval page attached and resumes normal cleanup after gate disappears",async()=>{
   const chat={id:"C",project:"P",account:"a",status:"active",page:"p1"};
   const f={detach:true,chat,runtime:{tasks:{T:{taskId:"T",sessionId:"C",status:"BLOCKED",updatedAt:"2020-01-01T00:00:00Z"}},sessions:{},projects:{}},
-    raw:{approvalRequired:true,generating:false,composerText:""}};
+    raw:{approvalRequired:true,generating:false,composerText:"",composerCount:1,composerRawText:""}};
   const api=await harness(f), reg={chats:{C:chat}};
   assert.deepEqual(await api.detachTerminalTaskPages(reg),[]);
   assert.equal(chat.page,"p1");

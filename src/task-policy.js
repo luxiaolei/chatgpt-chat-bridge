@@ -39,10 +39,13 @@
       task.sessionId === candidate.sessionId
     ) || null;
   }
+  function composerIsEmpty(snapshot = {}) {
+    return snapshot.composerCount === 1 && snapshot.composerRawText === "";
+  }
   function assertComposerSafe(snapshot = {}) {
     if (snapshot.approvalRequired === true) throw new Error("APPROVAL_REQUIRED");
     if (snapshot.generating || !snapshot.inputReady) throw new Error("CHAT_BUSY");
-    if (String(snapshot.composerText || "").trim()) throw new Error("USER_DRAFT_PRESENT");
+    if (!composerIsEmpty(snapshot)) throw new Error("USER_DRAFT_PRESENT");
   }
   function isPreSendDefer(error) {
     return ["CHAT_BUSY", "USER_DRAFT_PRESENT", "APPROVAL_REQUIRED"].includes(error?.message);
@@ -54,6 +57,7 @@
     assertTaskId,
     assertActiveTaskTarget,
     activeSessionConflict,
+    composerIsEmpty,
     assertComposerSafe,
     isPreSendDefer,
   };

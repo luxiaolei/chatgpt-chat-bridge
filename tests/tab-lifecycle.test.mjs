@@ -3,13 +3,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+import "../src/task-policy.js";
 const source=await readFile(path.resolve("src/main.js"),"utf8");
 
 test("terminal RESULT_RECORDED task detaches only safe inactive agent page after grace", async()=>{
   const begin=source.indexOf("async function detachTerminalTaskPages");
   const end=source.indexOf("\nasync function watchOnce",begin);
   assert.ok(begin>=0&&end>begin);
-  const code=source.slice(begin,end);
+  const code='const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(begin,end);
   const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
   let saved=0,closed=0;
   const chat={id:"worker",project:"P",account:"a",status:"active",spaceName:"managed",spaceId:7,page:"p1",attachmentEpoch:1};
@@ -23,7 +24,7 @@ test("terminal RESULT_RECORDED task detaches only safe inactive agent page after
       async()=>runtime,
       status=>!["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"].includes(String(status).toUpperCase()),
       async()=>({task,binding:{spaceName:"managed",spaceId:7}}),
-      async()=>({generating:false,composerText:""}),
+      async()=>({generating:false,composerText:"",composerCount:1,composerRawText:""}),
       async()=>{saved++},()=>({occupied:false})
     );
   const out=await detach(reg,"P","a");
@@ -34,7 +35,7 @@ test("terminal RESULT_RECORDED task detaches only safe inactive agent page after
 test("settled BLOCKED task detaches a safe inactive agent page after grace", async()=>{
   const begin=source.indexOf("async function detachTerminalTaskPages");
   const end=source.indexOf("\nasync function watchOnce",begin);
-  const code=source.slice(begin,end);
+  const code='const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(begin,end);
   const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
   let saved=0,closed=0;
   const chat={id:"worker",project:"P",account:"a",status:"active",spaceName:"managed",spaceId:7,page:"p1",attachmentEpoch:1};
@@ -46,7 +47,7 @@ test("settled BLOCKED task detaches a safe inactive agent page after grace", asy
     code+";return detachTerminalTaskPages;")(
       {env:{CHAT_BRIDGE_TERMINAL_TAB_GRACE_SEC:"30"}},async()=>runtime,
       status=>!["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"].includes(String(status).toUpperCase()),
-      async()=>({task,binding:{spaceName:"managed",spaceId:7}}),async()=>({generating:false,composerText:""}),async()=>{saved++},()=>({occupied:false})
+      async()=>({task,binding:{spaceName:"managed",spaceId:7}}),async()=>({generating:false,composerText:"",composerCount:1,composerRawText:""}),async()=>{saved++},()=>({occupied:false})
     );
   const out=await detach(reg,"P","a");
   assert.equal(out.length,1);assert.equal(closed,1);assert.equal(saved,1);
@@ -56,13 +57,15 @@ test("settled BLOCKED task detaches a safe inactive agent page after grace", asy
 test("terminal detach preserves active tab, user/unmanaged page, draft and generating page", async()=>{
   const begin=source.indexOf("async function detachTerminalTaskPages");
   const end=source.indexOf("\nasync function watchOnce",begin);
-  const code=source.slice(begin,end);
+  const code='const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(begin,end);
   const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
   for(const scenario of [
-    {tab:{label:"p1",active:true,openedBy:"agent"},snap:{generating:false,composerText:""}},
-    {tab:{label:"p1",active:false,openedBy:"user"},snap:{generating:false,composerText:""}},
+    {tab:{label:"p1",active:true,openedBy:"agent"},snap:{generating:false,composerText:"",composerCount:1,composerRawText:""}},
+    {tab:{label:"p1",active:false,openedBy:"user"},snap:{generating:false,composerText:"",composerCount:1,composerRawText:""}},
     {tab:{label:"p1",active:false,openedBy:"agent"},snap:{generating:true,composerText:""}},
-    {tab:{label:"p1",active:false,openedBy:"agent"},snap:{generating:false,composerText:"draft"}},
+    {tab:{label:"p1",active:false,openedBy:"agent"},snap:{generating:false,composerText:"draft",composerCount:1,composerRawText:"draft"}},
+    ...[" ","\t","\n","\u00a0"].map(raw=>({tab:{label:"p1",active:false,openedBy:"agent"},snap:{generating:false,composerText:"",composerCount:1,composerRawText:raw}})),
+    ...[{}, {composerCount:0,composerRawText:null}, {composerCount:2,composerRawText:null}].map(raw=>({tab:{label:"p1",active:false,openedBy:"agent"},snap:{generating:false,composerText:"",...raw}})),
   ]){
     let closed=0;
     const chat={id:"worker",project:"P",account:"a",status:"active",spaceName:"managed",spaceId:7,page:"p1"};

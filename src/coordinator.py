@@ -2042,6 +2042,134 @@ def acknowledge_management(db, payload):
     return {"eventId": event_id, "callerRef": caller, "status": status, "message": message}
 
 
+
+def rotation_digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def rotation_quarantine_event(db, project, role, workgroup=None):
+    for row in db.execute("SELECT * FROM management_events WHERE kind='ROTATION_QUARANTINE' AND scope=? ORDER BY created_at DESC,id DESC", ("project:" + project,)):
+        body = json.loads(row["payload"])
+        if body.get("project") == project and body.get("role") == role and (body.get("workgroupId") or None) == workgroup:
+            original = db.execute("SELECT * FROM operations WHERE id=?", (body.get("operationId"),)).fetchone()
+            if (not original or body.get("operationSha256") != rotation_digest(dict(original))
+                    or body.get("rotationId") != original["rotation_id"] or not body.get("logicalRef")):
+                raise ValueError("ROTATION_QUARANTINE_AUDIT_INVALID")
+            return {"id": row["id"], "createdAt": row["created_at"], "body": body}
+    return None
+
+
+def rotation_quarantine_context(db, payload):
+    row = db.execute("SELECT * FROM operations WHERE id=?", (payload.get("operationId"),)).fetchone()
+    if not row or row["kind"] != "rotation" or not row["force_new"]:
+        raise ValueError("ROTATION_QUARANTINE_ORIGINAL_REQUIRED")
+    authority = authorize_control(db, payload.get("callerRef"), row["project"], False, row["workgroup_id"])
+    if os.environ.get("CHAT_BRIDGE_FROM_SPACE") and not os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID"):
+        raise ValueError("CONTROL_ORIGIN_REQUIRED")
+    logical = db.execute("SELECT * FROM logical_sessions WHERE rotation_id=?", (row["rotation_id"],)).fetchall()
+    if len(logical) != 1:
+        raise ValueError("ROTATION_QUARANTINE_ORIGINAL_REQUIRED")
+    logical = logical[0]
+    result = json.loads(row["result"]) if row["result"] else {}
+    creation = result.get("newSession") or {}
+    if row["status"] != "DELIVERY_UNKNOWN":
+        raise ValueError("ROTATION_QUARANTINE_UNKNOWN_REQUIRED")
+    if (row["session_ref"] or logical["pending_session_ref"] or logical["state"] != "ROTATING"
+            or result.get("nativeWitness") or any(creation.get(k) for k in ("observedConversationId", "observedUrl", "sourceMessageId"))):
+        raise ValueError("ROTATION_QUARANTINE_BOUND_OR_WITNESSED")
+    reg, rt = registry(db), runtime(db)
+    owner = logical["current_session_ref"]
+    chat = reg.get("chats", {}).get(owner)
+    identity = reg.get("accounts", {}).get(row["account_alias"], {}).get("identity")
+    matches = [c["id"] for c in reg.get("chats", {}).values() if c.get("project") == row["project"]
+               and c.get("role") == row["role"] and (c.get("workgroupId") or None) == row["workgroup_id"]
+               and c.get("status", "active") == "active"]
+    links = [dict(r) for r in db.execute("SELECT * FROM session_successors WHERE old_session_ref=? OR successor_ref=? ORDER BY old_session_ref", (owner, owner))]
+    if (not chat or matches != [owner] or owner != row["caller_ref"] or not identity
+            or account_id(identity) != row["account_id"] or chat.get("account") != row["account_alias"]
+            or any(logical[k] != row[k] for k in ("project", "role", "workgroup_id"))
+            or any(r["old_session_ref"] == owner for r in links)):
+        raise ValueError("ROTATION_QUARANTINE_OWNER_CHANGED")
+    binding = reg.get("projects", {}).get(row["project"], {}).get("bindings", {}).get(row["account_alias"])
+    if not binding or not binding.get("profileId") or not re.search(r"g-p-[0-9a-f]{32}", binding.get("projectUrl") or ""):
+        raise ValueError("ROTATION_QUARANTINE_OWNER_CHANGED")
+    handoff = row["original_message"] or ""
+    header = "\n".join(["[CHATBRIDGE ROLE HANDOFF v1]", "rotation_id: " + row["rotation_id"],
+                        "logical_ref: " + logical["logical_ref"], "role: " + row["role"],
+                        "next_epoch: " + str(logical["epoch"] + 1), ""])
+    if (row["request_key"] != "rotation:" + row["rotation_id"] or row["task_id"] != "ROT-" + row["rotation_id"]
+            or not row["message"].startswith(header) or hashlib.sha256(handoff.encode()).hexdigest() != row["payload_hash"]
+            or logical["handoff_hash"] != row["payload_hash"]
+            or db.execute("SELECT count(*) FROM operations WHERE rotation_id=?", (row["rotation_id"],)).fetchone()[0] != 1):
+        raise ValueError("ROTATION_QUARANTINE_ORIGINAL_REQUIRED")
+    busy = [dict(r) for r in db.execute("""SELECT * FROM operations WHERE
+        (kind='rotation' AND project=? AND role=? AND coalesce(workgroup_id,'')=coalesce(?,'') AND status IN ('QUEUED','DISPATCHING'))
+        OR (status='DISPATCHING' AND (session_ref=? OR (session_ref IS NULL AND caller_ref=?))) ORDER BY id""",
+        (row["project"], row["role"], row["workgroup_id"], owner, owner))]
+    if busy or image_session_reservations(db, {"accountId": row["account_id"], "conversationId": owner}):
+        raise ValueError("ROTATION_QUARANTINE_BUSY")
+    cp = latest_checkpoint(db, row["project"], row["role"], row["workgroup_id"])
+    if not cp or cp["session_ref"] != owner:
+        raise ValueError("ROTATION_QUARANTINE_CHECKPOINT_REQUIRED")
+    reason = str(payload.get("reason") or "").strip()
+    if not reason:
+        raise ValueError("ROTATION_QUARANTINE_REASON_REQUIRED")
+    return {"operation": dict(row), "logical": dict(logical), "registry": reg, "runtime": rt,
+            "checkpoint": cp, "successors": links, "authority": authority, "reason": reason}
+
+
+def rotation_quarantine(db, payload):
+    if not payload.get("confirm"):
+        snapshot = rotation_quarantine_context(db, payload)
+        logical = snapshot["logical"]
+        return {"state": "QUARANTINE_PREVIEW", "operationId": payload["operationId"],
+                "rotationId": logical["rotation_id"], "logicalRef": logical["logical_ref"],
+                "currentSessionRef": logical["current_session_ref"], "epoch": logical["epoch"],
+                "deliveryStatus": "DELIVERY_UNKNOWN", "remoteExecutionStopped": None,
+                "expected": rotation_digest(snapshot), "authority": snapshot["authority"],
+                "checkpoint": snapshot["checkpoint"], "proposedState": "QUARANTINED"}
+    if not payload.get("expected"):
+        raise ValueError("ROTATION_QUARANTINE_EXPECTED_REQUIRED")
+    begin_immediate(db)
+    try:
+        row = db.execute("SELECT * FROM operations WHERE id=?", (payload.get("operationId"),)).fetchone()
+        if not row:
+            raise ValueError("ROTATION_QUARANTINE_ORIGINAL_REQUIRED")
+        authorize_control(db, payload.get("callerRef"), row["project"], False, row["workgroup_id"])
+        if os.environ.get("CHAT_BRIDGE_FROM_SPACE") and not os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID"):
+            raise ValueError("CONTROL_ORIGIN_REQUIRED")
+        event_id = "rotation-quarantine:" + str(row["rotation_id"])
+        prior = db.execute("SELECT * FROM management_events WHERE id=?", (event_id,)).fetchone()
+        if prior:
+            body = json.loads(prior["payload"])
+            if (prior["kind"] != "ROTATION_QUARANTINE" or body.get("expected") != payload["expected"]
+                    or body.get("operationId") != row["id"] or body.get("reason") != str(payload.get("reason") or "").strip()):
+                raise ValueError("ROTATION_QUARANTINE_EVENT_CONFLICT")
+            logical = db.execute("SELECT * FROM logical_sessions WHERE logical_ref=?", (body["logicalRef"],)).fetchone()
+            db.commit()
+            return {"eventId": event_id, "alreadyRecorded": True, "state": logical["state"],
+                    "currentSessionRef": logical["current_session_ref"], "epoch": logical["epoch"], "deliveryStatus": row["status"]}
+        snapshot = rotation_quarantine_context(db, payload)
+        if rotation_digest(snapshot) != payload["expected"]:
+            raise ValueError("ROTATION_QUARANTINE_PREVIEW_CHANGED")
+        logical, now = snapshot["logical"], stamp()
+        body = {"operationId": row["id"], "rotationId": row["rotation_id"], "logicalRef": logical["logical_ref"],
+                "project": row["project"], "role": row["role"], "workgroupId": row["workgroup_id"],
+                "currentSessionRef": logical["current_session_ref"], "epoch": logical["epoch"],
+                "operationSha256": rotation_digest(dict(row)), "logicalBefore": logical,
+                "checkpoint": snapshot["checkpoint"], "authority": snapshot["authority"],
+                "expected": payload["expected"], "reason": snapshot["reason"],
+                "deliveryUnknown": True, "remoteExecutionStopped": None}
+        db.execute("INSERT INTO management_events(id,kind,scope,payload,created_at) VALUES (?,?,?,?,?)",
+                   (event_id, "ROTATION_QUARANTINE", "project:" + row["project"], json.dumps(body, ensure_ascii=False), now))
+        db.execute("UPDATE logical_sessions SET state='QUARANTINED',updated_at=? WHERE logical_ref=?", (now, logical["logical_ref"]))
+        db.commit()
+        return {"eventId": event_id, "state": "QUARANTINED", "currentSessionRef": logical["current_session_ref"],
+                "epoch": logical["epoch"], "deliveryStatus": "DELIVERY_UNKNOWN", "remoteExecutionStopped": None}
+    except Exception:
+        db.rollback()
+        raise
+
 def rotation_prepare(db, payload):
     project = str(payload.get("project") or "").strip()
     role = str(payload.get("role") or "").strip()
@@ -2066,8 +2194,34 @@ def rotation_prepare(db, payload):
         raise ValueError("CURRENT_ROLE_SESSION_NOT_REGISTERED")
     if not target_matches_task_scope({"project": project, "workgroupId": workgroup, "controllerSessionRef": current}, old_chat, reg):
         raise ValueError("ROTATION_WORKGROUP_MISMATCH")
+    scopes = [dict(r) for r in db.execute("SELECT * FROM logical_sessions WHERE project=? AND role=? AND coalesce(workgroup_id,'')=coalesce(?,'') ORDER BY logical_ref", (project, role, workgroup))]
     existing = db.execute("SELECT * FROM logical_sessions WHERE logical_ref=?", (logical_ref,)).fetchone()
+    if len(scopes) > 1 or scopes and scopes[0]["logical_ref"] != logical_ref or existing and (existing["project"], existing["role"], existing["workgroup_id"]) != (project, role, workgroup):
+        raise ValueError("ROTATION_LOGICAL_SCOPE_MISMATCH")
     if existing and existing["state"] == "ROTATING":
+        raise ValueError("ROTATION_ALREADY_PENDING")
+    if existing and (existing["current_session_ref"] != current or existing["pending_session_ref"] or existing["state"] not in {"ACTIVE", "QUARANTINED"}):
+        raise ValueError("ROTATION_CURRENT_OWNER_CHANGED")
+    owners = [cid for cid, chat in reg.get("chats", {}).items() if
+              (chat.get("project"), chat.get("role"), chat.get("workgroupId") or None) == (project, role, workgroup)
+              and chat.get("status", "active") == "active"]
+    if owners != [current]:
+        raise ValueError("CURRENT_ROLE_SESSION_NOT_UNIQUE")
+    event = rotation_quarantine_event(db, project, role, workgroup)
+    cp = latest_checkpoint(db, project, role, workgroup)
+    if event and (not existing or event["body"]["logicalRef"] != logical_ref):
+        raise ValueError("ROTATION_QUARANTINE_LOGICAL_MISMATCH")
+    if existing and existing["state"] == "QUARANTINED":
+        if not event or payload.get("quarantineEvent") != event["id"]:
+            raise ValueError("ROTATION_QUARANTINE_EVENT_REQUIRED")
+        if (not cp or cp["session_ref"] != current
+                or datetime.fromisoformat(cp["created_at"]) <= datetime.fromisoformat(event["createdAt"])
+                or handoff != checkpoint_handoff(cp)):
+            raise ValueError("ROTATION_QUARANTINE_FRESH_CHECKPOINT_REQUIRED")
+    elif payload.get("quarantineEvent") and (not event or payload["quarantineEvent"] != event["id"]):
+        raise ValueError("ROTATION_QUARANTINE_EVENT_MISMATCH")
+    competing = [dict(r) for r in db.execute("SELECT * FROM operations WHERE kind='rotation' AND project=? AND role=? AND coalesce(workgroup_id,'')=coalesce(?,'') AND status IN ('QUEUED','DISPATCHING') ORDER BY id", (project, role, workgroup))]
+    if competing:
         raise ValueError("ROTATION_ALREADY_PENDING")
     epoch = (existing["epoch"] if existing else 1)
     rotation_id = str(uuid.uuid4())
@@ -2084,7 +2238,8 @@ def rotation_prepare(db, payload):
         handoff,
         "",
         "Before doing business work: read the installed ChatBridge/controller Skills, verify role/tools/host/model, then acknowledge:",
-        f"chat-bridge control rotation-ack --rotation {rotation_id} --message <verification-summary>",
+        f"chat-bridge control rotation-ack --rotation {rotation_id} --caller-ref <successor-session-ref> --message <verification-summary>",
+        "Use this successor conversation's actual sessionRef or persistent CID in its own URL; never use the predecessor or a local Codex thread ID.",
         "Do not replay completed work before acknowledgement.",
         "[/CHATBRIDGE ROLE HANDOFF]",
     ])
@@ -2096,6 +2251,15 @@ def rotation_prepare(db, payload):
     key = "rotation:" + rotation_id
     begin_immediate(db)
     try:
+        locked = [dict(r) for r in db.execute("SELECT * FROM logical_sessions WHERE project=? AND role=? AND coalesce(workgroup_id,'')=coalesce(?,'') ORDER BY logical_ref", (project, role, workgroup))]
+        busy = [dict(r) for r in db.execute("SELECT * FROM operations WHERE kind='rotation' AND project=? AND role=? AND coalesce(workgroup_id,'')=coalesce(?,'') AND status IN ('QUEUED','DISPATCHING') ORDER BY id", (project, role, workgroup))]
+        if (registry(db) != reg or locked != scopes or busy != competing
+                or latest_checkpoint(db, project, role, workgroup) != cp
+                or rotation_quarantine_event(db, project, role, workgroup) != event):
+            raise ValueError("ROTATION_PREPARE_CAS_CHANGED")
+        authorize_control(db, payload.get("callerRef"), project, False, workgroup)
+        if os.environ.get("CHAT_BRIDGE_FROM_SPACE") and not os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID"):
+            raise ValueError("CONTROL_ORIGIN_REQUIRED")
         db.execute("""INSERT INTO logical_sessions(
             logical_ref,project,role,current_session_ref,workgroup_id,epoch,state,pending_session_ref,handoff_hash,rotation_id,updated_at)
             VALUES (?,?,?,?,?,?,'ROTATING',NULL,?,?,?)
@@ -2106,11 +2270,11 @@ def rotation_prepare(db, payload):
         db.execute("""INSERT INTO operations(
             id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,
             role,message,task_id,created_at,updated_at,not_before,kind,requested_model,requested_effort,
-            resource_policy_version,workgroup_id,placement_key,original_message,force_new,rotation_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            resource_policy_version,workgroup_id,placement_key,original_message,force_new,rotation_id,event_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (operation_id,key,handoff_hash,"QUEUED",project,old_chat["account"],account_id(identity),
              current,None,role,message,task_id,now,now,time.time(),"rotation",requested_model,requested_effort,
-             "rotation-v1",workgroup,logical_placement_key(project,workgroup,role,rotation_id),handoff,1,rotation_id))
+             "rotation-v1",workgroup,logical_placement_key(project,workgroup,role,rotation_id),handoff,1,rotation_id,event["id"] if event else None))
         db.commit()
     except Exception:
         db.rollback()
@@ -2147,6 +2311,31 @@ def rotation_ack(db, payload, config, state):
                 or recovery.get("logicalRef") != row["logical_ref"] or recovery.get("accountId") != account_id(identity)
                 or successor_chat.get("status") != "pending-rotation"):
             raise ValueError("ROTATION_RECOVERY_ACK_PROOF_CHANGED")
+    event = rotation_quarantine_event(db, row["project"], row["role"], row["workgroup_id"])
+    operations = [dict(r) for r in db.execute("SELECT * FROM operations WHERE rotation_id=? ORDER BY id", (rotation_id,))]
+    if event:
+        if not origin or payload.get("callerRef") != successor or not message:
+            raise ValueError("ROTATION_QUARANTINE_ACK_SUCCESSOR_REQUIRED")
+        op = operations[0] if len(operations) == 1 else None
+        header = "\n".join(["[CHATBRIDGE ROLE HANDOFF v1]", "rotation_id: " + rotation_id,
+                            "logical_ref: " + row["logical_ref"], "role: " + row["role"],
+                            "next_epoch: " + str(row["epoch"] + 1), ""])
+        if (not op or op["event_id"] != event["id"] or event["body"]["logicalRef"] != row["logical_ref"]
+                or op["kind"] != "rotation" or not op["force_new"] or op["status"] != "SENT"
+                or op["session_ref"] != successor or op["caller_ref"] != row["current_session_ref"]
+                or (op["project"], op["role"], op["workgroup_id"]) != (row["project"], row["role"], row["workgroup_id"])
+                or op["account_alias"] != successor_chat.get("account") or op["account_id"] != account_id(identity)
+                or successor_chat.get("role") != row["role"] or successor_chat.get("status") != "pending-rotation"
+                or not op["message"].startswith(header) or op["payload_hash"] != row["handoff_hash"]):
+            raise ValueError("ROTATION_QUARANTINE_ACK_PROOF_CHANGED")
+        active = [cid for cid, chat in reg.get("chats", {}).items() if
+                  (chat.get("project"), chat.get("role"), chat.get("workgroupId") or None) == (row["project"], row["role"], row["workgroup_id"])
+                  and chat.get("status", "active") == "active"]
+        pending = [cid for cid, chat in reg.get("chats", {}).items() if
+                   (chat.get("project"), chat.get("role"), chat.get("workgroupId") or None) == (row["project"], row["role"], row["workgroup_id"])
+                   and chat.get("status") == "pending-rotation"]
+        if active != [row["current_session_ref"]] or pending != [successor]:
+            raise ValueError("ROTATION_ACK_ROLE_NOT_UNIQUE")
     old_ref = row["current_session_ref"]
     base = reg
     next_reg = json.loads(json.dumps(reg))
@@ -2207,7 +2396,9 @@ def rotation_ack(db, payload, config, state):
         current_row = db.execute("SELECT * FROM logical_sessions WHERE logical_ref=?", (row["logical_ref"],)).fetchone()
         current_rt = db.execute("SELECT payload FROM documents WHERE kind='runtime'").fetchone()
         if (not current_row or dict(current_row) != dict(row) or registry(db) != base
-                or (current_rt[0] if current_rt else None) != runtime_before):
+                or (current_rt[0] if current_rt else None) != runtime_before
+                or [dict(r) for r in db.execute("SELECT * FROM operations WHERE rotation_id=? ORDER BY id", (rotation_id,))] != operations
+                or rotation_quarantine_event(db, row["project"], row["role"], row["workgroup_id"]) != event):
             raise ValueError("ROTATION_ACK_CAS_CHANGED")
         db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(next_reg,ensure_ascii=False),))
         db.execute("UPDATE documents SET payload=? WHERE kind='runtime'",(json.dumps(next_rt,ensure_ascii=False),))
@@ -2568,11 +2759,14 @@ def finish(db, row, status, reason=None, retry_after=0, result=None, session_ref
         if status == 'DELIVERY_UNKNOWN' and row['kind'] in {'dispatch', 'rotation'} and not row['session_ref'] and not session_ref:
             result = dict(result or {})
             result['newSession'] = uncertain_new_session(db, row, result)
-        db.execute("""UPDATE operations SET status=?,reason=?,not_before=?,updated_at=?,result=?,session_ref=coalesce(?,session_ref),claimed_at=NULL,
+        changed = db.execute("""UPDATE operations SET status=?,reason=?,not_before=?,updated_at=?,result=?,session_ref=coalesce(?,session_ref),claimed_at=NULL,
                       pre_send_failures=pre_send_failures+?
-                      WHERE id=? AND status='DISPATCHING'""",
-                   (status, reason, time.time() + retry_after, stamp(), json.dumps(result) if result is not None else None, session_ref, int(pre_send_failure), row["id"]))
+                      WHERE id=? AND status='DISPATCHING' AND attempts=? AND claimed_at IS ?""",
+                   (status, reason, time.time() + retry_after, stamp(), json.dumps(result) if result is not None else None, session_ref, int(pre_send_failure), row["id"], row["attempts"], row["claimed_at"]))
         updated = db.execute("SELECT * FROM operations WHERE id=?", (row["id"],)).fetchone()
+        if changed.rowcount != 1:
+            db.commit()
+            return response(updated)
         if row["kind"] == "management" and row["event_id"]:
             delivery_status = "DELIVERED" if status == "SENT" else status
             db.execute("""UPDATE management_deliveries SET status=?,operation_id=?,updated_at=?
@@ -4200,7 +4394,12 @@ def main():
     if command in {"image-session-occupancy", "image-io-admission", "image-output-io-admission", "image-delivery-io-admission", "image-delivery-receipt"}:
         print(json.dumps(image_local_read(config, state, command, json.load(sys.stdin))))
         return
-    if command in {"observe", "observation-context", "controller-placement-context", "delivery-attempts", "delivery-admission"}:
+    if command == "control" and args and args[0] == "rotation-quarantine":
+        db = connection(config, state, initialize=False)
+        if "--confirm" not in args:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+    elif command in {"observe", "observation-context", "controller-placement-context", "delivery-attempts", "delivery-admission"}:
         db = connection(config, state, initialize=False)
         db.execute("PRAGMA query_only=ON")
     elif command in {"admission-check", "local-owner-contract"} and (state / "bridge.sqlite3").exists():
@@ -4469,6 +4668,11 @@ def main():
                     raise ValueError("provide --project or --all")
                 authorize_control(db,caller_ref,project,global_scope)
                 value = enqueue_stop_requests(db,None if global_scope else project,opts.get("--task"))
+            elif sub == "rotation-quarantine":
+                if global_scope:
+                    raise ValueError("ROTATION_QUARANTINE_EXACT_SCOPE_REQUIRED")
+                value = rotation_quarantine(db, {"operationId": opts.get("--operation"), "callerRef": caller_ref,
+                    "reason": opts.get("--reason"), "expected": opts.get("--expected"), "confirm": "--confirm" in flags})
             elif sub == "rotation-prepare":
                 if "--confirm" not in flags:
                     raise ValueError("rotation prepare requires --confirm")
@@ -4478,6 +4682,8 @@ def main():
                     "role": opts.get("--role"),
                     "workgroupId": opts.get("--workgroup"),
                     "logicalRef": opts.get("--logical-ref"),
+                    "callerRef": caller_ref,
+                    "quarantineEvent": opts.get("--quarantine-event"),
                     "handoff": opts.get("--handoff"),
                     "model": opts.get("--model"),
                     "effort": opts.get("--effort"),
