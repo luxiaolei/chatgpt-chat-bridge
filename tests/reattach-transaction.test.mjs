@@ -57,7 +57,7 @@ CREATE TABLE operations(status TEXT,session_ref TEXT,caller_ref TEXT);
 CREATE TABLE control_state(scope TEXT,mode TEXT,epoch INTEGER);""")
 chat={'id':sid,'project':'P','account':'a','role':'conductor','status':'active','page':None,'spaceName':'chat-bridge-agent-a','attachmentEpoch':6}
 binding={'spaceName':'chat-bridge-agent-a','spaceId':2,'profileId':'P1','projectUrl':'https://chatgpt.com/g/'+pid+'/project'}
-overflow={'spaceName':'chat-bridge-agent-a-overflow-profile','spaceId':9,'profileId':'P1','identity':'login-a','account':'a'}
+overflow={'spaceName':'chat-bridge-agent-a-overflow','spaceId':9,'profileId':'P1','identity':'login-a','account':'a','createdAt':'old'}
 reg={'chats':{sid:chat},'accounts':{'a':{'identity':'login-a'}},'projects':{'P':{'rootController':'conductor','bindings':{'a':binding}}},'capacityOverflow':{'login-a|P1':overflow}}
 rt={'tasks':{},'sessions':{sid:{'watchdogPausedForUserControl':True}},'projects':{'P':{'watchdogPausedForUserControl':True}}}
 for k,v in [('registry',reg),('runtime',rt)]:db.execute('INSERT INTO documents VALUES(?,?)',(k,json.dumps(v)))
@@ -67,17 +67,29 @@ db.execute("INSERT INTO control_state VALUES('project:P','PAUSED',7)");db.commit
 def snapshot():
  return [tuple(r) for r in db.execute('SELECT * FROM documents ORDER BY kind')],[tuple(r) for r in db.execute('SELECT * FROM logical_sessions')],[tuple(r) for r in db.execute('SELECT * FROM control_state')]
 context=m['controller_placement_context'](db,sid)
-payload={**copy.deepcopy(context),'attachment':{'spaceName':overflow['spaceName'],'spaceId':9,'pageSpaceId':9,'profileId':'P1','page':'p7','attachmentEpoch':7},
-'observation':{'url':'https://chatgpt.com/g/'+pid+'/c/'+sid,'accountIdentity':'login-a','composerPresent':True,'composerText':'','generating':False,'approvalRequired':False}}
+payload={**copy.deepcopy(context),'overflowCandidate':copy.deepcopy(overflow),'attachment':{'spaceName':overflow['spaceName'],'spaceId':9,'pageSpaceId':9,'profileId':'P1','page':'p7','attachmentEpoch':7},
+'observation':{'url':'https://chatgpt.com/g/'+pid+'/c/'+sid,'accountIdentity':'login-a','composerPresent':True,'composerCount':1,'composerRawText':'','generating':False,'approvalRequired':False}}
 before=snapshot()
+raced=copy.deepcopy(reg);raced['capacityOverflow']['login-a|P1']['spaceId']=16
+db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(raced),));db.commit()
+changed=snapshot()
+try:m['controller_placement_commit'](db,payload);raise AssertionError('accepted changed overflow mapping')
+except ValueError as e:assert 'OWNER_CHANGED' in str(e)
+assert snapshot()==changed
+db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(reg),));db.commit()
 for field in ['expectedChat','expectedBinding','expectedController','expectedOverflow']:
  bad=copy.deepcopy(payload);bad[field]['changed']='race'
  try:m['controller_placement_commit'](db,bad);raise AssertionError('accepted stale '+field)
  except ValueError:pass
  assert snapshot()==before
-for field,value in [('composerText',' '),('generating',True),('approvalRequired',True),('accountIdentity','foreign'),('url','https://chatgpt.com/g/'+pid+'/c/'+'2'*36)]:
+for field,value in [('composerRawText',' '),('composerCount',2),('composerCount',True),('generating',True),('approvalRequired',True),('accountIdentity','foreign'),('url','https://chatgpt.com/g/'+pid+'/c/'+'2'*36)]:
  bad=copy.deepcopy(payload);bad['observation'][field]=value
  try:m['controller_placement_commit'](db,bad);raise AssertionError('accepted unhealthy page')
+ except ValueError:pass
+ assert snapshot()==before
+for field,value in [('spaceName','chat-bridge-agent-foreign'),('identity','foreign'),('profileId','P3'),('account','foreign')]:
+ bad=copy.deepcopy(payload);bad['overflowCandidate'][field]=value
+ try:m['controller_placement_commit'](db,bad);raise AssertionError('accepted foreign mapping')
  except ValueError:pass
  assert snapshot()==before
 for field,value in [('spaceName','chat-bridge-agent-foreign'),('spaceId',16),('profileId','P3'),('attachmentEpoch',8),('pageSpaceId',16)]:
@@ -130,11 +142,11 @@ test('confirmed controller UI path never retries/sends/resumes and rejects draft
     async()=>({spaceId:9,tabs:async()=>tabs,page:()=>page,newPage:async()=>{actions++;throw Error('unexpected allocation');}}),
     new Map(),()=> 'login-a',(x,y)=>x===y,async()=>{actions++;throw Error('unexpected Retry-capable readiness');},
     ()=> 'g-p-'+ 'a'.repeat(32),async()=>snapshot,async()=>{actions++;throw Error('unexpected observe/resume');},async()=>{actions++;throw Error('unexpected event');});
-  const reset=()=>{snapshot={composerPresent:true,composerText:'',errorTexts:[],approvalRequired:false,generating:false};commits=reads=actions=0;stale=false;
+  const reset=()=>{snapshot={composerPresent:true,composerText:'',composerCount:1,composerRawText:'',errorTexts:[],approvalRequired:false,generating:false};commits=reads=actions=0;stale=false;
     tabs=[{url:chat.url,label:'p7',openedBy:'agent'}];info={id:9,name:binding.spaceName,profileId:'P1',ownership:'agent',createdBy:'agent'};};
   reset();const placed=await api(reg,chat,null,{confirm:true,currentController:true});
   assert.equal(placed.messageSent,false);assert.equal(placed.resumeWatch,false);assert.equal(commits,1);assert.equal(actions,0);
-  for(const patch of [{composerText:'draft'},{composerText:' '},{generating:true},{approvalRequired:true},{composerPresent:false}]){
+  for(const patch of [{composerRawText:'draft'},{composerRawText:' '},{composerCount:2},{composerRawText:undefined},{generating:true},{approvalRequired:true},{composerPresent:false}]){
     reset();Object.assign(snapshot,patch);await assert.rejects(()=>api(reg,chat,null,{confirm:true,currentController:true}));assert.equal(commits,0);assert.equal(actions,0);
   }
   reset();stale=true;await assert.rejects(()=>api(reg,chat,null,{confirm:true,currentController:true}),/OWNER_CHANGED/);assert.equal(commits,0);assert.equal(actions,0);

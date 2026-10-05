@@ -667,17 +667,14 @@ async function overflowManagedTask(reg, project, account, binding, options={}) {
   const prior=taskAccounts.get(Number(task.spaceId));
   if(prior&&accountScope(reg,prior)!==accountScope(reg,account)) throw new Error("Space is bound to conflicting ChatGPT accounts");
   taskAccounts.set(Number(task.spaceId),account);
-  if(!remembered || remembered.spaceName!==name || remembered.identity!==plan.identity || Number(remembered.spaceId)!==Number(task.spaceId)) {
-    reg.capacityOverflow[overflowKey]={spaceName:name,spaceId:task.spaceId,profileId:plan.profileId,identity:plan.identity,account,
-      createdAt:remembered?.spaceName===name?remembered.createdAt:new Date().toISOString()};
-    if(options.mappingOnly) {
-      const base=stateBaselines.get(reg); if(!base) throw new Error("registry state must be loaded before save");
-      const next=structuredClone(base); next.capacityOverflow ||= {};
-      next.capacityOverflow[overflowKey]=reg.capacityOverflow[overflowKey];
-      stored("put","registry",{base,next}); stateBaselines.set(reg,structuredClone(next));
-    } else await saveRegistry(reg);
+  const mapping={spaceName:name,spaceId:task.spaceId,profileId:plan.profileId,identity:plan.identity,account,
+    createdAt:remembered?.spaceName===name&&remembered.createdAt?remembered.createdAt:new Date().toISOString()};
+  if(!options.preview && (!remembered || remembered.spaceName!==name || remembered.identity!==plan.identity || Number(remembered.spaceId)!==Number(task.spaceId))) {
+    reg.capacityOverflow[overflowKey]=mapping;
+    await saveRegistry(reg);
   }
-  return {task,spaceName:name,profileId:plan.profileId,binding:{...binding,spaceName:name,spaceId:task.spaceId,profileId:plan.profileId,controlPage:null}};
+  return {task,spaceName:name,profileId:plan.profileId,mapping,
+    binding:{...binding,spaceName:name,spaceId:task.spaceId,profileId:plan.profileId,controlPage:null}};
 }
 
 async function newManagedPage(reg, project, account, task, binding, excludeChatId=null, options={}) {
@@ -871,12 +868,15 @@ async function reattachTask(reg, chat, taskId, options={}) {
   let binding=placing?expectedBinding:bindingFor(reg,chat.project,chat.account,true);
   const identity=context?.accountIdentity||reg.accounts?.[chat.account]?.identity;
   await assertWebAvailable(chat.account);
-  if(placing && options.overflow) binding=(await overflowManagedTask(reg,chat.project,chat.account,binding,{mappingOnly:true})).binding;
+  let overflowCandidate=null;
+  if(placing && options.overflow) {
+    const overflow=await overflowManagedTask(reg,chat.project,chat.account,binding,{preview:true});
+    binding=overflow.binding; overflowCandidate=overflow.mapping;
+  }
   if(placing) {
     const fresh=coordinated("controller-placement-context",{sessionId:chat.id});
-    for(const key of ["expectedChat","expectedBinding","expectedController","accountIdentity"])
+    for(const key of ["expectedChat","expectedBinding","expectedController","accountIdentity","expectedOverflow"])
       if(JSON.stringify(fresh[key])!==JSON.stringify(context[key])) throw new Error("CONTROLLER_PLACEMENT_OWNER_CHANGED");
-    context.expectedOverflow=fresh.expectedOverflow;
   }
   const spaces=(await listTaskSpaces()).filter(x=>x.name===binding.spaceName);
   if(spaces.length>1) throw new Error("REATTACH_AMBIGUOUS_SPACE");
@@ -912,8 +912,9 @@ async function reattachTask(reg, chat, taskId, options={}) {
     return (await response.json()).user?.id||null;
   });
   if(observedIdentity!==identity) throw new Error("REATTACH_LOGIN_MISMATCH");
-  const snapshot=await state(page);
-  if(!snapshot.composerPresent || snapshot.errorTexts?.length || String(snapshot.composerText||"").trim())
+  const snapshot=await state(page,false,null,placing);
+  if(!snapshot.composerPresent || snapshot.errorTexts?.length ||
+     (placing?(snapshot.composerCount!==1 || snapshot.composerRawText!==""):String(snapshot.composerText||"").trim()))
     throw new Error("REATTACH_TARGET_UNHEALTHY_OR_DRAFT");
   if(placing && (snapshot.approvalRequired!==false || snapshot.generating!==false || snapshot.composerText!==""))
     throw new Error("CONTROLLER_PLACEMENT_TARGET_BUSY_OR_APPROVAL");
@@ -921,11 +922,12 @@ async function reattachTask(reg, chat, taskId, options={}) {
   const next={...chat,spaceName:binding.spaceName,spaceId:task.spaceId,pageSpaceId:task.spaceId,
     page:page.label,profileId:binding.profileId,attachmentEpoch:Number(expectedChat.attachmentEpoch||0)+1};
   if(placing) {
-    const committed=coordinated("controller-placement-commit",{...context,
+    const committed=coordinated("controller-placement-commit",{...context,overflowCandidate,
       attachment:{spaceName:next.spaceName,spaceId:next.spaceId,pageSpaceId:next.pageSpaceId,page:next.page,
         profileId:next.profileId,attachmentEpoch:next.attachmentEpoch},
       observation:{url,accountIdentity:observedIdentity,composerPresent:snapshot.composerPresent,
-        composerText:snapshot.composerText,generating:snapshot.generating,approvalRequired:snapshot.approvalRequired}});
+        composerCount:snapshot.composerCount,composerRawText:snapshot.composerRawText,
+        generating:snapshot.generating,approvalRequired:snapshot.approvalRequired}});
     reg.chats[chat.id]=committed.chat;
     return {ok:true,sessionId:chat.id,controller:committed.controller,previous:old,
       spaceName:next.spaceName,page:next.page,messageSent:false,oldTabUntouched:true,resumeWatch:false};
@@ -1066,8 +1068,8 @@ async function expandEvidenceMessages(page, latestOnly=false) {
   }
 }
 
-async function state(page, includeUserMessages=false, controlAction=null) {
-  const snapshot=await page.evaluate(({includeUserMessages,controlAction}) => {
+async function state(page, includeUserMessages=false, controlAction=null, includeRawComposer=false) {
+  const snapshot=await page.evaluate(({includeUserMessages,controlAction,includeRawComposer}) => {
     const root=document.querySelector('main') || document.querySelector('[role="main"]') || document.body;
     const messageSelector='[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]';
     if(!globalThis.__CHAT_BRIDGE_WATCH || globalThis.__CHAT_BRIDGE_WATCH.root!==root) {
@@ -1284,7 +1286,10 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       .map(x=>(x.innerText||'').trim()).filter(v=>v && v.length<300)
       .filter(v=>errorWords.some(k=>v.toLowerCase().includes(k))).filter((v,i,a)=>a.indexOf(v)===i).slice(-5);
     const form=document.querySelector('form');
-    const composerEl=document.querySelector('div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]');
+    const composerSelector='div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]';
+    const composerEl=document.querySelector(composerSelector);
+    // textContent preserves draft whitespace; an empty ProseMirror <p><br></p> has no semantic text.
+    const rawComposers=includeRawComposer?[...document.querySelectorAll(composerSelector)]:null;
     const composer=!!composerEl;
     const composerText=(composerEl?.innerText||composerEl?.textContent||"").trim();
     const visibleButton=b=>{
@@ -1304,6 +1309,8 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       generating:!!stop,stopAvailable:!!stop,
       sendAvailable:!!send && !send.disabled && send.getAttribute('aria-disabled')!=='true',
       inputReady:composer && !stop,composerPresent:composer,composerText,recoveryControls,approvalRequired,
+      ...(includeRawComposer?{composerCount:rawComposers.length,
+        composerRawText:rawComposers.length===1&&typeof rawComposers[0].textContent==="string"?rawComposers[0].textContent:null}:{}),
       errorTexts:[...alerts,...knownErrors].filter((v,i,a)=>a.indexOf(v)===i),
       online:navigator.onLine,visibility:document.visibilityState,pageWasDiscarded:!!document.wasDiscarded,
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,
@@ -1320,7 +1327,7 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       mutationLastAt:new Date(globalThis.__CHAT_BRIDGE_WATCH.lastMutationAt).toISOString(),
       observerStartedAt:new Date(globalThis.__CHAT_BRIDGE_WATCH.startedAt).toISOString()
     };
-  },{includeUserMessages,controlAction});
+  },{includeUserMessages,controlAction,includeRawComposer});
   if(snapshot.approvalRequired && controlAction) throw new Error("APPROVAL_REQUIRED");
   return snapshot;
 }

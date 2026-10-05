@@ -76,16 +76,17 @@ test("overflow preserves a healthy legacy target and isolates a verified foreign
   available=[{id:16,name:legacy,profileId:"P3",ownership:"agent",createdBy:"agent"}];
   const raw=structuredClone(reg);raw.chats.s={id:"s",project:"P",account:"a",spaceName:"old",page:"protected"};
   baselines.set(reg,raw);
-  const repaired=await api.overflowManagedTask(reg,"P","a",reg.projects.P.bindings.a,{mappingOnly:true});
+  const repaired=await api.overflowManagedTask(reg,"P","a",reg.projects.P.bindings.a,{preview:true});
   assert.equal(repaired.spaceName,scoped);assert.equal(available[0].id,16);assert.equal(available[0].profileId,"P3");
-  assert.equal(writes.length,1);assert.deepEqual(writes[0].next.chats,raw.chats);
-  assert.equal(reg.capacityOverflow["login-a|P1"].identity,"login-a");
-  const attached=structuredClone(reg);attached.chats.s={id:"s",project:"P",account:"a",spaceName:scoped,spaceId:9,profileId:profile,page:"p7"};
+  assert.equal(writes.length,0);assert.equal(saves,1);
+  assert.deepEqual(reg.capacityOverflow["login-a|P1"],raw.capacityOverflow["login-a|P1"]);
+  const attached=structuredClone(reg);attached.capacityOverflow["login-a|P1"]=repaired.mapping;attached.chats.s={id:"s",project:"P",account:"a",spaceName:scoped,spaceId:9,profileId:profile,page:"p7"};
   assert.equal(api.normalizeRegistry(structuredClone(attached)).chats.s.page,"p7");
   for(const field of ["identity","profileId","spaceId","spaceName"]){
     const bad=structuredClone(attached);bad.capacityOverflow["login-a|P1"][field]="foreign";
     assert.equal(api.normalizeRegistry(bad).chats.s.page,null,field);
   }
+  reg.capacityOverflow["login-a|P1"]=repaired.mapping;
   for(const bad of [
     [{id:9,name:scoped,profileId:profile,ownership:"user",createdBy:"agent"}],
     [{id:9,name:scoped,profileId:"P3",ownership:"agent",createdBy:"agent"}],

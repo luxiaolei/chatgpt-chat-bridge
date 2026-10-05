@@ -3283,25 +3283,34 @@ def controller_placement_context(db, session_id):
 
 def controller_placement_commit(db, payload):
     required = {"sessionId", "expectedChat", "expectedBinding", "expectedController", "accountIdentity",
-                "expectedOverflow", "attachment", "observation"}
+                "expectedOverflow", "overflowCandidate", "attachment", "observation"}
     if not isinstance(payload, dict) or set(payload) != required:
         raise ValueError("CONTROLLER_PLACEMENT_COMMIT_INVALID")
     attachment, observed = payload["attachment"], payload["observation"]
     if (not isinstance(attachment, dict) or set(attachment) != {
             "spaceName", "spaceId", "pageSpaceId", "page", "profileId", "attachmentEpoch"}
             or not isinstance(observed, dict) or set(observed) != {
-            "url", "accountIdentity", "composerPresent", "composerText", "generating", "approvalRequired"}):
+            "url", "accountIdentity", "composerPresent", "composerCount", "composerRawText", "generating", "approvalRequired"}):
         raise ValueError("CONTROLLER_PLACEMENT_EVIDENCE_INVALID")
     begin_immediate(db)
     try:
         current = controller_placement_context(db, payload["sessionId"])
         if any(payload[k] != v for k, v in current.items()):
             raise ValueError("CONTROLLER_PLACEMENT_OWNER_CHANGED")
-        chat, binding, overflow = current["expectedChat"], current["expectedBinding"], current["expectedOverflow"]
-        main = attachment["spaceName"] == binding.get("spaceName") and attachment["spaceId"] == binding.get("spaceId")
-        extra = (overflow and overflow.get("identity") == current["accountIdentity"]
-                 and overflow.get("profileId") == binding["profileId"]
-                 and attachment["spaceName"] == overflow.get("spaceName") and attachment["spaceId"] == overflow.get("spaceId"))
+        chat, binding = current["expectedChat"], current["expectedBinding"]
+        overflow = payload["overflowCandidate"]
+        if overflow is not None:
+            legacy = binding["spaceName"] + "-overflow"
+            scoped = legacy + "-" + hashlib.sha256(binding["profileId"].encode()).hexdigest()[:8]
+            if (not isinstance(overflow, dict) or set(overflow) != {
+                    "spaceName", "spaceId", "profileId", "identity", "account", "createdAt"}
+                    or overflow["spaceName"] not in {legacy, scoped}
+                    or overflow["identity"] != current["accountIdentity"]
+                    or overflow["profileId"] != binding["profileId"] or overflow["account"] != chat["account"]
+                    or not isinstance(overflow["createdAt"], str) or not overflow["createdAt"]):
+                raise ValueError("CONTROLLER_PLACEMENT_OVERFLOW_INVALID")
+        main = overflow is None and attachment["spaceName"] == binding.get("spaceName") and attachment["spaceId"] == binding.get("spaceId")
+        extra = (overflow and attachment["spaceName"] == overflow["spaceName"] and attachment["spaceId"] == overflow["spaceId"])
         if (not (main or extra) or not str(attachment["spaceName"]).startswith("chat-bridge-agent-")
                 or attachment["profileId"] != binding["profileId"]
                 or type(attachment["spaceId"]) is not int or attachment["spaceId"] <= 0
@@ -3314,12 +3323,15 @@ def controller_placement_commit(db, payload):
         url = re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/c/([0-9a-f-]{36})/?", str(observed["url"]))
         if (not project_id or not url or url[1] != project_id or url[2] != current["sessionId"]
                 or observed["accountIdentity"] != current["accountIdentity"]
-                or observed["composerPresent"] is not True or observed["composerText"] != ""
+                or observed["composerPresent"] is not True or type(observed["composerCount"]) is not int
+                or observed["composerCount"] != 1 or observed["composerRawText"] != ""
                 or observed["generating"] is not False or observed["approvalRequired"] is not False):
             raise ValueError("CONTROLLER_PLACEMENT_OBSERVATION_REJECTED")
         chat.update(attachment)
         reg = registry(db)
         reg["chats"][current["sessionId"]] = chat
+        if overflow is not None:
+            reg.setdefault("capacityOverflow", {})[current["accountIdentity"] + "|" + binding["profileId"]] = overflow
         db.execute("UPDATE documents SET payload=? WHERE kind='registry'", (json.dumps(reg, ensure_ascii=False),))
         db.commit()
         return {"chat":chat, "controller":current["expectedController"], "messageSent":False}
