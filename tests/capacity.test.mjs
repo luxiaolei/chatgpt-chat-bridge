@@ -48,24 +48,57 @@ printf '%s\\n' '{"ok":true,"delivered":true}'; exit 0
   } finally { await rm(root,{recursive:true,force:true}); }
 });
 
-test("overflow is one managed Space per verified login/Profile and never takes user Space", async()=>{
+test("overflow preserves a healthy legacy target and isolates a verified foreign-Profile collision", async()=>{
   const source=await readFile(path.resolve("src/main.js"),"utf8");
-  const start=source.indexOf("function managedSpacePlan");
-  const planEnd=source.indexOf("\nasync function accountManagedTask",start);
-  const overflowStart=source.indexOf("async function overflowManagedTask");
-  const overflowEnd=source.indexOf("\nasync function newManagedPage",overflowStart);
-  const code=source.slice(start,planEnd)+source.slice(overflowStart,overflowEnd);
-  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
-  const task={spaceId:9,newPage:async()=>({label:"p1"})};
-  const reg={accounts:{a:{identity:"login-a",label:"A"}},spaces:{canonical:{identity:"login-a",accountName:"A",profileId:"P1",name:"chat-bridge-agent-a",ownership:"agent"}},projects:{P:{bindings:{a:{projectUrl:"https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project",projectId:"g-p-"+"a".repeat(32),spaceName:"chat-bridge-agent-a",profileId:"P1"}}}}};
-  const taskAccounts=new Map(); let available=[]; let creates=0;
-  const api=await new AsyncFunction("listTaskSpaces","taskSpace","slug","crypto","taskAccounts","accountScope","saveRegistry",code+";return {overflowManagedTask};")(
-    async()=>available,async name=>{if(!available.length) creates++;assert.equal(name,"chat-bridge-agent-a-overflow");return task;},s=>String(s).toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,""),await import("node:crypto"),taskAccounts,(r,a)=>r.accounts[a].identity,async()=>{});
-  const first=await api.overflowManagedTask(reg,"P","a",reg.projects.P.bindings.a);
-  assert.equal(first.spaceName,"chat-bridge-agent-a-overflow");
-  const existing={name:first.spaceName,profileId:"P1",ownership:"agent"}; available=[existing];
-  const reused=await api.overflowManagedTask(reg,"P","a",reg.projects.P.bindings.a);
-  assert.equal(reused.spaceName,first.spaceName); assert.equal(creates,1);
-  available=[{name:first.spaceName,profileId:"P1",ownership:"user"}];
-  await assert.rejects(()=>api.overflowManagedTask(reg,"P","a",reg.projects.P.bindings.a),error=>error?.code==="SPACE_IN_USER_CONTROL");
+  const start=source.indexOf("function managedSpacePlan"),planEnd=source.indexOf("\nasync function accountManagedTask",start);
+  const overflowStart=source.indexOf("async function overflowManagedTask"),overflowEnd=source.indexOf("\nasync function newManagedPage",overflowStart);
+  const normalStart=source.indexOf("function normalizeRegistry"),normalEnd=source.indexOf("\nfunction normalizeRuntime",normalStart);
+  const code=source.slice(start,planEnd)+source.slice(overflowStart,overflowEnd)+source.slice(normalStart,normalEnd);
+  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor, crypto=await import("node:crypto");
+  const name="chat-bridge-agent-a",profile="P1",legacy=name+"-overflow",scoped=legacy+"-"+crypto.createHash("sha256").update(profile).digest("hex").slice(0,8);
+  const reg={defaultAccount:"a",chats:{},accounts:{a:{identity:"login-a",label:"A"}},
+    spaces:{canonical:{identity:"login-a",accountName:"A",profileId:profile,name,ownership:"agent"}},
+    projects:{P:{bindings:{a:{spaceName:name,spaceId:1,profileId:profile}}}}};
+  let available=[],creates=0,opened=0,saves=0,wrongCreation=false;
+  const baselines=new WeakMap(), writes=[];
+  const api=await new AsyncFunction("listTaskSpaces","taskSpace","slug","crypto","taskAccounts","accountScope","saveRegistry","emptyRegistry","defaultSpaceName","DEFAULT_ACCOUNT","stored","stateBaselines",
+    code+";return {overflowManagedTask,normalizeRegistry};")(
+    async()=>available,async (target,options)=>{
+      opened++;
+      let info=available.find(x=>x.name===target);
+      if(!info){creates++;info={id:9,name:target,profileId:wrongCreation?"P3":options.profileId,ownership:"agent",createdBy:"agent"};available.push(info);}
+      return {spaceId:info.id};
+    },s=>s.toLowerCase(),crypto,new Map(),(r,a)=>r.accounts[a].identity,async()=>{saves++;},
+    ()=>({accounts:{},projects:{},chats:{},spaces:{}}),()=>name,"a",(_cmd,_kind,payload)=>{writes.push(payload);},baselines);
+  assert.equal((await api.overflowManagedTask(reg,"P","a",reg.projects.P.bindings.a)).spaceName,legacy);
+  assert.equal((await api.overflowManagedTask(reg,"P","a",reg.projects.P.bindings.a)).spaceName,legacy);
+  assert.equal(creates,1);
+  available=[{id:16,name:legacy,profileId:"P3",ownership:"agent",createdBy:"agent"}];
+  const raw=structuredClone(reg);raw.chats.s={id:"s",project:"P",account:"a",spaceName:"old",page:"protected"};
+  baselines.set(reg,raw);
+  const repaired=await api.overflowManagedTask(reg,"P","a",reg.projects.P.bindings.a,{preview:true});
+  assert.equal(repaired.spaceName,scoped);assert.equal(available[0].id,16);assert.equal(available[0].profileId,"P3");
+  assert.equal(writes.length,0);assert.equal(saves,1);
+  assert.deepEqual(reg.capacityOverflow["login-a|P1"],raw.capacityOverflow["login-a|P1"]);
+  const attached=structuredClone(reg);attached.capacityOverflow["login-a|P1"]=repaired.mapping;attached.chats.s={id:"s",project:"P",account:"a",spaceName:scoped,spaceId:9,profileId:profile,page:"p7"};
+  assert.equal(api.normalizeRegistry(structuredClone(attached)).chats.s.page,"p7");
+  for(const field of ["identity","profileId","spaceId","spaceName"]){
+    const bad=structuredClone(attached);bad.capacityOverflow["login-a|P1"][field]="foreign";
+    assert.equal(api.normalizeRegistry(bad).chats.s.page,null,field);
+  }
+  reg.capacityOverflow["login-a|P1"]=repaired.mapping;
+  for(const bad of [
+    [{id:9,name:scoped,profileId:profile,ownership:"user",createdBy:"agent"}],
+    [{id:9,name:scoped,profileId:"P3",ownership:"agent",createdBy:"agent"}],
+    [{id:9,name:scoped,profileId:profile,ownership:"agent",createdBy:"user"}],
+    [{id:9,name:scoped,profileId:profile,ownership:"agent",createdBy:"agent"},{id:10,name:scoped,profileId:profile,ownership:"agent",createdBy:"agent"}]
+  ]) {
+    available=bad;const count=opened;
+    await assert.rejects(()=>api.overflowManagedTask(reg,"P","a",reg.projects.P.bindings.a));assert.equal(opened,count);
+  }
+  const fresh=structuredClone(reg);delete fresh.capacityOverflow["login-a|P1"];
+  available=[{id:16,name:legacy,profileId:"P3",ownership:"agent",createdBy:"agent"}];wrongCreation=true;
+  const count=saves;
+  await assert.rejects(()=>api.overflowManagedTask(fresh,"P","a",fresh.projects.P.bindings.a),/VERIFICATION_FAILED/);
+  assert.equal(saves,count);assert.equal(fresh.capacityOverflow["login-a|P1"],undefined);
 });

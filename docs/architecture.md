@@ -103,6 +103,10 @@ Shared-Space cleanup is physical-Space-aware: protection is aggregated across ev
 
 A ChatGPT conversation ID is independent of its Ego Space attachment. Rebinding a project/account to another Space preserves conversation identity and causes sessions to reattach in tabs in the new Space. Page labels are a bounded runtime pool, not durable session identity: if `task.newPage()` hits the Ego page budget, the bridge may reclaim an idle managed session page and set that session's registry `page` to null. The next use reattaches the same conversation by URL. The control page, active/generating pages, active-task sessions, active tab, and non-empty composer drafts are protected from reclamation.
 
+A confirmed `reattach --current-controller` places an existing formally registered current controller without inventing a runtime task. It requires an ACTIVE logical row with no pending successor, a verified managed target, fresh same-Project/login observation, one composer with empty untrimmed semantic text, no generation/approval and no active task or delivery lease. A short transaction compares the complete chat, binding, logical row, account identity and exact overflow mapping, then commits the previewed overflow mapping and attachment together. Failed observation may leave an allocated physical Space, but changes neither local mapping nor attachment. Runtime, logical epochs, pauses and UNKNOWN operations are preserved. Worker reattach still requires its exact active task.
+
+Healthy legacy overflow Spaces remain usable. A verified agent-owned legacy-name collision in another Profile selects the deterministic `<canonical>-overflow-<Profile SHA-256 prefix>` target. Its returned Profile/ownership/ID must be freshly verified before recording the identity/Profile mapping; normalization retains a scoped attachment only through that exact verified mapping.
+
 ### Account failover
 
 Account records are routing identities. Each logical project may bind to a different ChatGPT Project and Ego Space for each account. The bridge does not automate credentials; the selected Space must already have authorized access to that ChatGPT account/project.
