@@ -891,7 +891,7 @@ async function reattachTask(reg, chat, taskId, options={}) {
   if(priorAccount && accountScope(reg,priorAccount)!==accountScope(reg,chat.account))
     throw new Error("REATTACH_ACCOUNT_SCOPE_CONFLICT");
   taskAccounts.set(Number(task.spaceId),chat.account);
-  const matching=tabs.filter(x=>sameConversationUrl(x.url,chat.url));
+  const matching=placing?tabs.filter(x=>sameConversationUrl(x.url,chat.url)):[];
   if(placing && matching.some(x=>x.openedBy!=="agent")) throw new Error("CONTROLLER_PLACEMENT_TARGET_IN_USER_CONTROL");
   const candidates=placing?matching:tabs.filter(x=>String(x.url||"").includes("/c/"+chat.id) && x.openedBy==="agent");
   if(candidates.length>1) throw new Error("REATTACH_AMBIGUOUS_TARGET");
@@ -903,7 +903,7 @@ async function reattachTask(reg, chat, taskId, options={}) {
   if(!placing) await waitForConversationReady(page,20000);
   await page.waitForFunction(()=>!!document.querySelector('[data-message-author-role], [data-chatgpt-search-unit-key$=":assistant"], [data-chatgpt-search-unit-key$=":user"]'),undefined,{timeout:15000});
   const url=await page.url();
-  if(!sameConversationUrl(url,chat.url) || !projectKey(binding.projectUrl) || projectKey(url)!==projectKey(binding.projectUrl))
+  if(!(placing?sameConversationUrl(url,chat.url):url.includes("/c/"+chat.id)) || !projectKey(binding.projectUrl) || projectKey(url)!==projectKey(binding.projectUrl))
     throw new Error("REATTACH_CONVERSATION_MISMATCH");
   const observedIdentity=await page.evaluate(async()=>{
     if(location.origin!=="https://chatgpt.com") throw new Error("REATTACH_ORIGIN_MISMATCH");
