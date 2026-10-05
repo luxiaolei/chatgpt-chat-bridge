@@ -52,6 +52,28 @@ test('persisted/error witness metadata never contains secret body, identity or n
  assert.equal(redact(witness,'actual-message').messageId,'actual-message');
 });
 
+const currentFormat=JSON.parse(await readFile(new URL('./native-submission-current-fixture.json',import.meta.url),'utf8'));
+
+test('current native submit/getter pair is admitted exactly and mixed aliases fail closed',async()=>{
+ const configure=({host,editor})=>{
+  host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+currentFormat.submit)();
+  editor.getText=new Function('M','return {'+currentFormat.getter+'};')({g:()=>fixture.body}).getText;
+ };
+ const witness=await inspect(configure);
+ assert.equal(witness.body,fixture.body);
+ assert.equal(crypto.createHash('sha256').update(witness.getterSource).digest('hex'),currentFormat.getterSha256);
+ await assert.rejects(inspect(({host})=>{
+  host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+currentFormat.submit)();
+ }),/NATIVE_SUBMISSION_UNVERIFIED/);
+ await assert.rejects(inspect(({editor})=>{
+  editor.getText=new Function('M','return {'+currentFormat.getter+'};')({g:()=>fixture.body}).getText;
+ }),/NATIVE_SUBMISSION_UNVERIFIED/);
+ await assert.rejects(inspect(({host,editor})=>{
+  configure({host,editor});
+  host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return e=>up(X.getText(),e)')();
+ }),/NATIVE_SUBMISSION_UNVERIFIED/);
+});
+
 const persistedFormat=JSON.parse(await readFile(new URL('./native-submission-persisted-text-fixture.json',import.meta.url),'utf8'));
 function inspectPersisted(change=()=>{}) {
  return inspect(context=>{

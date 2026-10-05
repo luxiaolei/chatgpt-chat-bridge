@@ -1,0 +1,12 @@
+{
+  "observedAt": "2026-10-05",
+  "accounts": [
+    "default",
+    "qc-alpha"
+  ],
+  "submit": "e=>up(rT.getText(),e)",
+  "getter": "getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,M.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}",
+  "submitSha256": "8dcd9e4ee5c41e9d9012b95c832f2813f3d63119bf45b650564c998bed2ea428",
+  "getterSha256": "ce893debd58fa25e54f219f9114c4c43fa80cf58cdf016ab798329bf0e681ca5",
+  "serializerSha256": "231c5ee71de23d9394cdf406f804b3f36f391d456a5a1ffd32a48501af35e3c2"
+}
