@@ -347,10 +347,10 @@ async function loadRegistry() {
   stateBaselines.set(registry,structuredClone(raw));
   return registry;
 }
-async function saveRegistry(reg) {
+async function saveRegistry(reg, registration=null) {
   const next=normalizeRegistry(reg),base=stateBaselines.get(reg);
   if(!base) throw new Error("registry state must be loaded before save");
-  stored("put","registry",{base,next});
+  stored("put","registry",{base,next,...(registration?{registration}:{})});
   stateBaselines.set(reg,structuredClone(next));
 }
 function opt(name, def=null) {
@@ -4144,11 +4144,14 @@ else if(cmd==="new"){
     const url=await page.url(), id=convId(url), projectBase=url.includes("/g/g-p-")?url.replace(/\/c\/[^/]+.*$/,''):binding.projectBase;
     if(!sameConversationUrl(url,delivery.url)){const error=new Error("NEW_CONVERSATION_CHANGED_BEFORE_REGISTRATION");error.code=error.message;throw error;}
     if(projectBase){binding.projectBase=projectBase;binding.projectUrl=projectBase+"/project";binding.projectId=projectIdFromUrl(projectBase);}
-    reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:"active",model,effort:requestedEffort||applied.effort||null,affinityKey,workgroupId,
+    const attempt=globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null;
+    const rotation=attempt&&(await deliveryAttemptPromise).manifest.kind==="rotation";
+    reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:rotation?"pending-rotation":"active",model,effort:requestedEffort||applied.effort||null,affinityKey,workgroupId,
       verifiedModel:applied.model||applied.observed?.model||null,verifiedEffort:applied.effort||applied.observed?.effort||null,
       resourceVerifiedAt:new Date().toISOString(),
       spaceName:binding.spaceName,spaceId:task.spaceId,pageSpaceId:task.spaceId,profileId:binding.profileId||null,page:page.label,attachmentEpoch:1,createdAt:new Date().toISOString()};
-    await saveRegistry(reg); await touchRuntime(p,{activeAccount:a,spaceName:binding.spaceName,lastCommand:"new",lastSession:id});
+    await saveRegistry(reg,{attempt,sessionId:id,messageSha256:crypto.createHash("sha256").update(first).digest("hex")});
+    await touchRuntime(p,{activeAccount:a,spaceName:binding.spaceName,lastCommand:"new",lastSession:id});
     print({...reg.chats[id],delivery,modelSelection:{
       model:applied.model||applied.observed?.model||null,
       effort:applied.effort||applied.observed?.effort||null,

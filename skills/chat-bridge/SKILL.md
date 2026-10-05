@@ -270,10 +270,24 @@ chat-bridge queue checkpoint --project "PROJECT" --role ROLE --session-ref SESSI
   --version CP-1 --summary "state needed by successor"
 chat-bridge control rotation-prepare --project "PROJECT" --role ROLE --confirm
 # successor verifies current Skills/tools/host/model, then:
-chat-bridge control rotation-ack --rotation ROTATION_ID --message "verified"
+# SUCCESSOR_SESSION_REF is this successor's actual sessionRef / persistent CID in its own URL, not the predecessor or a local Codex thread ID.
+chat-bridge control rotation-ack --rotation ROTATION_ID --caller-ref SUCCESSOR_SESSION_REF --message "verified"
 ```
 
 The logical role/controller remains stable while the concrete conversation gets a new generation. Late callbacks follow only a committed successor mapping; old conversations are retained as history instead of being deleted.
+
+A legacy rotation with no registered successor or retained native witness may be quarantined only by authorized management. This preserves the original UNKNOWN and does not prove a remote child stopped. Preview is local and read-only; confirm requires its exact digest:
+
+```bash
+chat-bridge control rotation-quarantine --operation OLD_OPERATION --caller-ref MANAGEMENT_REF --reason "retained evidence and recovery decision"
+chat-bridge control rotation-quarantine --operation OLD_OPERATION --caller-ref MANAGEMENT_REF --reason "retained evidence and recovery decision" --expected PREVIEW_DIGEST --confirm
+# Record a new checkpoint for the same current owner after quarantine, then:
+chat-bridge control rotation-prepare --project "PROJECT" --role ROLE --quarantine-event EVENT_ID --caller-ref MANAGEMENT_REF --confirm
+# The actual successor verifies its role/tools/host/model through its account connection:
+chat-bridge control rotation-ack --rotation NEW_ROTATION --caller-ref SUCCESSOR_CID --message "verification summary"
+```
+
+The retained quarantine event permanently fences new/reactivated active registrations for that Project/role/workgroup across account aliases. A current owned rotation claim may register only pending-rotation; its exact SENT successor must ACK before ownership changes. Later normal ACTIVE rotations carry the event automatically and use the current owner/epoch. Rejected registrations retain bounded declared CID/URL evidence; they are not native delivery proof or authorization to replay. Existing same-CID metadata/attachments and unrelated roles retain normal behavior.
 
 ## Runtime task cache
 
