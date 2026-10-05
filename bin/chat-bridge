@@ -378,6 +378,7 @@ STORE_PATH="${MAIN:h}/state-store.py"
 [[ -f "$STORE_PATH" ]] || { echo "chat-bridge: state store missing: $STORE_PATH" >&2; exit 127; }
 STORE_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$STORE_PATH")"
 COORDINATOR_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${MAIN:h}/coordinator.py")"
+ATTEMPT_JSON="$(python3 -c 'import json,os; print(json.dumps(json.loads(os.environ.get("CHAT_BRIDGE_DELIVERY_ATTEMPT", "null"))))')"
 IMAGE_MODULE_JSON="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "${MAIN:h}/capabilities/image/chatgpt-ego.js")"
 NODE_EXECUTABLE="$(command -v node || PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" command -v node || true)"
 [[ "$NODE_EXECUTABLE" == /* && -x "$NODE_EXECUTABLE" ]] || { echo '{"ok":false,"code":"NODE_RUNTIME_MISSING","deliveryStage":"PRE_SEND"}' >&2; exit 127; }
@@ -398,6 +399,7 @@ set +e
   printf 'globalThis.__CHAT_BRIDGE_STATE_DIR__ = %s;\n' "$STATE_JSON"
   printf 'globalThis.__CHAT_BRIDGE_STORE_PATH__ = %s;\n' "$STORE_JSON"
   printf 'globalThis.__CHAT_BRIDGE_COORDINATOR_PATH__ = %s;\n' "$COORDINATOR_JSON"
+  printf 'globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__ = %s;\n' "$ATTEMPT_JSON"
   printf 'globalThis.__CHAT_BRIDGE_NODE_EXECUTABLE__ = %s;\n' "$NODE_EXECUTABLE_JSON"
   printf 'globalThis.__CHAT_BRIDGE_IMAGE_MODULE_PATH__ = %s;\n' "$IMAGE_MODULE_JSON"
   [[ -n "${IMAGE_PREPARED:-}" ]] && printf 'globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__ = %s;\n' "$IMAGE_PREPARED"

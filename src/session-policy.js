@@ -13,7 +13,7 @@
       const label = String(control?.label || "").trim().toLowerCase();
       if (!label) return false;
       if (label === "regenerate response" || label === "regenerate") return false;
-      return ["continue generating", "try again", "retry"].some((token) => label.includes(token));
+      return ["continue generating", "try again", "retry"].includes(label);
     });
   }
 

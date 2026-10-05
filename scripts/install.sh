@@ -23,6 +23,8 @@ cp "$ROOT/src/web-preflight.py" "$SHARE_DIR/web-preflight.py"
 cp "$ROOT/src/capacity-preflight.py" "$SHARE_DIR/capacity-preflight.py"
 cp "$ROOT/src/state-store.py" "$SHARE_DIR/state-store.py"
 cp "$ROOT/src/coordinator.py" "$SHARE_DIR/coordinator.py"
+cp "$ROOT/src/delivery_attempt.py" "$SHARE_DIR/delivery_attempt.py"
+cp "$ROOT/src/delivery-attempt.mjs" "$SHARE_DIR/delivery-attempt.mjs"
 # Package native entry + local artifact verification. Capability evidence is still required.
 mkdir -p "$SHARE_DIR/capabilities/image"
 cp -R "$ROOT/src/capabilities/image/." "$SHARE_DIR/capabilities/image/"

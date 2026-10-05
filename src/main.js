@@ -90,6 +90,30 @@ const SPACE_CATALOG=globalThis.__CHAT_BRIDGE_SPACE_CATALOG__;
 const TOPOLOGY=globalThis.__CHAT_BRIDGE_TOPOLOGY__;
 const WEB_COOLDOWN_PATH = pathMod.join(STATE_DIR, "web-cooldown.json");
 const taskAccounts=new Map();
+let deliveryAttemptPromise=null;
+async function recordDeliveryStage(phase,data={},message=null) {
+  const context=globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__;
+  if(!context) return null; // Direct callers retain their existing receipt contract.
+  if(!COORDINATOR_PATH) throw new Error("DELIVERY_EVIDENCE_RUNTIME_MISSING");
+  deliveryAttemptPromise ||= import(pathMod.join(pathMod.dirname(COORDINATOR_PATH),"delivery-attempt.mjs"))
+    .then(module=>module.openAttempt(STATE_DIR,context));
+  const journal=await deliveryAttemptPromise;
+  if(phase==="TARGET_OBSERVED" && (data.project!==journal.manifest.project || data.account!==journal.manifest.account ||
+     (journal.manifest.sessionRef && data.sessionId!==journal.manifest.sessionRef)))
+    throw new Error("DELIVERY_ATTEMPT_TARGET_MISMATCH");
+  return journal.record(phase,data,message);
+}
+function deliveryStageSnapshot(raw,page=null) {
+  return {url:raw?.url||null,observedAt:raw?.observedAt||null,
+    page:page?.label||null,spaceId:page?.spaceId||null,
+    lastUserId:raw?.lastUserId||null,userMessageIds:raw?.userMessageIds||[],
+    lastUserSource:raw?.lastUserSource||null,lastUserSourceCondition:raw?.lastUserSourceCondition||null,
+    lastAssistantId:raw?.lastAssistantId||null,
+    assistantSha256:typeof raw?.lastAssistant==="string"?crypto.createHash("sha256").update(raw.lastAssistant).digest("hex"):null,
+    generating:raw?.generating??null,approvalRequired:raw?.approvalRequired??null,
+    composerChars:typeof raw?.composerText==="string"?raw.composerText.length:null};
+}
+
 const COMPOSER_SELECTOR = 'div#prompt-textarea[contenteditable="true"], [data-testid="prompt-textarea"][contenteditable="true"], form [role="textbox"][contenteditable="true"], form .ProseMirror[contenteditable="true"]';
 const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 
@@ -1145,8 +1169,10 @@ async function state(page, includeUserMessages=false, controlAction=null) {
     const containers=[...document.querySelectorAll(messageSelector)].filter(node=>['user','assistant'].includes(roleOf(node)));
     const lastContainer=containers[containers.length-1];
     const currentUi=node=>{
+      // Captured history Retry lives under the Recents sidebar, not this turn.
+      if(node.closest('[data-app-action-sidebar-section], nav, aside, [role="navigation"]')) return false;
       const owner=node.closest(messageSelector);
-      if(!owner) return true;
+      if(!owner) return !!root.matches?.('main, [role="main"]') && root.contains(node);
       return roleOf(owner)==='assistant' && !!lastContainer &&
         (owner===lastContainer || owner.contains(lastContainer) || lastContainer.contains(owner));
     };
@@ -1157,25 +1183,33 @@ async function state(page, includeUserMessages=false, controlAction=null) {
     const stop=buttons.find(b=>!b.closest(messageSelector) && isStop(b));
     const send=buttons.find(b=>!b.closest(messageSelector) && (b.getAttribute('data-testid')==='send-button' || /^Send(?: prompt| message)?$/i.test(norm(b))));
     const recoveryWords=["continue generating","try again","retry","regenerate"];
-    const recoverableButtons=buttons.filter(currentUi).filter(b=>recoveryWords.some(k=>norm(b).toLowerCase().includes(k)));
+    const recoveryKind=b=>{
+      const label=norm(b).toLowerCase();
+      return label==='regenerate response'?'regenerate':recoveryWords.includes(label)?label:null;
+    };
+    const recoverableButtons=buttons.filter(currentUi).filter(b=>recoveryKind(b));
     const recoveryControls=recoverableButtons.map(b=>({label:norm(b),disabled:false}));
     // The captured Codex Tasks permission card came through this alert/error UI query.
     // Require its exact heading outside message prose; never infer approval from chat text.
-    const alertNodes=[...document.querySelectorAll('[role="alert"], [data-testid*="error" i]')]
-      .filter(node=>uiVisible(node) && currentUi(node));
-    const approvalRequired=alertNodes.some(node=>!node.closest(messageSelector) && !node.querySelector(messageSelector) &&
+    const visibleAlerts=[...document.querySelectorAll('[role="alert"], [data-testid*="error" i]')]
+      .filter(uiVisible);
+    const alertNodes=visibleAlerts.filter(currentUi);
+    // Approval cards may be global/portal UI; narrowing turn errors must not hide them.
+    const approvalRequired=visibleAlerts.some(node=>!node.closest(messageSelector) && !node.querySelector(messageSelector) &&
       /^Codex Tasks\s+Allow ChatGPT to use Codex Tasks\?(?:\s|$)/.test((node.innerText||"").trim()));
     if(approvalRequired && controlAction) return {approvalRequired:true,clicked:false,stopped:false};
     if(controlAction==="stop") {
       if(!stop) return {stopped:false};
       const label=norm(stop); stop.click(); return {stopped:true,label};
     }
-    if(controlAction==="retry") {
-      for(const key of recoveryWords) {
-        const button=[...recoverableButtons].reverse().find(b=>norm(b).toLowerCase().includes(key));
-        if(button) { const label=norm(button); button.click(); return {clicked:true,label,kind:key}; }
-      }
-      return {clicked:false};
+    if(controlAction==="retry" || controlAction==="recover") {
+      // Retry never means Regenerate. Automatic recovery can also use native
+      // Continue, but only one exact current-turn control may be selected.
+      const allowed=controlAction==="recover"?['continue generating','try again','retry']:['try again','retry'];
+      const candidates=recoverableButtons.filter(b=>allowed.includes(recoveryKind(b)));
+      if(candidates.length!==1) return {clicked:false,condition:candidates.length?'RECOVERY_CONTROL_AMBIGUOUS':'RECOVERY_CONTROL_NOT_FOUND'};
+      const button=candidates[0],label=norm(button),kind=recoveryKind(button);
+      button.click(); return {clicked:true,label,kind};
     }
     const alerts=alertNodes
       .map(x=>(x.innerText||'').trim()).filter(Boolean).filter((v,i,a)=>a.indexOf(v)===i).slice(-8);
@@ -1183,7 +1217,7 @@ async function state(page, includeUserMessages=false, controlAction=null) {
       "resume stream unavailable","error in message stream","stream error","error occurred while connecting to the websocket",
       "context too long","maximum context length","conversation is too long","maximum length for this conversation","reached the maximum"];
     const knownErrors=[...document.querySelectorAll('main div, main span, main p, [role="main"] div, [role="main"] span, [role="main"] p')]
-      .filter(x=>uiVisible(x) && !x.closest(messageSelector) && !x.querySelector(messageSelector))
+      .filter(x=>uiVisible(x) && currentUi(x) && !x.closest(messageSelector) && !x.querySelector(messageSelector))
       .map(x=>(x.innerText||'').trim()).filter(v=>v && v.length<300)
       .filter(v=>errorWords.some(k=>v.toLowerCase().includes(k))).filter((v,i,a)=>a.indexOf(v)===i).slice(-5);
     const form=document.querySelector('form');
@@ -1436,7 +1470,18 @@ function deliveryObserved(before, after, message=before?.expectedMessage, reject
 async function waitForDelivery(page, before, timeout=3000, observation=null) {
   const deadline=Date.now()+timeout;
   let latest=null;
-  const observe=async()=>{const value=await state(page,"ids");captureNewConversationSource(before,value);if(observation) observation.latest=value;return value;};
+  let lastEvidence=null;
+  const observe=async()=>{
+    const value=await state(page,"ids");captureNewConversationSource(before,value);if(observation) observation.latest=value;
+    const snapshot=deliveryStageSnapshot(value,page);
+    const fingerprint=JSON.stringify([snapshot.url,snapshot.lastUserId,snapshot.lastUserSource,snapshot.lastUserSourceCondition]);
+    if(fingerprint!==lastEvidence){
+      await recordDeliveryStage("OBSERVED",{snapshot,nativeWitness:nativeWitnessReceipt(before.nativeWitness,null,
+        before.nativeWitness?postSendObservation(before,value,before.nativeWitness):null)});
+      lastEvidence=fingerprint;
+    }
+    return value;
+  };
   while(Date.now()<deadline) {
     await page.waitForTimeout(150);
     latest=await observe();
@@ -1471,6 +1516,11 @@ async function activateComposer(page) {
 async function triggerSend(page) {
   const hasSend=await page.evaluate(()=>!!document.querySelector('button[data-testid="send-button"]'));
   if((await state(page,false,"approval")).approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
+  // The exclusive, synced intent is an uncertainty barrier, not a claim that
+  // the UI click happened. A crash from this point never permits replay.
+  if(globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__)
+    coordinated("delivery-admission",globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__);
+  await recordDeliveryStage("SEND_INTENT",{control:hasSend?"click":"enter"});
   sendAttempted=true;
   try {
     if(hasSend) {
@@ -1586,6 +1636,7 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
       const error=new Error("DELIVERY_TARGET_MISMATCH");error.code=error.message;throw error;
     }
     before.expectedMessage=msg; before.targetUrl=targetUrl||before.url;
+    await recordDeliveryStage("BEFORE_INPUT",{snapshot:deliveryStageSnapshot(before,page),targetUrl:before.targetUrl},msg);
     try { await page.fill(COMPOSER_SELECTOR,msg); }
     catch {
       if((await state(page,false,"approval")).approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
@@ -1603,7 +1654,9 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
     if(witness && !sameConversationUrl(witness.url,before.url) && witness.url!==before.url)
       throw new Error('NATIVE_SUBMISSION_TARGET_MISMATCH');
     before.nativeWitness=witness;
+    await recordDeliveryStage("INPUT_VERIFIED",{nativeWitness:nativeWitnessReceipt(witness),nativeBody:witness?.body||null});
     attempts.push(await triggerSend(page));
+    await recordDeliveryStage("SEND_RETURNED",{control:attempts[0]});
     const after=await waitForDelivery(page,before,8000,observation);
     observation.latest=after;
     await detectWebRateLimit(page,"send-after");
@@ -1617,7 +1670,9 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
     if(nativeReceipt) Object.assign(nativeReceipt,{conversationId:convId(after.url),
       sourceConversationId:after.lastUserSource?.conversationId||null,...(continuity?{sourceBinding:continuity}:{}),
       ...(terminalLfBodyBinding(before,after)?{bodyBinding:terminalLfBodyBinding(before,after)}:{})});
-    return {delivered:true,attempts,lastUserId:after.lastUserId,url:after.url,messageCount:after.messageCount,nativeWitness:nativeReceipt};
+    const delivery={delivered:true,attempts,lastUserId:after.lastUserId,url:after.url,messageCount:after.messageCount,nativeWitness:nativeReceipt};
+    await recordDeliveryStage("DELIVERY_CONFIRMED",delivery);
+    return delivery;
   } catch(error) {
     if(witness) {
       const postSend=(attempts.length || error.deliveryStage==="SEND_ATTEMPTED")?
@@ -1625,6 +1680,8 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
       error.nativeWitness=nativeWitnessReceipt(witness,null,postSend);
     }
     error.deliveryStage ||= attempts.length?"SEND_ATTEMPTED":"PRE_SEND";
+    await recordDeliveryStage("ERROR",{code:String(error.code||"SEND_ERROR").slice(0,200),
+      deliveryStage:error.deliveryStage,nativeWitness:error.nativeWitness||null}).catch(()=>{});
     throw error;
   }
 }
@@ -2517,9 +2574,9 @@ async function stopGeneration(page) {
   return await state(page,false,"stop");
 }
 
-async function nativeRetry(page) {
+async function nativeRetry(page,{allowContinue=false}={}) {
   await assertImagePageFree(page);
-  return await state(page,false,"retry");
+  return await state(page,false,allowContinue?"recover":"retry");
 }
 
 async function waitForGenerationStop(page, timeout=7000) {
@@ -2774,7 +2831,7 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
   }
   let method=null, detail=null;
   if(observed.sessionState==="ERROR_RECOVERABLE") {
-    detail=await nativeRetry(page);
+    detail=await nativeRetry(page,{allowContinue:true});
     if(detail.clicked) method="native-"+(detail.kind||"retry");
     else { await sendMessage(page,"continue",chat.url); method="continue"; }
   } else if(observed.sessionState==="IDLE_INCOMPLETE") {
@@ -3793,6 +3850,8 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
       spaceName:chat.spaceName,spaceId:chat.spaceId,page:chat.page,task:linked?{taskId:linked.taskId,status:linked.status,capacityState:linked.capacityState||null,capacityReason:linked.capacityReason||null,capacityNextRetryAt:linked.capacityNextRetryAt||null,completionMode:linked.completionMode||"durable",affinityKey:linked.affinityKey||null,controller:linked.controller||null,replyTo:linked.replyTo||null,escalationTo:linked.escalationTo||null,recoveryAttempts:linked.recoveryAttempts||0}:null});
   }
   if(cmd==="send"){
+    await recordDeliveryStage("TARGET_OBSERVED",{project:chat.project,account:chat.account,sessionId:chat.id,
+      url:await page.url(),page:page.label||null,spaceId:chat.spaceId||null});
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
     const requestedModel=opt("model",null), requestedEffort=opt("effort",null);
     const dispatchModel=await applyDispatchModel(page,chat,requestedModel,requestedEffort);
@@ -3908,7 +3967,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     const linked=taskId?rt.tasks[taskId]:Object.values(rt.tasks||{}).filter(t=>activeTaskStatus(t.status) && t.project===chat.project && (t.sessionId===chat.id || (!t.sessionId&&t.role===chat.role))).sort((a,b)=>String(b.updatedAt||"").localeCompare(String(a.updatedAt||"")))[0];
     const observed=await observeSession(chat,page,linked||null);
     if(linked) print(await gradedRecover(reg,chat,page,linked,observed,{maxAttempts:Number(opt("max-recovery","3"))||3,cooldownSec:0,aggressive:args.includes("--aggressive")}));
-    else if(observed.sessionState==="ERROR_RECOVERABLE") print(await nativeRetry(page));
+    else if(observed.sessionState==="ERROR_RECOVERABLE") print(await nativeRetry(page,{allowContinue:true}));
     else if(observed.generating && !args.includes("--aggressive")) print({ok:false,action:"DEFERRED",reason:"QUIET_GENERATION_IS_NOT_FAILURE",recommendation:"INSPECT_WITHOUT_STOP"});
     else if(observed.generating){const stopped=await stopGeneration(page);const confirmed=stopped.stopped&&await waitForGenerationStop(page,7000);if(confirmed)await sendMessage(page,"continue",chat.url);print({ok:!!confirmed,method:confirmed?"stop-and-continue":"stop-unconfirmed",stopped});}
     else {await sendMessage(page,args.includes("--aggressive")&&observed.lastUser?observed.lastUser:"continue",chat.url);print({ok:true,method:args.includes("--aggressive")?"resend-last-user":"continue"});}
@@ -3929,6 +3988,8 @@ else if(cmd==="new"){
   try {
     await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000});
     await openProjectPage(page,p,binding.projectUrl||null);
+    await recordDeliveryStage("TARGET_OBSERVED",{project:p,account:a,sessionId:null,
+      url:await page.url(),page:page.label||null,spaceId:task.spaceId||null});
     await page.waitForSelector(COMPOSER_SELECTOR,{state:"visible",timeout:15000});
     const model=opt("model","Latest"), requestedEffort=opt("effort",null);
     let applied=null;
@@ -3966,13 +4027,13 @@ else if(cmd==="new"){
         sourceConversationId:w.sourceConversationId,nativeBodyHash:w.bodyHash,sourceBodyHash:w.bodyHash,sourceCondition:'BOUND_SOURCE'}};
     }
     if(error.nativeWitness?.postSend) error.nativeWitness.postSend.newSessionContext={page:page.label||null,spaceId:task.spaceId||null};
-    if(!sendAttempted) await page.close().catch(()=>{});
+    if(!sendAttempted && error.deliveryStage!=="SEND_ATTEMPTED") await page.close().catch(()=>{});
     throw error;
   }
 }
 else throw new Error("Unknown command: "+cmd);
 } catch(error) {
-  const payload={ok:false,deliveryStage:sendAttempted?"SEND_ATTEMPTED":"PRE_SEND",
+  const payload={ok:false,deliveryStage:(sendAttempted||error?.deliveryStage==="SEND_ATTEMPTED")?"SEND_ATTEMPTED":"PRE_SEND",
     code:String(error?.code||error?.message||"BRIDGE_ERROR").slice(0,200)};
   if(error?.nativeWitness) payload.nativeWitness=error.nativeWitness;
   if(error?.status) payload.status=error.status;

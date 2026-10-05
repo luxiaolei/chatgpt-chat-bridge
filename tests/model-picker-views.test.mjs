@@ -333,10 +333,12 @@ test('model readiness uses a validated fixed tagged result while unknown selecto
  }
 });
 test('final receipt keeps readiness code and diagnostic while the producer send boundary remains monotonic',()=>{
- const start=source.lastIndexOf('  const payload={ok:false,deliveryStage:sendAttempted?');
+ const start=source.lastIndexOf('  const payload={ok:false,deliveryStage:');
  const end=source.indexOf('  throw error;',start)+'  throw error;'.length;
  assert.ok(start>0&&end>start);
- const emit=new Function('error','sendAttempted','console',source.slice(start,end));
+ const receiptSource=source.slice(start,end);
+ assert.match(receiptSource,/sendAttempted\|\|error\?\.deliveryStage==="SEND_ATTEMPTED"/);
+ const emit=new Function('error','sendAttempted','console',receiptSource);
  const capture=(error,attempted)=>{let receipt;assert.throws(()=>emit(error,attempted,{error:text=>{receipt=JSON.parse(text);}}),actual=>actual===error);return receipt;};
  const error=new Error('EFFORT_SELECTOR_NOT_READY');error.code=error.message;
  assert.deepEqual(capture(error,false),{ok:false,deliveryStage:'PRE_SEND',code:'EFFORT_SELECTOR_NOT_READY'});
