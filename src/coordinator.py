@@ -3244,6 +3244,90 @@ def serve(config, state):
                 time.sleep(1)
 
 
+def controller_placement_context(db, session_id):
+    """Formal current-controller anchor only; no registry-name fallback."""
+    if os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID") or os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+        raise ValueError("CONTROLLER_PLACEMENT_HOST_LOCAL_REQUIRED")
+    reg, rt = registry(db), runtime(db)
+    chat = reg.get("chats", {}).get(session_id)
+    if (not chat or chat.get("id") != session_id or chat.get("status", "active") != "active"
+            or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", session_id)):
+        raise ValueError("CONTROLLER_PLACEMENT_NOT_REGISTERED")
+    cfg = reg.get("projects", {}).get(chat.get("project"), {})
+    group_id = chat.get("workgroupId") or None
+    group = cfg.get("workgroups", {}).get(group_id, {}) if group_id else None
+    if (group_id and (group.get("controllerSessionRef") != session_id or group.get("controllerRole") != chat.get("role"))
+            or not group_id and chat.get("role") != (cfg.get("rootController") or "conductor")):
+        raise ValueError("CONTROLLER_PLACEMENT_NOT_CONTROLLER")
+    rows = db.execute("SELECT * FROM logical_sessions WHERE current_session_ref=? AND project=? AND role=?",
+                      (session_id, chat["project"], chat["role"])).fetchall()
+    if (len(rows) != 1 or rows[0]["state"] != "ACTIVE" or rows[0]["pending_session_ref"] or rows[0]["rotation_id"]
+            or rows[0]["workgroup_id"] != group_id or chat.get("logicalRef", rows[0]["logical_ref"]) != rows[0]["logical_ref"]):
+        raise ValueError("CONTROLLER_PLACEMENT_NOT_CURRENT")
+    binding = cfg.get("bindings", {}).get(chat.get("account"))
+    identity = reg.get("accounts", {}).get(chat.get("account"), {}).get("identity")
+    if (not identity or not binding or not binding.get("profileId")
+            or not re.search(r"g-p-[0-9a-f]{32}", binding.get("projectUrl") or "")
+            or not str(binding.get("spaceName", "")).startswith("chat-bridge-agent-")):
+        raise ValueError("CONTROLLER_PLACEMENT_BINDING_UNVERIFIED")
+    if (any(t.get("sessionId") == session_id and str(t.get("status", "")).upper() not in TERMINAL
+            for t in rt.get("tasks", {}).values())
+            or db.execute("""SELECT 1 FROM operations WHERE status='DISPATCHING'
+                AND (session_ref=? OR (session_ref IS NULL AND caller_ref=?)) LIMIT 1""", (session_id, session_id)).fetchone()
+            or image_session_reservations(db, {"accountId":account_id(identity), "conversationId":session_id})):
+        raise ValueError("CONTROLLER_PLACEMENT_SESSION_BUSY")
+    return {"sessionId":session_id, "expectedChat":chat, "expectedBinding":binding,
+            "expectedController":dict(rows[0]), "accountIdentity":identity,
+            "expectedOverflow":reg.get("capacityOverflow", {}).get(identity + "|" + binding["profileId"])}
+
+
+def controller_placement_commit(db, payload):
+    required = {"sessionId", "expectedChat", "expectedBinding", "expectedController", "accountIdentity",
+                "expectedOverflow", "attachment", "observation"}
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise ValueError("CONTROLLER_PLACEMENT_COMMIT_INVALID")
+    attachment, observed = payload["attachment"], payload["observation"]
+    if (not isinstance(attachment, dict) or set(attachment) != {
+            "spaceName", "spaceId", "pageSpaceId", "page", "profileId", "attachmentEpoch"}
+            or not isinstance(observed, dict) or set(observed) != {
+            "url", "accountIdentity", "composerPresent", "composerText", "generating", "approvalRequired"}):
+        raise ValueError("CONTROLLER_PLACEMENT_EVIDENCE_INVALID")
+    begin_immediate(db)
+    try:
+        current = controller_placement_context(db, payload["sessionId"])
+        if any(payload[k] != v for k, v in current.items()):
+            raise ValueError("CONTROLLER_PLACEMENT_OWNER_CHANGED")
+        chat, binding, overflow = current["expectedChat"], current["expectedBinding"], current["expectedOverflow"]
+        main = attachment["spaceName"] == binding.get("spaceName") and attachment["spaceId"] == binding.get("spaceId")
+        extra = (overflow and overflow.get("identity") == current["accountIdentity"]
+                 and overflow.get("profileId") == binding["profileId"]
+                 and attachment["spaceName"] == overflow.get("spaceName") and attachment["spaceId"] == overflow.get("spaceId"))
+        if (not (main or extra) or not str(attachment["spaceName"]).startswith("chat-bridge-agent-")
+                or attachment["profileId"] != binding["profileId"]
+                or type(attachment["spaceId"]) is not int or attachment["spaceId"] <= 0
+                or attachment["pageSpaceId"] != attachment["spaceId"]
+                or not isinstance(attachment["page"], str) or not attachment["page"]
+                or type(attachment["attachmentEpoch"]) is not int
+                or attachment["attachmentEpoch"] != int(chat.get("attachmentEpoch", 0)) + 1):
+            raise ValueError("CONTROLLER_PLACEMENT_TARGET_CHANGED")
+        project_id = (re.search(r"g-p-[0-9a-f]{32}", binding.get("projectUrl") or "") or [None])[0]
+        url = re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/c/([0-9a-f-]{36})/?", str(observed["url"]))
+        if (not project_id or not url or url[1] != project_id or url[2] != current["sessionId"]
+                or observed["accountIdentity"] != current["accountIdentity"]
+                or observed["composerPresent"] is not True or observed["composerText"] != ""
+                or observed["generating"] is not False or observed["approvalRequired"] is not False):
+            raise ValueError("CONTROLLER_PLACEMENT_OBSERVATION_REJECTED")
+        chat.update(attachment)
+        reg = registry(db)
+        reg["chats"][current["sessionId"]] = chat
+        db.execute("UPDATE documents SET payload=? WHERE kind='registry'", (json.dumps(reg, ensure_ascii=False),))
+        db.commit()
+        return {"chat":chat, "controller":current["expectedController"], "messageSent":False}
+    except Exception:
+        db.rollback()
+        raise
+
+
 def reattach_commit(db, payload):
     """CAS both attachment and exact-task pause in one local transaction.
 
@@ -4094,7 +4178,7 @@ def main():
     if command in {"image-session-occupancy", "image-io-admission", "image-output-io-admission", "image-delivery-io-admission", "image-delivery-receipt"}:
         print(json.dumps(image_local_read(config, state, command, json.load(sys.stdin))))
         return
-    if command in {"observe", "observation-context", "delivery-attempts", "delivery-admission"}:
+    if command in {"observe", "observation-context", "controller-placement-context", "delivery-attempts", "delivery-admission"}:
         db = connection(config, state, initialize=False)
         db.execute("PRAGMA query_only=ON")
     elif command in {"admission-check", "local-owner-contract"} and (state / "bridge.sqlite3").exists():
@@ -4106,7 +4190,7 @@ def main():
             db.close()
             db = connection(config, state)
     else:
-        db = connection(config, state, initialize=command != "native-admission")
+        db = connection(config, state, initialize=command not in {"native-admission", "controller-placement-commit"})
     try:
         if command == "image-batch-create":
             value = image_batch_create(db, json.load(sys.stdin))
@@ -4226,6 +4310,10 @@ def main():
             if len(args) % 2 or set(opts) - {"--operation", "--candidate"} or not opts.get("--operation"):
                 raise ValueError("observe requires --operation ID [--candidate CID]")
             value = observe_operation(db, opts["--operation"], opts.get("--candidate"))
+        elif command == "controller-placement-context":
+            value = controller_placement_context(db, json.load(sys.stdin)["sessionId"])
+        elif command == "controller-placement-commit":
+            value = controller_placement_commit(db, json.load(sys.stdin))
         elif command == "reattach-commit":
             value = reattach_commit(db, json.load(sys.stdin))
         elif command == "configure":
