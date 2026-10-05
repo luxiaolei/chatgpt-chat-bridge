@@ -1423,8 +1423,11 @@ function terminalLfBodyBinding(before, after) {
     !Number.isFinite(Date.parse(after.observedAt)) ||
     Date.parse(after.observedAt)<Date.parse(witness.observedAt) || Date.parse(after.observedAt)>Date.now()) return null;
   const sha=value=>crypto.createHash('sha256').update(String(value||'')).digest('hex');
-  if(sha(witness.getterSource)!=='baab60f7b982e273471cb00f9b0a8e23eeaf1c489c9a11d378b67e34d3623413' ||
-    sha(witness.serializerSource)!=='c0b631839d32ce26efa405a63cce38a38346c429ff203089b16bd32b2d82d9d4') return null;
+  const formats=new Map([
+    ['baab60f7b982e273471cb00f9b0a8e23eeaf1c489c9a11d378b67e34d3623413','c0b631839d32ce26efa405a63cce38a38346c429ff203089b16bd32b2d82d9d4'],
+    ['ce893debd58fa25e54f219f9114c4c43fa80cf58cdf016ab798329bf0e681ca5','231c5ee71de23d9394cdf406f804b3f36f391d456a5a1ffd32a48501af35e3c2'],
+  ]);
+  if(formats.get(sha(witness.getterSource))!==sha(witness.serializerSource)) return null;
   return {format:'persistent-single-terminal-lf-v1',nativeBodyHash:witness.bodyHash,
     sourceBodyHash:sha(source.text),nativeBodyLength:witness.body.length,sourceBodyLength:source.text.length,
     messageId:source.messageId,conversationId:source.conversationId,observedAt:after.observedAt};

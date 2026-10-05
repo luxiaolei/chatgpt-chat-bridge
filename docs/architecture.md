@@ -335,14 +335,15 @@ Canonical conversation URLs with local-chatgpt:* native source remain rejected a
 ### Existing-conversation terminal LF evidence
 
 The native editor body and the message-bound source are distinct representations.
-Two retained send receipts used the same characterized getter/serializer and
-showed the source equal to the native body with exactly its single terminal LF
-removed. The source observer returns the owning message property verbatim; its
+Retained persistent-conversation send receipts characterize two exact
+getter/serializer pairs, including the current native submit format verified by
+a separate no-Send full function-source observation. They show the source equal
+to the native body with exactly its single terminal LF removed. The source observer returns the owning message property verbatim; its
 rendered-text fallback does not participate in this native comparison.
 
 For future sends only, `persistent-single-terminal-lf-v1` permits that one exact
 relation when the preceding character is non-whitespace, the getter and serializer
-fingerprints match the captured format, the source is `BOUND_SOURCE`, and the
+fingerprints match one captured pair (mixed pairs fail closed), the source is `BOUND_SOURCE`, and the
 before/target/after URLs identify the same existing conversation. The source
 observation must be at or after the native witness. Existing account, request/body
 hash, witness freshness, fresh message ID and conflict checks still apply.
