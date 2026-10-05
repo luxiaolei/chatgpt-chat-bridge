@@ -480,17 +480,44 @@ async function openBoundTask(reg, project, account=null, options={}) {
   await assertWebAvailable(b.account);
   let repaired=null;
   if(!options.spaceOverride && !bindingObserved(reg,b.account,b)) repaired=await repairProjectObservation(reg,project,b.account,b);
-  let profileId=b.profileId||null, existingSpace=!!repaired;
-  if(!repaired && !options.spaceOverride && typeof listTaskSpaces==="function") {
+  if(options.spaceOverride && typeof listTaskSpaces!=="function") throw new Error("SPACE_ENUMERATION_UNAVAILABLE");
+  let profileId=b.profileId||null, existingSpace=!!repaired, expectedSpaceId=null;
+  if(!repaired && typeof listTaskSpaces==="function") {
     const identity=reg.accounts?.[b.account]?.identity;
     const accountName=Object.values(reg.spaces||{}).find(space=>space.identity===identity&&space.accountName)?.accountName||reg.accounts?.[b.account]?.label||b.account;
-    const selected=SPACE_CATALOG.selectManagedSpace(b,accountName,await listTaskSpaces(),{pauseOnUserControl:!!options.pauseOnUserControl});
+    const available=await listTaskSpaces();
+    const selected=SPACE_CATALOG.selectManagedSpace(b,accountName,available,{pauseOnUserControl:!!options.pauseOnUserControl||!!options.spaceOverride});
+    if(options.spaceOverride) {
+      if(!identity) throw new Error("TARGET_IDENTITY_UNVERIFIED");
+      const target=available.find(space=>space.name===b.spaceName);
+      if(target && target.ownership!=="agent") throw new Error("SPACE_OWNERSHIP_UNVERIFIED: "+b.spaceName);
+      if(target && (!profileId || target.profileId!==profileId)) throw new Error("SPACE_PROFILE_MISMATCH: "+b.spaceName);
+      if((target && (!Number.isSafeInteger(Number(target.id)) || Number(target.id)<=0 ||
+          (b.spaceId!=null && Number(target.id)!==Number(b.spaceId)))) ||
+         (b.spaceId!=null && available.some(space=>Number(space.id)===Number(b.spaceId)&&space.name!==b.spaceName)))
+        throw new Error("SPACE_ID_MISMATCH: "+b.spaceName);
+      if(Object.values(reg.spaces||{}).some(space=>space.identity && space.identity!==identity &&
+        (space.name===b.spaceName || (target && Number(space.spaceId)===Number(target.id)))))
+        throw new Error("SPACE_ACCOUNT_CHANGED: "+b.spaceName);
+      expectedSpaceId=target?Number(target.id):null;
+    }
     profileId=selected.profileId;
     existingSpace=selected.existing;
     if(selected.changed) { b.spaceName=selected.spaceName; b.spaceId=null; b.controlPage=null; }
-    if(selected.changed || b.profileId!==profileId) { b.profileId=profileId; await saveRegistry(reg); }
+    if(!options.spaceOverride && (selected.changed || b.profileId!==profileId)) { b.profileId=profileId; await saveRegistry(reg); }
   }
-  const task=repaired?.task||await taskSpace(b.spaceName,!existingSpace&&profileId?{profileId}:undefined);
+  const task=repaired?.task||await taskSpace(expectedSpaceId??b.spaceName,!existingSpace&&profileId?{profileId}:undefined);
+  if(options.spaceOverride && existingSpace) {
+    if(Number(task.spaceId)!==expectedSpaceId) throw new Error("SPACE_ID_MISMATCH: "+b.spaceName);
+    const fresh=await listTaskSpaces();
+    SPACE_CATALOG.selectManagedSpace(b,b.account,fresh,{pauseOnUserControl:true});
+    const target=fresh.find(space=>space.name===b.spaceName);
+    if(!target || Number(target.id)!==expectedSpaceId ||
+       fresh.some(space=>Number(space.id)===expectedSpaceId&&space.name!==b.spaceName))
+      throw new Error("SPACE_ID_MISMATCH: "+b.spaceName);
+    if(target.ownership!=="agent") throw new Error("SPACE_OWNERSHIP_UNVERIFIED: "+b.spaceName);
+    if(target.profileId!==profileId) throw new Error("SPACE_PROFILE_MISMATCH: "+b.spaceName);
+  }
   const prior=taskAccounts.get(Number(task.spaceId));
   if(prior&&accountScope(reg,prior)!==accountScope(reg,b.account)) throw new Error("Space is bound to conflicting ChatGPT accounts");
   taskAccounts.set(Number(task.spaceId),b.account);
