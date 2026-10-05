@@ -69,7 +69,8 @@ export async function statusFixture(main, options={}) {
       return documentBody.querySelectorAll(selector);
     }};
   const f={chat:{id:cid,project:options.project||'P',account:options.account||'a',role:'r',url,status:'active',effort:'High'},
-    runtime:{sessions:{},tasks:{}},printed:[],evaluateArgs:[]};
+    runtime:{sessions:{},tasks:{}},printed:[],evaluateArgs:[],
+    saveRuntimeError:options.saveRuntimeError||null,observeOptions:options.observeOptions||{}};
   if(options.linkedTask)f.runtime.tasks['fixture-task']={taskId:'fixture-task',project:f.chat.project,sessionId:cid,role:'r',status:'RUNNING',completionMode:'external',baselineAssistantCount:0,baselineAssistantId:'previous-assistant',baselineAssistantHash:'previous-hash'};
   f.page={url:async()=>url,evaluate:async(fn,arg)=>{f.evaluateArgs.push(structuredClone(arg));return await fn(structuredClone(arg));}};
   const globals={document,location:{href:url,pathname:new URL(url).pathname},navigator:{onLine:true},
@@ -92,10 +93,10 @@ export async function statusFixture(main, options={}) {
       const reg={}; const chat=f.chat, page=f.page;
       detectWebRateLimit=async()=>{};
       loadRuntime=async()=>structuredClone(f.runtime);
-      saveRuntime=async rt=>{f.runtime=structuredClone(rt);};
+      saveRuntime=async rt=>{if(f.saveRuntimeError)throw f.saveRuntimeError;f.runtime=structuredClone(rt);};
       print=value=>f.printed.push(structuredClone(value));
       return {status:async()=>{const cmd="status";${main.slice(start,end)}},
-        heartbeat:async()=>observeSession(chat,page),state:async()=>state(page,'ids'),control:async()=>nativeRetry(page,{allowContinue:f.allowContinue})};`;
+        heartbeat:async()=>observeSession(chat,page,null,f.observeOptions),state:async()=>state(page,'ids'),control:async()=>nativeRetry(page,{allowContinue:f.allowContinue})};`;
     const api=await new AsyncFunction('f',prefix+setup)(f);
     if(options.controlAction){f.allowContinue=options.controlAction==='recover';f.printed.push(await api.control());}
     else if(options.heartbeat)f.printed.push(await api.heartbeat());

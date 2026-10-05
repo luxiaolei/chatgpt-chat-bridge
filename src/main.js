@@ -233,6 +233,11 @@ async function saveRuntime(runtime) {
   stored("put","runtime",{base,next});
   stateBaselines.set(runtime,structuredClone(next));
 }
+function runtimeCacheLock(error) {
+  const message=String(error?.message||"");
+  return /^STATE_STORE_RUNTIME:/.test(message) &&
+    /database(?: table| schema)? is locked/i.test(message);
+}
 async function touchRuntime(project, patch={}) {
   const rt=await loadRuntime();
   if(project) rt.projects[project]={...(rt.projects[project]||{}),...patch,updatedAt:new Date().toISOString()};
@@ -1286,7 +1291,7 @@ function classifySnapshot(raw, heartbeat, task=null, effort=null) {
   return {sessionState,recommendation,...budget,quietForSec};
 }
 
-async function observeSession(chat,page,task=null,{includeUserSource=false}={}) {
+async function observeSession(chat,page,task=null,{includeUserSource=false,deferRuntimeCacheLock=false}={}) {
   await detectWebRateLimit(page,"observe-session");
   // Existing status consumers need exact latest-user source, not full history.
   const raw=await state(page,includeUserSource?"ids":false), rt=await loadRuntime(), now=new Date(), nowMs=now.getTime();
@@ -1325,7 +1330,11 @@ async function observeSession(chat,page,task=null,{includeUserSource=false}={}) 
       observedEffort:hb.observedEffort,effortMismatch:hb.effortMismatch,effectiveStallThresholdSec:hb.stallThresholdSec});
     rt.tasks[liveTask.taskId]=liveTask;
   }
-  await saveRuntime(rt);
+  try { await saveRuntime(rt); }
+  catch(error) {
+    if(!deferRuntimeCacheLock || !runtimeCacheLock(error)) throw error;
+    hb.runtimeCacheDeferred=true;
+  }
   return hb;
 }
 
@@ -3910,9 +3919,22 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
       throw error;
     }
     await page.waitForTimeout(250);
-    const observed=await observeSession(chat,page,tracked);
-    if(tracked){ const rt=await loadRuntime(), live=rt.tasks[taskId]; live.status=observed.generating?"RUNNING":"DISPATCHED"; live.blockedReason=null; live.updatedAt=new Date().toISOString(); rt.tasks[taskId]=live; await saveRuntime(rt); }
+    const observed=await observeSession(chat,page,tracked,{deferRuntimeCacheLock:true});
+    let runtimeCacheDeferred=observed.runtimeCacheDeferred===true;
+    if(tracked){
+      try {
+        const rt=await loadRuntime(), live=rt.tasks[taskId];
+        if(live) {
+          live.status=observed.generating?"RUNNING":"DISPATCHED"; live.blockedReason=null;
+          live.updatedAt=new Date().toISOString(); rt.tasks[taskId]=live; await saveRuntime(rt);
+        }
+      } catch(error) {
+        if(!runtimeCacheLock(error)) throw error;
+        runtimeCacheDeferred=true;
+      }
+    }
     print({ok:true,delivered:true,delivery,upload,chat:chat.name,taskId:taskId||null,state:observed.sessionState,
+      ...(runtimeCacheDeferred?{runtimeCacheDeferred:true}:{}),
       modelSelection:dispatchModel?{
         model:dispatchModel.model||dispatchModel.observed?.model||null,
         effort:dispatchModel.effort||dispatchModel.observed?.effort||null,
