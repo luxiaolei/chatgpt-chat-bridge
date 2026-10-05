@@ -4386,6 +4386,9 @@ def main():
         elif command == "delivery-admission":
             context = json.load(sys.stdin)
             row = delivery_attempt_module().verify_current(state, db, context)
+            identity = ((registry(db).get("accounts") or {}).get(row["account_alias"]) or {}).get("identity")
+            if not identity or account_id(identity) != row["account_id"]:
+                raise ValueError("DELIVERY_ACCOUNT_IDENTITY_CHANGED")
             origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
             if origin and origin != row["account_id"]:
                 raise ValueError("DELIVERY_EVIDENCE_ORIGIN_MISMATCH")

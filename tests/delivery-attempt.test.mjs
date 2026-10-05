@@ -121,6 +121,11 @@ with tempfile.TemporaryDirectory(prefix='bridge-fence-') as temp:
  assert module.verify_current(state,db,ctx)['id']==op['operationId']
  cmd=[sys.executable,str(pathlib.Path('src/coordinator.py').resolve()),'delivery-admission',str(config),str(state)]
  allowed=subprocess.run(cmd,input=json.dumps(ctx),text=True,capture_output=True);assert allowed.returncode==0,allowed.stderr
+ original=db.execute("SELECT payload FROM documents WHERE kind='registry'").fetchone()[0]
+ changed=json.loads(original);changed['accounts']['a']['identity']='different-login'
+ db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(changed),));db.commit()
+ identity_denied=subprocess.run(cmd,input=json.dumps(ctx),text=True,capture_output=True);assert identity_denied.returncode==2 and 'DELIVERY_ACCOUNT_IDENTITY_CHANGED' in identity_denied.stderr,identity_denied.stderr
+ db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(original,));db.commit()
  db.execute("INSERT OR REPLACE INTO control_state(scope,mode,epoch,reason,updated_at) VALUES('global','PAUSED',99,'synthetic pause','now')");db.commit()
  denied=subprocess.run(cmd,input=json.dumps(ctx),text=True,capture_output=True);assert denied.returncode==2 and 'DELIVERY_ADMISSION_CHANGED' in denied.stderr,denied.stderr
  db.execute("UPDATE operations SET status='DELIVERY_UNKNOWN' WHERE id=?",(row['id'],));db.commit()
