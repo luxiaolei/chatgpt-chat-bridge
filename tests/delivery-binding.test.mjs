@@ -11,16 +11,17 @@ const project='g-p-'+'1'.repeat(32),otherProject='g-p-'+'2'.repeat(32);
 const conversation='11111111-1111-4111-8111-111111111111';
 const url=`https://chatgpt.com/g/${project}/c/${conversation}`;
 const message='This exact request\nwith its complete footer.';
-const before={url,messageCount:4,lastUser:'old message',lastUserId:'old-user',userMessageIds:['earlier-user','old-user'],composerText:'',inputReady:true};
+const before={url,messageCount:4,lastUser:'old message',lastUserId:'old-user',userMessageIds:['earlier-user','old-user'],composerText:'',composerCount:1,composerRawText:'',inputReady:true};
 const after={...before,messageCount:5,lastUser:message,lastUserId:'new-user',composerText:''};
 
 async function harness(f={}) {
   f.calls=[];f.snapshots ||= [before,after];
   return new AsyncFunction('f',source+`
-    const reg={chats:{}};
+    const identity=f.witness?.accountIdentity||"verified@example.test";
+    const reg={accounts:{a:{identity}},chats:{C:{url:f.snapshots[0]?.url||"https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/11111111-1111-4111-8111-111111111111",account:"a"}}};
     assertImagePageFree=async()=>{};
     detectWebRateLimit=async()=>{};
-    state=async(_page,mode,controlAction)=>{if(controlAction==="approval"){f.calls.push(["approval-state"]);return {approvalRequired:false};}f.calls.push(['state',mode]);if(f.stateErrorAt===f.calls.filter(([kind])=>kind==='state').length)throw f.stateError;return f.snapshots.shift()||f.latest||f.snapshots.at(-1);};
+    state=async(_page,mode,controlAction)=>{if(controlAction==="approval"){f.calls.push(["approval-state"]);return {approvalRequired:false,url:f.current?.url||f.snapshots[0]?.url||reg.chats.C.url};}if(mode===false){f.calls.push(['guard-state']);return f.current||f.snapshots[0];}f.calls.push(['state',mode]);if(f.stateErrorAt===f.calls.filter(([kind])=>kind==='state').length)throw f.stateError;return f.current=f.snapshots.shift()||f.latest||f.snapshots.at(-1);};
     expandEvidenceMessages=async()=>{};
     nativeSubmissionWitness=async()=>{if(f.witnessError)throw f.witnessError;return f.witness||null;};
     if(f.shortWait) waitForDelivery=async()=>f.latest;
@@ -76,7 +77,7 @@ test('delivery polling ignores unrelated traffic until the bound message appears
 
 test('ambiguous send remains unconfirmed after one trigger even with nonempty composer',async()=>{
   const f={shortWait:true,latest:{...before,composerText:message}},api=await harness(f);
-  const page={fill:async()=>{},waitForTimeout:async()=>{},evaluate:async()=>true,
+  const page={fill:async()=>{},waitForTimeout:async()=>{},evaluate:async fn=>String(fn).includes("/api/auth/session")?(f.witness?.accountIdentity||"verified@example.test"):true,
     click:async()=>f.calls.push(['click']),press:async()=>f.calls.push(['enter'])};
   await assert.rejects(api.sendMessage(page,message,url),error=>error.code==='DELIVERY_UNCONFIRMED'&&error.deliveryStage==='SEND_ATTEMPTED');
   assert.equal(f.calls.filter(([kind])=>kind==='click').length,1);
@@ -86,7 +87,7 @@ test('ambiguous send remains unconfirmed after one trigger even with nonempty co
 
 test('send receipt binds the observed message ID and target, while target drift stops before fill',async()=>{
   const f={shortWait:true,latest:after},api=await harness(f);
-  const page={fill:async()=>f.calls.push(['fill']),waitForTimeout:async()=>{},evaluate:async()=>true,click:async()=>{}};
+  const page={fill:async()=>f.calls.push(['fill']),waitForTimeout:async()=>{},evaluate:async fn=>String(fn).includes("/api/auth/session")?(f.witness?.accountIdentity||"verified@example.test"):true,click:async()=>{}};
   const result=await api.sendMessage(page,message,url);
   assert.equal(result.lastUserId,'new-user');assert.equal(result.url,url);
   const drift={shortWait:true,snapshots:[{...before,url:'https://chatgpt.com/c/22222222-2222-4222-8222-222222222222'}],latest:after};
@@ -132,7 +133,7 @@ test('native verification failure and getter exception stop before any Send acti
  for(const failure of ['NATIVE_SUBMISSION_UNVERIFIED','native getter failed']) {
   const f={witnessError:new Error(failure)},api=await harness(f);
   const page={fill:async()=>f.calls.push(['fill']),waitForTimeout:async()=>{},
-   evaluate:async()=>true,click:async()=>f.calls.push(['click']),press:async()=>f.calls.push(['enter'])};
+   evaluate:async fn=>String(fn).includes("/api/auth/session")?(f.witness?.accountIdentity||"verified@example.test"):true,click:async()=>f.calls.push(['click']),press:async()=>f.calls.push(['enter'])};
   await assert.rejects(api.sendMessage(page,message,url,'verified@example.test'),error=>
    error.message===failure&&error.deliveryStage==='PRE_SEND');
   assert.equal(f.calls.filter(([kind])=>kind==='fill').length,1);
@@ -148,7 +149,7 @@ const nativeFailureFixture=()=> {
   requestHash:crypto.createHash('sha256').update(message.replace(/\s+/g,' ').trim()).digest('hex'),
   bodyHash:crypto.createHash('sha256').update(body).digest('hex'),getterSource:'SECRET-GETTER-SOURCE',serializerSource:'SECRET-SERIALIZER-SOURCE'}};
 };
-const failurePage=f=>({fill:async()=>{},waitForTimeout:async()=>{},evaluate:async()=>true,
+const failurePage=f=>({fill:async()=>{},waitForTimeout:async()=>{},evaluate:async fn=>String(fn).includes("/api/auth/session")?(f.witness?.accountIdentity||"verified@example.test"):true,
  click:async()=>f.calls.push(['click']),press:async()=>f.calls.push(['enter'])});
 
 test('native unconfirmed delivery records the final exact-source mismatch without raw contents or URL tokens',async()=>{

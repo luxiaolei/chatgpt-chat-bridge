@@ -60,7 +60,7 @@ test("busy or draft pre-send errors can restore the previous task record", () =>
 });
 
 test('pending user draft and generation stop message dispatch before editing', () => {
-  assert.doesNotThrow(() => assertComposerSafe({ inputReady: true, generating: false, composerText: '' }));
-  assert.throws(() => assertComposerSafe({ inputReady: true, generating: false, composerText: 'my draft' }), /USER_DRAFT_PRESENT/);
+  assert.doesNotThrow(() => assertComposerSafe({ inputReady: true, generating: false, composerText: '', composerCount: 1, composerRawText: '' }));
+  assert.throws(() => assertComposerSafe({ inputReady: true, generating: false, composerText: 'my draft', composerCount: 1, composerRawText: 'my draft' }), /USER_DRAFT_PRESENT/);
   assert.throws(() => assertComposerSafe({ inputReady: false, generating: true, composerText: '' }), /CHAT_BUSY/);
 });

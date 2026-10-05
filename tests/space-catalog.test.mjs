@@ -169,7 +169,7 @@ test("restore closes a probe tab when the saved Space has a different login",asy
     globalThis.__CHAT_BRIDGE_ARGS__=["space","restore","--space","Manual"];
     globalThis.__CHAT_BRIDGE_SPACE_CATALOG__={recordSpace,spaceMap,missingProjectUrls};
     let closed=0;
-    const page={goto:async()=>{},evaluate:async()=>({id:"other",name:"Other"}),close:async()=>{closed++}};
+    const page={goto:async()=>{},evaluate:async()=>({id:"other",name:"Other",composerCount:1,composerRawText:"",generating:false}),close:async()=>{closed++}};
     const task={spaceId:1,tabs:async()=>[],newPage:async()=>page};
     const source=await readFile(path.resolve(import.meta.dirname,"../src/main.js"),"utf8");
     const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;

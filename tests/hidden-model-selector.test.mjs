@@ -13,10 +13,10 @@ async function runtimeApi(mode="Extra High", selectorAvailable=false, generating
   const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
   return await new AsyncFunction("setTimeout","taskSpace","testMode","selectorVisible","generating",source+
     '\nlet reapplyCalls=0;'+
-    '\nstate=async()=>({mode:testMode,inputReady:true,generating});'+
+    '\nstate=async()=>({url:"https://chatgpt.com/c/11111111-1111-4111-8111-111111111111",mode:testMode,inputReady:true,generating,composerCount:1,composerRawText:""});'+
     '\napplyModelSpec=async(_page,model,effort)=>{ reapplyCalls+=1; return {model,effort,observed:{model,effort,raw:model+" "+effort}}; };'+
-    '\nconst reg={};saveRegistry=async()=>{};'+
-    '\nreturn {applyConfiguredSessionModel,applyDispatchModel,modelSelectorAvailable,calls:()=>reapplyCalls,page:{evaluate:async()=>selectorVisible}};'
+    '\nconst reg={accounts:{a:{identity:"verified-user"}},chats:{C:{account:"a",url:"https://chatgpt.com/c/11111111-1111-4111-8111-111111111111"}}};saveRegistry=async()=>{};'+
+    '\nreturn {applyConfiguredSessionModel,applyDispatchModel,modelSelectorAvailable,calls:()=>reapplyCalls,page:{evaluate:async fn=>String(fn).includes("/api/auth/session")?"verified-user":selectorVisible}};'
   )(callback=>callback(),async()=>({}),mode,selectorAvailable,generating);
 }
 
@@ -28,7 +28,7 @@ test("busy conversation defers before changing model or Thinking",async()=>{
 
 test("hidden model selector with matching effort skips forced model reapply",async()=>{
   const api=await runtimeApi("Extra High",false);
-  const chat={model:"GPT-5.6 Sol",effort:"Extra High"};
+  const chat={url:"https://chatgpt.com/c/11111111-1111-4111-8111-111111111111",model:"GPT-5.6 Sol",effort:"Extra High"};
   const result=await api.applyDispatchModel(api.page,chat);
   assert.equal(api.calls(),0);
   assert.equal(result.model,"GPT-5.6 Sol");

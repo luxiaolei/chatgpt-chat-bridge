@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync,mkdirSync,mkdtempSync,chmodSync,rmSync} from 'node:fs';
 import test from 'node:test';
+import '../src/task-policy.js';
 // ponytail: Node 22 SQLite fixture; Node 20 runtime support remains unchanged.
 let DatabaseSync;try{({DatabaseSync}=await import('node:sqlite'));}catch(error){if(error.code!=='ERR_UNKNOWN_BUILTIN_MODULE')throw error;}
 
@@ -16,7 +17,7 @@ const out=mkdtempSync(path.join(process.env.TMPDIR||'/tmp','bridge-controller-pl
 mkdirSync(out,{recursive:true,mode:0o700});chmodSync(out,0o700);
 const source=readFileSync(path.join(repo,'src/main.js'),'utf8');
 const section=(start,end)=>{const a=source.indexOf(start),z=source.indexOf(end,a);assert(a>=0&&z>a);return source.slice(a,z);};
-const code=section('function managedSpacePlan','\nasync function accountManagedTask')+
+const code='const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+section('function managedSpacePlan','\nasync function accountManagedTask')+
  section('async function overflowManagedTask','\nasync function newManagedPage')+
  section('async function reattachTask','\nasync function observeOperation');
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;

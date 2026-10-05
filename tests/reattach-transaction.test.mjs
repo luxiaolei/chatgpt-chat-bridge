@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {readFile} from 'node:fs/promises';
+import '../src/task-policy.js';
 
 test('reattach CAS rolls back both documents on owner/binding race and updates only exact task',()=>{
   const code=String.raw`
@@ -134,7 +135,7 @@ test('confirmed controller UI path never retries/sends/resumes and rejects draft
   let snapshot,commits,reads,actions,stale,tabs,info;
   const page={label:'p7',url:async()=>chat.url,waitForFunction:async()=>{},evaluate:async()=> 'login-a'};
   const api=await new AsyncFunction('stored','coordinated','loadRuntime','activeTaskStatus','bindingFor','assertWebAvailable','overflowManagedTask','listTaskSpaces','taskSpace','taskAccounts','accountScope','sameConversationUrl','waitForConversationReady','projectKey','state','observeSession','emitTaskEvent',
-    source.slice(a,z)+';return reattachTask;')(
+    'const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(a,z)+';return reattachTask;')(
     ()=>reg,(cmd,payload)=>{
       if(cmd==='controller-placement-context'){reads++;const c=structuredClone(context);if(stale&&reads>1)c.expectedController.epoch++;return c;}
       assert.equal(cmd,'controller-placement-commit');commits++;return {chat:{...chat,...payload.attachment},controller:context.expectedController};

@@ -46,10 +46,10 @@ test('approval appearing during fill or native witness prevents actual submit an
   for(const phase of ['fill','witness']) {
     const f={chat,calls:[],reg:{chats:{[chat.id]:chat},accounts:{a:{identity:'identity'}}},rt:{tasks:{},sessions:{},projects:{}},approval:false,phase,draft:''};
     f.page={spaceId:7,fill:async(_selector,text)=>{f.calls.push('fill');f.draft=text;if(phase==='fill')f.approval=true;},
-      waitForTimeout:async()=>{},evaluate:async()=>false,press:async()=>f.calls.push('send-Enter')};
+      waitForTimeout:async()=>{},evaluate:async fn=>String(fn).includes("/api/auth/session")?"identity":false,press:async()=>f.calls.push('send-Enter')};
     const api=await build(f,`
       assertImagePageFree=async()=>{};
-      state=async()=>({url:f.chat.url,approvalRequired:f.approval,inputReady:true,generating:false,composerText:f.draft,userMessageIds:[]});
+      state=async()=>({url:f.chat.url,approvalRequired:f.approval,inputReady:true,generating:false,composerText:f.draft,composerCount:1,composerRawText:f.draft,userMessageIds:[]});
       nativeSubmissionWitness=async()=>{if(f.phase==='witness')f.approval=true;return null;};
       waitForDelivery=async()=>{throw new Error('PROBE_STOP_AFTER_REAL_TRIGGER');};
     `);

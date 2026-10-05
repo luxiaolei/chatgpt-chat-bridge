@@ -67,7 +67,7 @@ if(!LIVENESS) throw new Error("chat-bridge liveness policy module was not loaded
 const { stallThresholdSec, livenessBudget } = LIVENESS;
 const TASK_POLICY = globalThis.__CHAT_BRIDGE_TASK_POLICY__;
 if(!TASK_POLICY) throw new Error("chat-bridge task policy module was not loaded");
-const { activeTaskStatus, normalizeCompletionMode, assertTaskId, assertActiveTaskTarget, activeSessionConflict, assertComposerSafe, isPreSendDefer } = TASK_POLICY;
+const { activeTaskStatus, normalizeCompletionMode, assertTaskId, assertActiveTaskTarget, activeSessionConflict, composerIsEmpty, assertComposerSafe, isPreSendDefer } = TASK_POLICY;
 const LIFECYCLE_POLICY = globalThis.__CHAT_BRIDGE_LIFECYCLE_POLICY__ || {
   normalizeLifecycle(project={}) {
     return {autoReconcile:false,reconcileRole:project.rootController||"conductor",minGapSec:300,instruction:null};
@@ -442,7 +442,7 @@ async function repairProjectObservation(reg, project, account, binding) {
       const user=(await response.json()).user; return user?.id?{id:user.id,name:user.name||user.id}:null;
     }),new Promise(resolve=>setTimeout(()=>resolve(null),6000))]).catch(()=>null):null;
     if(observed?.id===identity){ page=candidate; session=observed; break; }
-    if(tab.openedBy==="agent"&&!tab.active) await candidate.close().catch(()=>{});
+    if(tab.openedBy==="agent"&&!tab.active) await closeEmptyPage(candidate);
   }
   if(!page){
     page=await task.newPage();
@@ -453,7 +453,7 @@ async function repairProjectObservation(reg, project, account, binding) {
         const user=(await response.json()).user; return user?.id?{id:user.id,name:user.name||user.id}:null;
       });
       if(projectHomeId(await page.url())!==targetId||session?.id!==identity) throw new Error(`PROJECT_OBSERVATION_REPAIR_FAILED: ${project} / ${account}`);
-    } catch(error){ await page.close().catch(()=>{}); throw error; }
+    } catch(error){ await closeEmptyPage(page); throw error; }
   }
   binding.spaceName=selected.spaceName; binding.profileId=selected.profileId; binding.spaceId=task.spaceId; binding.controlPage=page.label;
   SPACE_CATALOG.recordSpace(reg,{name:selected.spaceName,spaceId:task.spaceId,identity,
@@ -574,7 +574,7 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     const tab=tabs.find(item=>item.label===candidate.page);
     if(!tab || tab.active || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
+    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) continue;
     const oldPage=candidate.page;
     if(imageSessionOccupancy(reg,candidate).occupied) continue;
     try { await page.close(); }
@@ -626,7 +626,7 @@ async function reclaimOrphanManagedPage(reg, task, binding) {
   });
   for(const page of candidates) {
     const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
+    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) continue;
     try {
       await page.close();
       return {page:page.label,reason:"orphan-managed"};
@@ -720,7 +720,7 @@ async function controlPage(reg, project, account=null) {
     const url=await Promise.race([candidate.url(),new Promise(resolve=>setTimeout(()=>resolve(""),3000))]).catch(()=>"");
     const responsive=await Promise.race([candidate.evaluate(()=>document.readyState),new Promise(resolve=>setTimeout(()=>resolve(""),3000))]).catch(()=>"");
     if(!binding.projectUrl || (projectHomeId(url)===targetId&&responsive)){ page=candidate; break; }
-    if(tab?.openedBy==="agent"&&!tab.active) await candidate.close().catch(()=>{});
+    if(tab?.openedBy==="agent"&&!tab.active) await closeEmptyPage(candidate);
   }
   if(!page&&binding.projectUrl){ const repaired=await repairProjectObservation(reg,project,binding.account,binding); return {binding,task:repaired.task,page:repaired.page}; }
   if(!page){
@@ -748,14 +748,19 @@ async function recoverConversationLoadError(page) {
       return node.getClientRects().length>0 && style.visibility!=="hidden" &&
         style.display!=="none" && style.opacity!=="0" && !node.closest("[inert]");
     };
-    const body=String(document.body?.innerText||"");
-    const loadError=/(?:Could not load this ChatGPT conversation|Unable to load (?:this )?conversation)/i.test(body);
+    const root=document.querySelector("main")||document.querySelector('[role="main"]')||document.body;
+    const messageSelector='[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]';
+    const platformUi=node=>visible(node) && !!root.matches?.('main, [role="main"]') && root.contains(node) &&
+      !node.closest(messageSelector) && !node.querySelector(messageSelector) &&
+      !node.closest('[data-app-action-sidebar-section], nav, aside, [role="navigation"]');
+    const loadError=[...document.querySelectorAll('[role="alert"], [data-testid*="error" i], main div, main span, main p, [role="main"] div, [role="main"] span, [role="main"] p')]
+      .filter(platformUi).some(node=>/(?:Could not load this ChatGPT conversation|Unable to load (?:this )?conversation)/i.test(node.innerText||""));
     document.querySelectorAll("[data-chat-bridge-conversation-retry]").forEach(
       node=>node.removeAttribute("data-chat-bridge-conversation-retry")
     );
     if(!loadError) return {loadError:false,count:0};
     const buttons=[...document.querySelectorAll("button")].filter(button=>{
-      if(!visible(button)) return false;
+      if(!platformUi(button) || button.disabled || button.getAttribute("aria-disabled")==="true") return false;
       const label=((button.innerText||"")+" "+(button.getAttribute("aria-label")||"")).trim().replace(/\s+/g," ");
       return /^(?:Retry|Try again)(?:\s+(?:Retry|Try again))?$/i.test(label);
     });
@@ -912,9 +917,9 @@ async function reattachTask(reg, chat, taskId, options={}) {
     return (await response.json()).user?.id||null;
   });
   if(observedIdentity!==identity) throw new Error("REATTACH_LOGIN_MISMATCH");
-  const snapshot=await state(page,false,null,placing);
+  const snapshot=await state(page,false,null,true);
   if(!snapshot.composerPresent || snapshot.errorTexts?.length ||
-     (placing?(snapshot.composerCount!==1 || snapshot.composerRawText!==""):String(snapshot.composerText||"").trim()))
+     !composerIsEmpty(snapshot))
     throw new Error("REATTACH_TARGET_UNHEALTHY_OR_DRAFT");
   if(placing && (snapshot.approvalRequired!==false || snapshot.generating!==false || snapshot.composerText!==""))
     throw new Error("CONTROLLER_PLACEMENT_TARGET_BUSY_OR_APPROVAL");
@@ -1068,7 +1073,7 @@ async function expandEvidenceMessages(page, latestOnly=false) {
   }
 }
 
-async function state(page, includeUserMessages=false, controlAction=null, includeRawComposer=false) {
+async function state(page, includeUserMessages=false, controlAction=null, includeRawComposer=true) {
   const snapshot=await page.evaluate(({includeUserMessages,controlAction,includeRawComposer}) => {
     const root=document.querySelector('main') || document.querySelector('[role="main"]') || document.body;
     const messageSelector='[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]';
@@ -1590,9 +1595,11 @@ async function activateComposer(page) {
   await page.focus(COMPOSER_SELECTOR);
 }
 
-async function triggerSend(page) {
+async function triggerSend(page, targetUrl=null) {
   const hasSend=await page.evaluate(()=>!!document.querySelector('button[data-testid="send-button"]'));
-  if((await state(page,false,"approval")).approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
+  const snapshot=await state(page,false,"approval");
+  if(snapshot.approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
+  if(targetUrl) assertInputTarget(snapshot,targetUrl);
   // The exclusive, synced intent is an uncertainty barrier, not a claim that
   // the UI click happened. A crash from this point never permits replay.
   if(globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__)
@@ -1646,6 +1653,42 @@ function postSendObservation(before, after, witness, condition=null, observation
     sourceConversationId:id(after?.lastUserSource?.conversationId)||(/^local-chatgpt:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(after?.lastUserSource?.conversationId||'')?after.lastUserSource.conversationId:null),
     nativeBodyHash:hash(witness.body),nativeBodyLength:length(witness.body),
     sourceBodyHash:hash(after?.lastUserSource?.text),sourceBodyLength:length(after?.lastUserSource?.text)};
+}
+
+function assertInputTarget(snapshot, targetUrl) {
+  if(!targetUrl || (snapshot.url!==targetUrl && !sameConversationUrl(snapshot.url,targetUrl) &&
+    !(projectHomeId(snapshot.url) && projectHomeId(snapshot.url)===projectHomeId(targetUrl)))) {
+    const error=new Error("DELIVERY_TARGET_MISMATCH");error.code=error.message;throw error;
+  }
+}
+
+async function assertInputSafe(page, expectedIdentity=null, targetUrl=null) {
+  const snapshot=await state(page,false,null,true);
+  assertComposerSafe(snapshot);
+  assertInputTarget(snapshot,targetUrl);
+  const routes=Object.values(reg.chats||{}).filter(chat=>sameConversationUrl(chat.url,snapshot.url));
+  const identity=expectedIdentity || (routes.length===1?reg.accounts?.[routes[0].account]?.identity:null);
+  if(!identity || !Object.values(reg.accounts||{}).some(account=>account.identity===identity))
+    throw new Error("TARGET_IDENTITY_UNVERIFIED");
+  if(routes.length && (routes.length!==1 || reg.accounts?.[routes[0].account]?.identity!==identity))
+    throw new Error("TARGET_IDENTITY_UNVERIFIED");
+  const login=await page.evaluate(async()=>{
+    if(location.origin!=="https://chatgpt.com") return null;
+    const response=await fetch("/api/auth/session",{credentials:"same-origin",cache:"no-store",signal:AbortSignal.timeout(5000)});
+    return response.ok?(await response.json()).user?.id||null:null;
+  }).catch(()=>null);
+  if(!login) throw new Error("INPUT_LOGIN_UNAVAILABLE");
+  if(login!==identity) throw new Error("INPUT_LOGIN_MISMATCH");
+  const current=await state(page,false,null,true);
+  assertComposerSafe(current);
+  assertInputTarget(current,targetUrl);
+  return identity;
+}
+
+async function closeEmptyPage(page) {
+  const snapshot=await state(page,false,null,true).catch(()=>null);
+  if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) return false;
+  return page.close().then(()=>true).catch(()=>false);
 }
 
 async function nativeSubmissionWitness(page, request, expectedIdentity) {
@@ -1709,31 +1752,32 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
     await detectWebRateLimit(page,"send-before");
     before=await state(page,"ids");
     assertComposerSafe(before);
-    if(targetUrl && !sameConversationUrl(before.url,targetUrl) &&
-      !(projectHomeId(before.url) && projectHomeId(before.url)===projectHomeId(targetUrl))) {
-      const error=new Error("DELIVERY_TARGET_MISMATCH");error.code=error.message;throw error;
-    }
+    if(targetUrl) assertInputTarget(before,targetUrl);
+    const inputTarget=before.url;
+    const identity=await assertInputSafe(page,expectedIdentity,inputTarget);
     before.expectedMessage=msg; before.targetUrl=targetUrl||before.url;
     await recordDeliveryStage("BEFORE_INPUT",{snapshot:deliveryStageSnapshot(before,page),targetUrl:before.targetUrl},msg);
     try { await page.fill(COMPOSER_SELECTOR,msg); }
     catch {
       if((await state(page,false,"approval")).approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
+      await assertInputSafe(page,identity,inputTarget);
       await activateComposer(page);
+      await assertInputSafe(page,identity,inputTarget);
       await page.keyboard.press("ControlOrMeta+A");
+      assertInputTarget(await state(page,false,"approval"),inputTarget);
       await page.keyboard.press("Backspace");
+      assertInputTarget(await state(page,false,"approval"),inputTarget);
       await page.keyboard.insertText(msg);
     }
     await page.waitForTimeout(80);
 
-    const routes=Object.values(reg.chats||{}).filter(chat=>sameConversationUrl(chat.url,before.url));
-    const identity=expectedIdentity || (routes.length===1?reg.accounts?.[routes[0].account]?.identity:null);
     before.expectedIdentity=identity;
     witness=await nativeSubmissionWitness(page,msg,identity);
     if(witness && !sameConversationUrl(witness.url,before.url) && witness.url!==before.url)
       throw new Error('NATIVE_SUBMISSION_TARGET_MISMATCH');
     before.nativeWitness=witness;
     await recordDeliveryStage("INPUT_VERIFIED",{nativeWitness:nativeWitnessReceipt(witness),nativeBody:witness?.body||null});
-    attempts.push(await triggerSend(page));
+    attempts.push(await triggerSend(page,inputTarget));
     await recordDeliveryStage("SEND_RETURNED",{control:attempts[0]});
     const after=await waitForDelivery(page,before,8000,observation);
     observation.latest=after;
@@ -1764,7 +1808,7 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
   }
 }
 
-async function uploadImage(page, file, mimeType=null, {beforeUpload=null}={}) {
+async function uploadImage(page, file, mimeType=null, {beforeUpload=null,targetUrl=null}={}) {
   if(!file || !pathMod.isAbsolute(file)) { const error=new Error("image path must be an absolute local path"); error.code="IMAGE_LOCAL_PATH_REQUIRED"; throw error; }
   let info;
   try { info=await fs.lstat(file); } catch(error) {
@@ -1791,7 +1835,7 @@ async function uploadImage(page, file, mimeType=null, {beforeUpload=null}={}) {
   });
   if(marked.count!==1){ const e=new Error("image upload control is unavailable or ambiguous"); e.code="IMAGE_UPLOAD_CONTROL_UNAVAILABLE"; throw e; }
   if(beforeUpload) await beforeUpload();
-  else await assertImagePageFree(page);
+  else { await assertImagePageFree(page); await assertInputSafe(page,null,targetUrl); }
   await page.setInputFiles('input[type=file][data-chat-bridge-upload-target="1"]',[file]);
   const name=pathMod.basename(file);
   await page.waitForFunction((name)=>[...document.querySelectorAll("button")].some(button=>button.getAttribute("aria-label")===`Remove ${name}`),name,{timeout:10000});
@@ -2294,7 +2338,7 @@ async function applyConfiguredSessionModel(page, chat) {
 }
 
 async function applyDispatchModel(page, chat, requestedModel=null, requestedEffort=null) {
-  assertComposerSafe(await state(page));
+  await assertInputSafe(page,reg.accounts?.[chat.account]?.identity,chat.url);
   const model=requestedModel || chat.model || null;
   const effort=requestedEffort || chat.effort || null;
   let selection=null;
@@ -2802,9 +2846,9 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
     await assertWebAvailable(owner.account);
     const {page}=await ensurePage(reg,owner,{pauseOnUserControl:true});
     const observed=await observeSession(owner,page,null);
-    if(observed.generating || !observed.inputReady || String(observed.composerText||"").trim()) {
+    if(observed.generating || !observed.inputReady || !composerIsEmpty(observed)) {
       return {project:projectName,workgroupId:workgroupId||null,ownerSessionRef:owner.id,event:candidate.event,state:workgroupId?"OWNER_BUSY":"ROOT_BUSY",eventKey:candidate.eventKey,
-        rootState:observed.sessionState,composerNonempty:!!String(observed.composerText||"").trim()};
+        rootState:observed.sessionState,composerNonempty:!composerIsEmpty(observed)};
     }
     attempt={...candidate,deliveryStage:"SEND_ATTEMPTED",attemptId:crypto.randomUUID(),
       attemptedOwnerSessionRef:owner.id,attemptedTargetUrl:owner.url,attemptedAt:new Date().toISOString()};
@@ -2989,7 +3033,7 @@ async function detachTerminalTaskPages(reg, project=null, account=null) {
     const tab=tabs.find(item=>item.label===chat.page);
     if(!tab || tab.active || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
+    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) continue;
     const oldPage=chat.page;
     if(imageSessionOccupancy(reg,chat).occupied) continue;
     try { await page.close(); } catch { continue; }
@@ -3037,8 +3081,8 @@ async function pruneManagedOrphanTabs(reg, project=null, account=null) {
       const tab=tabs.find(item=>item.label===page.label);
       if(!tab||tab.active||tab.openedBy!=="agent") continue;
       const emptyTab=/^(about:blank|chrome:\/\/newtab\/?$)/i.test(String(tab.url||""));
-      const snapshot=emptyTab?{generating:false,composerText:""}:await state(page).catch(()=>null);
-      if(!snapshot||snapshot.approvalRequired===true||snapshot.generating||String(snapshot.composerText||"").trim()) continue;
+      const snapshot=emptyTab?null:await state(page).catch(()=>null);
+      if(!emptyTab && (!snapshot||snapshot.approvalRequired===true||snapshot.generating||!composerIsEmpty(snapshot))) continue;
       try { await page.close(); closed.push({spaceId:space.id,spaceName:space.name,page:page.label}); }
       catch {}
     }
@@ -3247,8 +3291,7 @@ async function conversationLifecycle(reg, chat, action) {
     hasTrigger=await page.evaluate((id)=>!!document.querySelector(`button[data-conversation-options-trigger="${id}"]`),chat.id);
   }
   if(!hasTrigger) {
-    const closedSessionPage=page.label===chat.page;
-    if(closedSessionPage) await page.close().catch(()=>{});
+    const closedSessionPage=page.label===chat.page && await closeEmptyPage(page);
     return {ok:true,action,alreadyAbsent:true,closedSessionPage};
   }
   await page.keyboard.press("Escape").catch(()=>{});
@@ -3284,8 +3327,7 @@ async function conversationLifecycle(reg, chat, action) {
     if(stillVisible) await ctl.page.waitForTimeout(1000);
   }
   if(stillVisible) throw new Error(`Conversation ${action} was not confirmed by project UI: ${chat.id}`);
-  const closedSessionPage=page.label===chat.page;
-  if(closedSessionPage && page.label!==ctl.page.label) await page.close().catch(()=>{});
+  const closedSessionPage=page.label===chat.page && page.label!==ctl.page.label && await closeEmptyPage(page);
   return {ok:true,action,closedSessionPage};
 }
 
@@ -3307,7 +3349,7 @@ async function pruneProjectSpace(reg, project, account=null) {
     const tab=tabs.find(item=>item.label===page.label);
     if(!tab || tab.active || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || String(snapshot.composerText||"").trim()) continue;
+    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) continue;
     if(Object.values(reg.chats||{}).some(chat=>samePhysicalSpace(chat,binding,task) && (chat.page===page.label || sameConversationUrl(tab.url,chat.url)) && imageSessionOccupancy(reg,chat).occupied)) continue;
     try { await page.close(); }
     catch { continue; }
@@ -3720,7 +3762,7 @@ else if(cmd==="space" && ["scan","map","restore"].includes(args[1])){
           results.push({space:name,account:item.account,verified:true,opened,alreadyOpen:item.projects.length-opened.length});
         }
       } finally {
-        if(probe&&!verified) await probe.close();
+        if(probe&&!verified) await closeEmptyPage(probe);
         if(adopted) await task.release(adopted);
         if(claimed) await task.finish({keep:"all"});
       }
@@ -3969,7 +4011,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     let delivery=null, upload=null;
     try {
       const imagePath=opt("image-path",null);
-      if(imagePath) upload=await uploadImage(page,imagePath,opt("mime-type",null));
+      if(imagePath) upload=await uploadImage(page,imagePath,opt("mime-type",null),{targetUrl:chat.url});
       delivery=await sendMessage(page,msg,chat.url);
     }
     catch(error) {
@@ -4015,7 +4057,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
   if(cmd==="ask"){
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
     const dispatchModel=await applyDispatchModel(page,chat,null,null);
-    const upload=opt("image-path",null)?await uploadImage(page,opt("image-path",null),opt("mime-type",null)):null;
+    const upload=opt("image-path",null)?await uploadImage(page,opt("image-path",null),opt("mime-type",null),{targetUrl:chat.url}):null;
     const st=await askMessage(page,msg,Number(opt("timeout","180000")),chat.url);
     print({chat:chat.name,response:st.lastAssistant,upload,modelSelection:dispatchModel?{
       model:dispatchModel.model||dispatchModel.observed?.model||null,
@@ -4033,7 +4075,9 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
     await streamMessage(page,msg,{requestId,turnId,timeout:Number(opt("timeout","180000")),targetUrl:chat.url});
   }
   if(cmd==="model"){
-    const m=positionals(2).join(" "); if(!m) throw new Error("model required"); const applied=await applyModelSpec(page,m,opt("effort",null));
+    const m=positionals(2).join(" "); if(!m) throw new Error("model required");
+    await assertInputSafe(page,reg.accounts?.[chat.account]?.identity,chat.url);
+    const applied=await applyModelSpec(page,m,opt("effort",null));
     chat.model=applied.model;chat.effort=applied.effort;
     chat.verifiedModel=applied.model||applied.observed?.model||null;
     chat.verifiedEffort=applied.effort||applied.observed?.effort||null;
@@ -4045,6 +4089,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
   }
   if(cmd==="effort"){
     const e=positionals(2).join(" ");if(!e)throw new Error("effort required");
+    await assertInputSafe(page,reg.accounts?.[chat.account]?.identity,chat.url);
     await setEffort(page,e);chat.effort=e;chat.verifiedEffort=e;
     chat.resourceVerifiedAt=new Date().toISOString();
     await saveRegistry(reg);
@@ -4086,6 +4131,7 @@ else if(cmd==="new"){
     await page.waitForSelector(COMPOSER_SELECTOR,{state:"visible",timeout:15000});
     const model=opt("model","Latest"), requestedEffort=opt("effort",null);
     let applied=null;
+    await assertInputSafe(page,reg.accounts?.[a]?.identity,binding.projectUrl);
     try {
       applied=await applyModelSpec(page,model,requestedEffort);
     } catch(error) {
@@ -4120,7 +4166,7 @@ else if(cmd==="new"){
         sourceConversationId:w.sourceConversationId,nativeBodyHash:w.bodyHash,sourceBodyHash:w.bodyHash,sourceCondition:'BOUND_SOURCE'}};
     }
     if(error.nativeWitness?.postSend) error.nativeWitness.postSend.newSessionContext={page:page.label||null,spaceId:task.spaceId||null};
-    if(!sendAttempted && error.deliveryStage!=="SEND_ATTEMPTED") await page.close().catch(()=>{});
+    if(!sendAttempted && error.deliveryStage!=="SEND_ATTEMPTED") await closeEmptyPage(page);
     throw error;
   }
 }
