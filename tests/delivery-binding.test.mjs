@@ -23,7 +23,7 @@ async function harness(f={}) {
     detectWebRateLimit=async()=>{};
     state=async(_page,mode,controlAction)=>{if(controlAction==="approval"){f.calls.push(["approval-state"]);return {approvalRequired:false,url:f.current?.url||f.snapshots[0]?.url||reg.chats.C.url};}if(mode===false){f.calls.push(['guard-state']);return f.current||f.snapshots[0];}f.calls.push(['state',mode]);if(f.stateErrorAt===f.calls.filter(([kind])=>kind==='state').length)throw f.stateError;return f.current=f.snapshots.shift()||f.latest||f.snapshots.at(-1);};
     expandEvidenceMessages=async()=>{};
-    nativeSubmissionWitness=async()=>{if(f.witnessError)throw f.witnessError;return f.witness||null;};
+    nativeSubmissionWitness=async(_page,_request,_identity,capabilityOnly=false)=>{if(capabilityOnly){f.calls.push(['native-support']);if(f.supportError)throw f.supportError;if(f.afterSupport)f.current=f.afterSupport;return {supported:true};}if(f.witnessError)throw f.witnessError;return f.witness||null;};
     if(f.shortWait) waitForDelivery=async()=>f.latest;
     return {deliveryObserved,waitForDelivery,triggerSend,sendMessage,attempted:()=>sendAttempted};
   `)(f);
@@ -139,6 +139,33 @@ test('native verification failure and getter exception stop before any Send acti
   assert.equal(f.calls.filter(([kind])=>kind==='fill').length,1);
   assert.equal(f.calls.some(([kind])=>kind==='click'||kind==='enter'),false);
   assert.equal(api.attempted(),false);
+ }
+});
+
+test('unsupported native format stops before fill and does not leave a Bridge draft',async()=>{
+ const supportError=Object.assign(new Error('NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED:chatgpt-native-adapter-v1:FORMAT'),{code:'NATIVE_SUBMISSION_UNSUPPORTED'});
+ const f={supportError},api=await harness(f);
+ const page={fill:async()=>f.calls.push(['fill']),waitForTimeout:async()=>{},
+  evaluate:async fn=>String(fn).includes('/api/auth/session')?'verified@example.test':true,
+  click:async()=>f.calls.push(['click']),press:async()=>f.calls.push(['enter'])};
+ await assert.rejects(api.sendMessage(page,message,url,'verified@example.test'),error=>
+  error===supportError&&error.deliveryStage==='PRE_SEND');
+ assert.equal(f.calls.some(([kind])=>kind==='fill'||kind==='click'||kind==='enter'),false);
+ assert.equal(api.attempted(),false);
+});
+
+test('draft or target changes during support inspection stop before fill',async()=>{
+ for(const changed of [
+  {...before,composerRawText:'human draft',composerText:'human draft'},
+  {...before,url:'https://chatgpt.com/c/22222222-2222-4222-8222-222222222222'},
+ ]) {
+  const f={afterSupport:changed},api=await harness(f);
+  const page={fill:async()=>f.calls.push(['fill']),waitForTimeout:async()=>{},
+   evaluate:async fn=>String(fn).includes('/api/auth/session')?'verified@example.test':true,
+   click:async()=>f.calls.push(['click']),press:async()=>f.calls.push(['enter'])};
+  await assert.rejects(api.sendMessage(page,message,url,'verified@example.test'),error=>
+   ['USER_DRAFT_PRESENT','DELIVERY_TARGET_MISMATCH'].includes(error.code||error.message)&&error.deliveryStage==='PRE_SEND');
+  assert.equal(f.calls.some(([kind])=>kind==='fill'||kind==='click'||kind==='enter'),false);
  }
 });
 

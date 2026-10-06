@@ -42,20 +42,21 @@ test('real readiness path preserves pending approval before missing-composer loa
   assert.equal(f.calls.some(x=>['key-Enter','focus-retry','notify'].includes(x)),false);
   assert.equal(chat.page,'p1');
 });
-test('approval appearing during fill or native witness prevents actual submit and retains draft',async()=>{
-  for(const phase of ['fill','witness']) {
+test('approval during support inspection, fill or native witness prevents submit and preserves the current draft',async()=>{
+  for(const phase of ['support','fill','witness']) {
     const f={chat,calls:[],reg:{chats:{[chat.id]:chat},accounts:{a:{identity:'identity'}}},rt:{tasks:{},sessions:{},projects:{}},approval:false,phase,draft:''};
     f.page={spaceId:7,fill:async(_selector,text)=>{f.calls.push('fill');f.draft=text;if(phase==='fill')f.approval=true;},
       waitForTimeout:async()=>{},evaluate:async fn=>String(fn).includes("/api/auth/session")?"identity":false,press:async()=>f.calls.push('send-Enter')};
     const api=await build(f,`
       assertImagePageFree=async()=>{};
       state=async()=>({url:f.chat.url,approvalRequired:f.approval,inputReady:true,generating:false,composerText:f.draft,composerCount:1,composerRawText:f.draft,userMessageIds:[]});
-      nativeSubmissionWitness=async()=>{if(f.phase==='witness')f.approval=true;return null;};
+      nativeSubmissionWitness=async(_page,_request,_identity,capabilityOnly=false)=>{if(f.phase===(capabilityOnly?'support':'witness'))f.approval=true;return null;};
       waitForDelivery=async()=>{throw new Error('PROBE_STOP_AFTER_REAL_TRIGGER');};
     `);
     await assert.rejects(api.sendMessage(f.page,'continue',url),error=>error.message==='APPROVAL_REQUIRED'&&error.deliveryStage==='PRE_SEND');
     assert.equal(f.calls.includes('send-Enter'),false);
-    assert.equal(f.draft,'continue');
+    assert.equal(f.calls.includes('fill'),phase!=='support');
+    assert.equal(f.draft,phase==='support'?'':'continue');
   }
 });
 test('load recovery rechecks approval after focus and never falls through to click',async()=>{
