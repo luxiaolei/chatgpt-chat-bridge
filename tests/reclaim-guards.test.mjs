@@ -36,7 +36,7 @@ async function fixture(orphan=false,change=()=>{}) {
     globalThis.__CHAT_BRIDGE_TASK_POLICY__.activeTaskStatus,globalThis.__CHAT_BRIDGE_TASK_POLICY__.composerIsEmpty,
     globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,
     projectHomeId,
-    (command)=>{assert.equal(command,"page-reclaim-context");f.queries++;return f.context;},
+    (command)=>{assert.equal(command,"page-reclaim-context");f.queries++;return f.queries>1?f.freshContext||f.context:f.context;},
     (_r,_p,a)=>a||"a",async(_r,_p,_a,options)=>{
       f.openOptions=options;
       if(f.terminalOverflow && (!options?.spaceOverride || f.forceMainReturn))return {binding,task:{spaceId:1,page:label=>({label,close:async()=>{f.mainClosed=(f.mainClosed||0)+1;}}),tabs:async()=>[{label:"p9",active:false,openedBy:"agent",url:url.replace(cid,"99999999-9999-4999-8999-999999999999")}]}};
@@ -88,6 +88,47 @@ test("orphan reclaim never closes an unregistered conversation or another Projec
     ["unbound UNKNOWN",f=>{f.context.unboundProjectIds=["g-p-"+"a".repeat(32)];}],
     ["unplaced UNKNOWN",f=>{f.context.unboundAny=true;}]
   ]) assert.equal((await fixture(true,change)).closed,0,name);
+});
+
+test("proven pre-send capacity waiting without a page cannot veto safe orphan reclamation",async()=>{
+  assert.equal(globalThis.__CHAT_BRIDGE_TASK_POLICY__.activeTaskStatus("WAITING_CAPACITY"),true);
+  const waiting=f=>{
+    f.rt.tasks.waiting={taskId:"waiting",project:"P",account:"a",sessionId:null,status:"WAITING_CAPACITY"};
+    f.context.preSendCapacityWaits=[{taskId:"waiting",project:"P",account:"a",sessionId:null}];
+  };
+  const out=await fixture(true,waiting);
+  assert.equal(out.closed,1);
+  assert.equal(out.queries,2);
+  for(const [name,change] of [
+    ["no authoritative proof",f=>{delete f.context.preSendCapacityWaits;}],
+    ["another task",f=>{f.context.preSendCapacityWaits[0].taskId="other";}],
+    ["another Project",f=>{f.context.preSendCapacityWaits[0].project="other";}],
+    ["another account",f=>{f.context.preSendCapacityWaits[0].account="other";}],
+    ["another session",f=>{f.context.preSendCapacityWaits[0].sessionId=cid;}],
+    ["RUNNING",f=>{f.rt.tasks.waiting.status="RUNNING";}],
+    ["user pause",f=>{f.rt.tasks.waiting.watchdogPausedForUserControl=true;}],
+    ["pending callback",f=>{f.rt.tasks.waiting.watchdogPendingNotification=true;}],
+    ["external response",f=>{f.rt.tasks.waiting.externalResponsePending=true;}],
+    ["independent unplaced UNKNOWN",f=>{f.context.unboundAny=true;}],
+    ["independent Project UNKNOWN",f=>{f.context.unboundProjectIds=["g-p-"+"a".repeat(32)];}],
+    ["active tab",f=>{f.tabs[0].active=true;}],
+    ["user tab",f=>{f.tabs[0].openedBy="user";}],
+    ["draft",f=>{f.snapshot.composerRawText=" ";}],
+    ["attachment",f=>{f.snapshot.composerAttachmentsEmpty=false;}],
+    ["unknown attachment",f=>{delete f.snapshot.composerAttachmentsEmpty;}],
+    ["approval",f=>{f.snapshot.approvalRequired=true;}],
+    ["generation",f=>{f.snapshot.generating=true;}],
+    ["foreign actual Project",f=>{f.tabs[0].url=home.replace("a".repeat(32),"b".repeat(32));}]
+  ]) assert.equal((await fixture(true,f=>{waiting(f);change(f);})).closed,0,name);
+});
+
+test("capacity proof is rechecked after page observation before closing",async()=>{
+  const out=await fixture(true,f=>{
+    f.rt.tasks.waiting={taskId:"waiting",project:"P",account:"a",sessionId:"missing",status:"WAITING_CAPACITY"};
+    f.context.preSendCapacityWaits=[{taskId:"waiting",project:"P",account:"a",sessionId:"missing"}];
+    f.freshContext={sessionRefs:["missing"],unboundProjectIds:[],unboundAny:false,preSendCapacityWaits:[]};
+  });
+  assert.equal(out.closed,0);assert.equal(out.queries,2);
 });
 
 test("both reclaim helpers preserve active, user, draft, permission, generation and image occupants",async()=>{

@@ -4837,7 +4837,8 @@ def main():
                 current = claim["id"]
             # ponytail: snapshot relies on the account mutex; reserve slots if independent writers need atomic allocation.
             sessions, unbound, any_unbound = set(), set(), False
-            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operations'").fetchone():
+            has_operations = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operations'").fetchone()
+            if has_operations:
                 rows = db.execute("""SELECT id,session_ref,project,account_alias FROM operations o
                     WHERE account_id=? AND native_target IS NULL AND id!=?
                     AND (status IN ('DISPATCHING','DELIVERY_UNKNOWN','SUPERSEDED')
@@ -4854,7 +4855,46 @@ def main():
                         unbound.add(match[1].lower())
                     else:
                         any_unbound = True
-            value = {"sessionRefs": sorted(sessions), "unboundProjectIds": sorted(unbound), "unboundAny": any_unbound, "readOnly": True}
+            capacity_waits, capacity_refusals = [], {}
+            for task in (runtime(db).get("tasks") or {}).values():
+                if not isinstance(task, dict) or task.get("status") != CAPACITY_WAITING:
+                    continue
+                task_id = task.get("taskId")
+                if not task_id:
+                    continue
+                if ((reg.get("accounts") or {}).get(task.get("account")) or {}).get("identity") != identity:
+                    continue
+                binding = ((reg.get("projects") or {}).get(task.get("project")) or {}).get("bindings", {}).get(task.get("account")) or {}
+                refusal = None if re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/project/?", binding.get("projectUrl") or "", re.I) else "TASK_PROJECT_UNVERIFIED"
+                if task.get("watchdogPausedForUserControl") or task.get("watchdogPendingNotification") or task.get("externalResponsePending"):
+                    refusal = "TASK_PAUSED_OR_PENDING"
+                related = list(db.execute("""SELECT kind,status,project,account_alias,account_id,session_ref,role,caller_ref,
+                    native_target,reason,attempts,result FROM operations WHERE task_id=?""", (task_id,))) if has_operations else []
+                if not related:
+                    refusal = refusal or "OPERATION_MISSING"
+                for row in related:
+                    if refusal:
+                        break
+                    if (row["kind"] != "dispatch" or row["account_id"] != stable or row["native_target"] is not None or row["project"] != task.get("project")
+                            or row["account_alias"] != task.get("account") or row["session_ref"] != task.get("sessionId")
+                            or row["role"] != task.get("role") or row["caller_ref"] != task.get("controllerSessionRef")):
+                        refusal = "OPERATION_SCOPE_MISMATCH"
+                    elif row["status"] not in {"QUEUED", "CANCELLED"}:
+                        refusal = "OPERATION_" + row["status"]
+                    else:
+                        try:
+                            phase = json.loads(row["result"] or "{}")["resourceWait"]["lastPhase"]
+                            proven = row["reason"] == "CAPACITY_WAITING" and row["attempts"] > 0 and phase["category"] == "capacity" and phase["reason"] == "CAPACITY_WAIT"
+                        except (ValueError, KeyError, TypeError):
+                            proven = False
+                        if not proven:
+                            refusal = "OPERATION_PHASE_UNPROVEN"
+                if refusal:
+                    capacity_refusals[task_id] = refusal
+                else:
+                    capacity_waits.append({"taskId": task_id, "project": task["project"], "account": task["account"], "sessionId": task.get("sessionId")})
+            value = {"sessionRefs": sorted(sessions), "unboundProjectIds": sorted(unbound), "unboundAny": any_unbound,
+                     "preSendCapacityWaits": capacity_waits, "capacityWaitRefusals": capacity_refusals, "readOnly": True}
         elif command == "delivery-admission":
             context = json.load(sys.stdin)
             row = delivery_attempt_module().verify_current(state, db, context)

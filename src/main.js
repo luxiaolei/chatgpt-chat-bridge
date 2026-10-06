@@ -650,12 +650,20 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseC
   const rt=await loadRuntime();
   const pages=await task.pages().catch(()=>[]), tabs=await task.tabs().catch(()=>[]);
   const liveTasks=Object.values(rt.tasks||{}).filter(item=>activeTaskStatus(item.status));
-  const hasUnplacedLiveTasks=liveTasks.some(item=>{
+  let reclaimContext=null;
+  const hasUnplacedLiveTasks=()=>liveTasks.some(item=>{
     const chat=item.sessionId?reg.chats?.[item.sessionId]:null;
     const taskBinding=projectBindingForTask(reg,item);
     const identity=reg.accounts?.[account||binding.account]?.identity;
     const liveAccount=item.account||chat?.account||reg.projects?.[item.project]?.activeAccount||reg.defaultAccount;
-    if(!chat?.page && identity && reg.accounts?.[liveAccount]?.identity===identity) return true;
+    if(!chat?.page && identity && reg.accounts?.[liveAccount]?.identity===identity) {
+      if(item.status==="WAITING_CAPACITY" && !item.watchdogPausedForUserControl && !item.watchdogPendingNotification && !item.externalResponsePending) {
+        reclaimContext ||= coordinated("page-reclaim-context",{account:account||binding.account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
+        if(reclaimContext.preSendCapacityWaits?.some(wait=>wait.taskId===item.taskId && wait.project===item.project &&
+          wait.account===liveAccount && wait.sessionId===(item.sessionId||null))) return false;
+      }
+      return true;
+    }
     if(!samePhysicalSpace(chat,binding,task) && !samePhysicalSpace(taskBinding,binding,task)) return false;
     const targetProject=projectHomeId(taskBinding?.projectUrl);
     return item.watchdogPausedForUserControl || !identity || reg.accounts?.[liveAccount]?.identity!==identity || reg.accounts?.[chat?.account]?.identity!==identity ||
@@ -664,7 +672,7 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseC
       !sameConversationUrl(tabs.find(tab=>tab.label===chat.page)?.url,chat.url,targetProject);
   });
   // Bound live pages remain protected below; an unplaced live task vetoes the Space.
-  if(hasUnplacedLiveTasks) return null;
+  if(hasUnplacedLiveTasks()) return null;
 
   const protectedPages=new Set();
   for(const project of Object.values(reg.projects||{})) {
@@ -697,8 +705,8 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseC
     const snapshot=blank?null:await state(page).catch(()=>null);
     if(!blank && (!snapshot || snapshot.approvalRequired!==false || snapshot.generating!==false || !composerIsEmpty(snapshot))) continue;
     if(!blank && await page.url()!==tab.url) continue;
-    const context=coordinated("page-reclaim-context",{account:account||binding.account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
-    if(context.unboundAny || (blank?context.unboundProjectIds.length:context.unboundProjectIds.includes(projectHomeId(tab.url)))) continue;
+    const context=reclaimContext=coordinated("page-reclaim-context",{account:account||binding.account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
+    if(hasUnplacedLiveTasks() || context.unboundAny || (blank?context.unboundProjectIds.length:context.unboundProjectIds.includes(projectHomeId(tab.url)))) continue;
     const fresh=(await task.tabs()).find(t=>t.label===page.label);
     if(!fresh || fresh.active || fresh.openedBy!=="agent" || fresh.url!==tab.url) continue;
     if(reuseControlBinding) return {page:page.label,handle:page,reason:"control-home-reuse"};
