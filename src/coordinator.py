@@ -1989,7 +1989,7 @@ def management_targets(db, reg, project=None):
     return list(by_ref.values()), unresolved
 
 
-def enqueue_management(db, event_id, target, message):
+def enqueue_management(db, event_id, target, message, status="QUEUED"):
     key = "management:" + event_id + ":" + target["sessionRef"]
     prior = db.execute("SELECT * FROM operations WHERE request_key=?", (key,)).fetchone()
     if prior:
@@ -2000,12 +2000,12 @@ def enqueue_management(db, event_id, target, message):
         id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,
         role,message,task_id,created_at,updated_at,not_before,kind,event_id,original_message)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (operation_id,key,digest,"QUEUED",target["project"],target["account"],target["accountId"],
+        (operation_id,key,digest,status,target["project"],target["account"],target["accountId"],
          target["sessionRef"],target["sessionRef"],target["role"],message,"MGT-"+event_id,
          now,now,time.time(),"management",event_id,message))
     db.execute("""INSERT OR REPLACE INTO management_deliveries(
         event_id,target_ref,operation_id,status,ack_payload,updated_at) VALUES (?,?,?,?,?,?)""",
-        (event_id,target["sessionRef"],operation_id,"QUEUED",None,now))
+        (event_id,target["sessionRef"],operation_id,status,None,now))
     return response(db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone())
 
 
@@ -2811,7 +2811,7 @@ def resource_wait_event(db, row, episode):
     local_owner = json.loads(row["local_owner"]) if row["local_owner"] else None
     original = row["caller_ref"]
     target_ref = original if local_owner else resolve_successor(db, original)
-    body = {"operationId": row["id"], "taskId": row["task_id"], "project": row["project"],
+    body = {"eventId": event_id, "operationId": row["id"], "taskId": row["task_id"], "project": row["project"],
             "accountId": row["account_id"], "workgroupId": row["workgroup_id"],
             "callerRef": original, "targetRef": target_ref, "localOwner": local_owner,
             "resourceWait": episode, "reason": "RESOURCE_WAIT_EXHAUSTED",
@@ -2821,11 +2821,16 @@ def resource_wait_event(db, row, episode):
     target = (reg.get("chats") or {}).get(target_ref) if not local_owner else None
     identity = ((reg.get("accounts") or {}).get(target.get("account")) or {}).get("identity") if target else None
     # Exact caller or its committed successor only; never substitute a root controller.
-    if target and target.get("status", "active") == "active" and target.get("project") == row["project"] and identity:
-        body["transport"] = "management"
-        enqueue_management(db, event_id, {"sessionRef": target_ref, "project": row["project"],
-            "account": target["account"], "accountId": account_id(identity), "role": target.get("role") or target_ref},
-            "[CHATBRIDGE RESOURCE WAIT v1]\n" + json.dumps(body, ensure_ascii=False))
+    # Retain an outbox entry even before its owner has an ACKed successor.
+    if not local_owner:
+        ready = bool(target and target.get("status", "active") == "active" and target.get("project") == row["project"] and identity)
+        body["transport"] = "management" if ready else "WAITING_ROUTE"
+        enqueue_management(db, event_id, {"sessionRef": target_ref or original, "project": row["project"],
+            "account": target["account"] if identity else row["account_alias"],
+            "accountId": account_id(identity) if identity else row["account_id"],
+            "role": target.get("role") or target_ref if target else original},
+            "[CHATBRIDGE RESOURCE WAIT v1]\n" + json.dumps(body, ensure_ascii=False),
+            status="QUEUED" if ready else "WAITING_ROUTE")
     db.execute("INSERT OR IGNORE INTO management_events(id,kind,scope,payload,created_at) VALUES (?,?,?,?,?)",
                (event_id, "RESOURCE_WAIT_EXHAUSTED", "project:" + row["project"], json.dumps(body, ensure_ascii=False), stamp()))
     return {"eventId": event_id, "transport": body["transport"], "callerRef": original, "targetRef": target_ref}

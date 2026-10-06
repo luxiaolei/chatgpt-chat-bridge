@@ -51,7 +51,8 @@ trusted PRE_SEND resource receipt can exhaust the 30-minute automatic wait
 budget. Manual admission pauses do not spend that budget. The exact claim CAS
 then records FAILED_PRE_SEND / RESOURCE_WAIT_EXHAUSTED and one episode-specific
 event for the original caller or its committed successor. Unavailable routes
-stay actionable without a root-controller guess; local Codex owners see the
+stay in the existing WAITING_ROUTE outbox until a committed successor resolves,
+without a root-controller guess; local Codex owners see the
 notice through local-pull. Only explicit queue retry starts a new episode.
 UNKNOWN, post-send and identity failures retain their existing contracts.
 
@@ -61,7 +62,9 @@ shares a 15-second deadline across bootstrap, transaction, registration fence
 and commit, beneath the unchanged 20-second outer timeout. Registry saves skip
 a write only when there is no normalized delta and no registration to fence.
 
-The installer publishes an atomic private release manifest from its actual
+The installer rejects dirty or unresolved source before touching destinations,
+then rechecks the same resolved commit/tree before publishing. Readback rejects
+inadmissible source identity. It publishes an atomic private release manifest from its actual
 copy map, including source commit/tree/clean state and every destination hash.
 A serving coordinator records a private startup receipt beside its lock.
 Pure-local health compares current disk hashes, startup disk hashes, process

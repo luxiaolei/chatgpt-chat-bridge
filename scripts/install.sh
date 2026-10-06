@@ -6,6 +6,8 @@ BIN_DIR="${CHAT_BRIDGE_BIN_DIR:-$HOME/.local/bin}"
 SHARE_DIR="${CHAT_BRIDGE_SHARE_DIR:-$HOME/.local/share/chatgpt-chat-bridge}"
 SKILLS_DIR="${CHAT_BRIDGE_SKILLS_DIR:-$HOME/.agents/skills}"
 
+SOURCE_RELEASE="$(python3 "$ROOT/src/release-version.py" preflight "$ROOT")"
+
 mkdir -p "$BIN_DIR" "$SHARE_DIR" "$SKILLS_DIR/chat-bridge" "$SKILLS_DIR/project-conductor"
 COPY_MAP="$(mktemp "$SHARE_DIR/.release-copy-map.XXXXXX")"
 trap 'rm -f "$COPY_MAP"' EXIT
@@ -55,7 +57,7 @@ copy_file "$ROOT/skills/chat-bridge/SKILL.md" "$SKILLS_DIR/chat-bridge/SKILL.md"
 copy_file "$ROOT/skills/project-conductor/SKILL.md" "$SKILLS_DIR/project-conductor/SKILL.md"
 chmod +x "$BIN_DIR/chat-bridge" "$SHARE_DIR/install-watchdog.sh" "$SHARE_DIR/uninstall-watchdog.sh" "$SHARE_DIR/install-coordinator.sh" "$SHARE_DIR/uninstall-coordinator.sh"
 
-python3 "$ROOT/src/release-version.py" install "$ROOT" "$COPY_MAP" "$SHARE_DIR/release-manifest.json"
+python3 "$ROOT/src/release-version.py" install "$ROOT" "$COPY_MAP" "$SHARE_DIR/release-manifest.json" "$SOURCE_RELEASE"
 
 echo "Installed chat-bridge:"
 echo "  CLI:    $BIN_DIR/chat-bridge"

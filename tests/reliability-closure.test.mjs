@@ -50,7 +50,7 @@ with tempfile.TemporaryDirectory() as root:
    row(id,caller,local);r=claimed(id);c.finish(db,r,"QUEUED","resource",resource_receipt=receipt("CHAT_BUSY"))
    clock[0]+=1801;r=claimed(id);c.finish(db,r,"QUEUED","resource",resource_receipt=receipt("CHAT_BUSY"))
    assert result(id)["resourceWaitNotice"]["transport"]==("local-pull" if local else "WAITING_ROUTE")
-  assert db.execute("SELECT count(*) FROM management_deliveries").fetchone()[0]==1
+  assert db.execute("SELECT count(*) FROM management_deliveries").fetchone()[0]==2
   reg["chats"]["owner"]["status"]="archived";reg["chats"]["successor"]={**reg["chats"]["owner"],"id":"successor","status":"active"}
   db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(reg),))
   db.execute("INSERT INTO session_successors VALUES('owner','logical','successor',2,?)",(c.stamp(),));db.commit()
@@ -92,7 +92,7 @@ with tempfile.TemporaryDirectory() as root:
  dummy.write_text("import sys\ncode=sys._getframe().f_code\nvalue='old'\n")
  namespace={};exec(compile(dummy.read_bytes(),str(dummy),"exec"),namespace)
  manifest=p/"release-manifest.json"
- r.atomic_json(manifest,{"source":{"commit":"synthetic-old"},"files":[{"destination":str(dummy),"sha256":r.file_hash(dummy)}]})
+ r.atomic_json(manifest,{"source":{"root":str(p),"commit":"a"*40,"tree":"b"*40,"clean":True},"files":[{"destination":str(dummy),"sha256":r.file_hash(dummy)}]})
  startup=r.startup_receipt(p,dummy,namespace["code"])
  assert startup["startupDisk"]["verified"]
  first=r.health(p,p);assert first["resident"]["alive"]
@@ -194,4 +194,85 @@ with tempfile.TemporaryDirectory() as root:
  assert db.execute("SELECT count(*) FROM management_deliveries").fetchone()[0]==0
  assert db.execute("SELECT count(*) FROM task_results").fetchone()[0]==0
  db.close()
+print("PASS")`),"PASS"));
+
+test("unrouted resource notice survives a formal successor ACK and delivers once",()=>assert.equal(python(String.raw`import importlib.util,json,pathlib,tempfile,subprocess
+spec=importlib.util.spec_from_file_location("coordinator","src/coordinator.py");c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)
+with tempfile.TemporaryDirectory() as root:
+ p=pathlib.Path(root);config=p/"config";state=p/"state";config.mkdir();state.mkdir()
+ reg={"accounts":{"a":{"identity":"fixture"}},"projects":{"P":{}},"chats":{
+ "old":{"id":"old","project":"P","account":"a","role":"conductor","status":"retired"},
+ "next":{"id":"next","project":"P","account":"a","role":"conductor","status":"pending-rotation"}}}
+ (config/"registry.json").write_text(json.dumps(reg));(state/"runtime.json").write_text(json.dumps({"tasks":{},"projects":{},"sessions":{}}))
+ db=c.connection(config,state)
+ db.execute("""INSERT INTO operations(id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,role,message,task_id,created_at,updated_at,not_before,attempts,claimed_at,result)
+ VALUES('op','op','hash','DISPATCHING','P','a',?,'old','worker','exact-body','task',?,?,0,1,1,?)""",
+ (c.account_id("fixture"),c.stamp(),c.stamp(),json.dumps({"resourceWait":{"id":"episode","startedAt":c.stamp(),"waitedSec":1800,"counters":{"capacity":1},"lastPhase":{"category":"capacity","at":0}}})))
+ db.execute("""INSERT INTO logical_sessions(logical_ref,project,role,current_session_ref,epoch,state,pending_session_ref,rotation_id,updated_at) VALUES('logical','P','conductor','old',1,'ROTATING','next','rotation',?)""",(c.stamp(),));db.commit()
+ operation=db.execute("SELECT * FROM operations WHERE id='op'").fetchone()
+ c.finish(db,operation,"QUEUED","capacity",resource_receipt={"ok":False,"deliveryStage":"PRE_SEND","code":"CAPACITY_WAIT"})
+ notice=db.execute("SELECT * FROM operations WHERE kind='management'").fetchone()
+ assert notice["status"]=="WAITING_ROUTE" and notice["session_ref"]=="old"
+ assert notice["event_id"]=="resource-wait:op:episode"
+ assert db.execute("SELECT status FROM management_deliveries").fetchone()[0]=="WAITING_ROUTE"
+ before=dict(db.execute("SELECT * FROM operations WHERE id='op'").fetchone())
+ c.refresh_waiting_routes(db);assert db.execute("SELECT status FROM operations WHERE kind='management'").fetchone()[0]=="WAITING_ROUTE"
+ # Commit through the formal ACK API, rather than fabricating a successor link.
+ ack=c.rotation_ack(db,{"rotationId":"rotation","callerRef":"next","message":"synthetic successor ACK"},config,state)
+ assert ack["state"]=="ACTIVE" and ack["currentSessionRef"]=="next"
+ sends=[]
+ def send(args,**kwargs):
+  sends.append(args);return subprocess.CompletedProcess(args,0,json.dumps({"ok":True,"delivered":True}),"")
+ c.run_bridge=send
+ delivered=c.work_one(db)
+ assert delivered["status"]=="SENT" and delivered["sessionRef"]=="next"
+ assert sends[0][1:3]==["send","next"] and len(sends)==1
+ assert c.work_one(db)["status"]=="IDLE" and len(sends)==1
+ assert db.execute("SELECT count(*) FROM management_events").fetchone()[0]==1
+ delivery=db.execute("SELECT * FROM management_deliveries").fetchone()
+ assert delivery["status"]=="DELIVERED" and delivery["target_ref"]=="next"
+ assert delivery["operation_id"]==notice["id"]
+ assert dict(db.execute("SELECT * FROM operations WHERE id='op'").fetchone())==before
+ db.close()
+print("PASS")`),"PASS"));
+
+test("dirty or unresolved installation sources never touch destinations or publish a verified manifest",()=>assert.equal(python(String.raw`import importlib.util,pathlib,tempfile,json,subprocess,os,shutil
+spec=importlib.util.spec_from_file_location("release",str(pathlib.Path("src/release-version.py").resolve()));r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r)
+with tempfile.TemporaryDirectory() as root:
+ p=pathlib.Path(root);repo=p/"source";(repo/"src").mkdir(parents=True);(repo/"scripts").mkdir()
+ shutil.copyfile("src/release-version.py",repo/"src/release-version.py")
+ shutil.copyfile("scripts/install.sh",repo/"scripts/install.sh")
+ source=repo/"src/main.js";source.write_text("clean source")
+ def git(*args):
+  result=subprocess.run(["git","-C",str(repo),*args],capture_output=True,text=True);assert result.returncode==0,result.stderr;return result.stdout
+ git("init","-q");git("add",".");git("-c","user.name=fixture","-c","user.email=fixture@example.invalid","commit","-qm","private fixture")
+ expected=r.source_release(repo)
+ destination=p/"destination"
+ for d in ("bin","share","skills"): (destination/d).mkdir(parents=True)
+ (destination/"share/main.js").write_text("existing target")
+ (destination/"bin/chat-bridge").write_text("existing CLI")
+ manifest=destination/"share/release-manifest.json";manifest.write_text('{"existing":"manifest"}')
+ env={**os.environ,"CHAT_BRIDGE_BIN_DIR":str(destination/"bin"),"CHAT_BRIDGE_SHARE_DIR":str(destination/"share"),"CHAT_BRIDGE_SKILLS_DIR":str(destination/"skills")}
+ def snapshot():return {str(f.relative_to(destination)):f.read_bytes() for f in destination.rglob("*") if f.is_file()}
+ original=snapshot()
+ source.write_text("dirty tracked source")
+ failed=subprocess.run(["zsh",str(repo/"scripts/install.sh")],env=env,capture_output=True,text=True)
+ assert failed.returncode and "INSTALL_SOURCE_DIRTY" in failed.stderr and snapshot()==original
+ # Publication must also reject a source changed after a clean preflight.
+ mapping=p/"mapping";mapping.write_text(str(source)+"\t"+str(destination/"share/main.js")+"\n")
+ try:r.install_manifest(repo,mapping,manifest,json.dumps(expected));raise AssertionError("dirty manifest published")
+ except ValueError as error:assert "INSTALL_SOURCE_DIRTY" in str(error)
+ assert snapshot()==original
+ git("checkout","--","src/main.js");(repo/"untracked").write_text("untracked")
+ failed=subprocess.run(["zsh",str(repo/"scripts/install.sh")],env=env,capture_output=True,text=True)
+ assert failed.returncode and "INSTALL_SOURCE_DIRTY" in failed.stderr and snapshot()==original
+ (repo/"untracked").unlink()
+ (repo/".git/HEAD").write_text("f"*40+"\n")
+ failed=subprocess.run(["zsh",str(repo/"scripts/install.sh")],env=env,capture_output=True,text=True)
+ assert failed.returncode and "INSTALL_SOURCE_UNRESOLVED" in failed.stderr and snapshot()==original
+ # Matching destination bytes never make a dirty/unresolved manifest verified.
+ valid={"root":str(repo),"commit":"a"*40,"tree":"b"*40,"clean":True}
+ for source_identity in ({**valid,"clean":False},{**valid,"tree":None},{**valid,"commit":"unresolved"}):
+  r.atomic_json(manifest,{"source":source_identity,"files":[{"destination":str(destination/"share/main.js"),"sha256":r.file_hash(destination/"share/main.js")}]})
+  assert not r.disk_release(destination/"share")["verified"]
 print("PASS")`),"PASS"));
