@@ -8,10 +8,11 @@ import "../src/session-policy.js";
 
 const source=await readFile(path.resolve("src/main.js"),"utf8"),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const section=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
-const code=section("function samePhysicalSpace","\nasync function overflowManagedTask")+
+const code="const {draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n"+section("function samePhysicalSpace","\nasync function overflowManagedTask")+
   section("async function newManagedPage","\nasync function controlPage")+
   section("async function ensureProjectLocation","\nasync function ")+
   section("async function pruneProjectSpace","\nasync function gcAgentSpaces")+
+  section("async function pruneManagedOrphanTabs","\nasync function watchOnce")+
   section("async function detachTerminalTaskPages","\nasync function pruneManagedOrphanTabs");
 const projectHomeId=new Function(source.slice(source.indexOf("function projectHomeId("),source.indexOf("\nfunction projectKey("))+";return projectHomeId;")();
 const home="https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project",cid="11111111-1111-4111-8111-111111111111",url=home.replace(/project$/, "c/"+cid);
@@ -30,7 +31,7 @@ async function fixture(orphan=false,change=()=>{}) {
     newPage:async()=>{f.allocations=(f.allocations||0)+1;throw Error("page budget reached");}};
   const api=await new AsyncFunction("loadRuntime","state","saveRegistry","imageSessionOccupancy","pageDetachCandidates","orphanManagedPageCandidates","activeTaskStatus","composerIsEmpty","sameConversationUrl","projectHomeId","coordinated",
     "activeAccount","openBoundTask","projectRecord","bindingObserved","accountManagedTask","openProjectPage","bindingExecutionReadiness","pageBudgetError","clearCapacityWait","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError",
-    "listTaskSpaces","process",code+";return {reclaimIdlePageSlot,reclaimOrphanManagedPage,pruneProjectSpace,ensureProjectLocation,detachTerminalTaskPages};")(
+    "listTaskSpaces","process","assertInputSafe",code+";return {reclaimIdlePageSlot,reclaimOrphanManagedPage,pruneProjectSpace,ensureProjectLocation,detachTerminalTaskPages};")(
     async()=>rt,async()=>{f.states++;return f.snapshot;},async()=>{},()=>({occupied:!!f.image}),
     globalThis.__CHAT_BRIDGE_PAGE_POOL__.pageDetachCandidates,globalThis.__CHAT_BRIDGE_PAGE_POOL__.orphanManagedPageCandidates,
     globalThis.__CHAT_BRIDGE_TASK_POLICY__.activeTaskStatus,globalThis.__CHAT_BRIDGE_TASK_POLICY__.composerIsEmpty,
@@ -45,7 +46,8 @@ async function fixture(orphan=false,change=()=>{}) {
     async()=>({task,spaceName:"managed",profileId:"P1"}),async()=>home,()=>({ready:true}),
     error=>error.message==="page budget reached",async()=>{},async()=>({firstAt:Date.now()}),120,
     async()=>{throw Error("unexpected overflow");},()=>Object.assign(Error("capacity waiting"),{code:"CAPACITY_WAIT"}),
-    async()=>f.available||[{id:9,name:f.terminalOverflow?"overflow":"managed",profileId:"P1",ownership:"agent",createdBy:"agent"}],{env:{}}
+    async()=>f.available||[{id:9,name:f.terminalOverflow?"overflow":"managed",profileId:"P1",ownership:"agent",createdBy:"agent"}],{env:{}},
+    async()=>{f.discards=(f.discards||0)+1;if(f.discardError)throw Error("discard unconfirmed");f.snapshot.composerRawText="";}
   );
   f.result=f.entry==="terminal"?await api.detachTerminalTaskPages(reg,"P","a"):f.entry==="prune"?await api.pruneProjectSpace(reg,"P","a"):f.entry==="ensure"?await api.ensureProjectLocation(reg,"P","a",{create:true,confirm:true}):
     orphan?await api.reclaimOrphanManagedPage(reg,task,binding,"a"):await api.reclaimIdlePageSlot(reg,"P","a",task,binding);
@@ -88,6 +90,19 @@ test("orphan reclaim never closes an unregistered conversation or another Projec
     ["unbound UNKNOWN",f=>{f.context.unboundProjectIds=["g-p-"+"a".repeat(32)];}],
     ["unplaced UNKNOWN",f=>{f.context.unboundAny=true;}]
   ]) assert.equal((await fixture(true,change)).closed,0,name);
+});
+test("explicit Project discard is shared by terminal and orphan reclaim after every protection passes",async()=>{
+  const permit=f=>{f.reg.projects.P.lifecycle={draftPolicy:"discard"};f.snapshot.composerRawText="old text";};
+  for(const orphan of [false,true]) {
+    const safe=await fixture(orphan,permit);assert.equal(safe.closed,1);assert.equal(safe.discards,1);
+    for(const change of [f=>{f.context.unboundAny=true;},f=>{f.tabs[0].active=true;},f=>{f.snapshot.composerAttachmentsEmpty=false;}]) {
+      const guarded=await fixture(orphan,f=>{permit(f);change(f);});assert.equal(guarded.closed,0);assert.equal(guarded.discards||0,0);
+    }
+    if(!orphan)for(const field of ["project","account"]) {
+      const mismatch=await fixture(false,f=>{permit(f);f.rt.tasks.t[field]="other";});assert.equal(mismatch.closed,0);assert.equal(mismatch.discards||0,0);
+    }
+    let failed;await assert.rejects(()=>fixture(orphan,f=>{permit(f);f.discardError=true;failed=f;}),/discard unconfirmed/);assert.equal(failed.closed,0);
+  }
 });
 
 test("proven pre-send capacity waiting without a page cannot veto safe orphan reclamation",async()=>{

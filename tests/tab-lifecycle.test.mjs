@@ -42,6 +42,6 @@ test("terminal detach preserves active tab, user/unmanaged page, draft and gener
 
 test("background send does not clear user-control pause and requests hard Space protection",()=>{
   assert.match(source,/const background=args\.includes\("--background"\)/);
-  assert.match(source,/&& !background\) await clearUserControlPause\(chat\)/);
-  assert.match(source,/ensurePage\(reg,chat,\{pauseOnUserControl:background\}\)/);
+  assert.match(source,/&& !background\)\s+globalThis\.__CHAT_BRIDGE_INPUT_RESUMED_USER_CONTROL__=await clearUserControlPause\(chat\)/);
+  assert.match(source,/ensurePage\(reg,chat,\{pauseOnUserControl:background,allowOverflow:\["send","ask","stream"\]\.includes\(cmd\)\}\)/);
 });

@@ -14,6 +14,8 @@
       reconcileRole: clean(raw.reconcileRole) || clean(project.rootController) || "conductor",
       minGapSec: Number.isFinite(minGap) && minGap >= 0 ? minGap : 300,
       instruction: clean(raw.instruction),
+      draftPolicy: raw.draftPolicy === "discard" ? "discard" : "preserve",
+      maxOverflowSpaces: raw.maxOverflowSpaces === 2 ? 2 : 1,
     };
   }
 

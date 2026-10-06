@@ -128,6 +128,17 @@ chat-bridge space consolidate --account secondary --confirm
 
 `project ensure` reuses a real accessible ChatGPT Project when possible. Creating one requires both `--create` and `--confirm`; it does not log in, share a Project, or copy private files. `space consolidate` is dry-run by default and migrates only after bound Projects are paused/drained, unknown deliveries and callbacks are cleared, and legacy Agent Spaces have no open Tabs or drafts. It closes only emptied Agent Spaces; human-owned Spaces remain outside automated cleanup. A verified login/Profile normally uses one Bridge-managed `chat-bridge-agent-*` Space across Projects.
 
+For a Project whose owner explicitly authorized draft discard and bounded extra capacity, use the actual host-local or registered management identity:
+
+```bash
+chat-bridge policy set --project "AUTHORIZED PROJECT" --draft-policy discard --max-overflow-spaces 2 --confirm
+chat-bridge policy show --project "AUTHORIZED PROJECT"
+```
+
+Policy is persistent and local-only; defaults are `preserve` and one overflow. The shared identity/Profile pool permits primary plus at most two overflow Spaces (24 pages), reclaiming existing pool pages before creating at most one additional Space per normal allocation. Old attachments remain mapped and eligible for scoped prune/admitted automatic cleanup. Explicit discard enables the shared normal dispatch/send and safe reclaim guard only for unchanged text-only drafts after complete durable private backup (0600), fresh login/Project/conversation and input/control checks. Attachments, partial input/send intent, UNKNOWN/unbound delivery, user pause and uncertain clearing remain protected. Do not infer permission from another Project or clear a draft through a separate private routine.
+
+The final native action compares the backed-up document/text/form, exact URL and current attachment/UI state and deletes through one synchronous transaction after the intent is durable. If the characterized editor lacks that capability, `DRAFT_DISCARD_UNSUPPORTED` preserves the draft; do not fall back to fill, keyboard deletion or direct DOM changes.
+
 Treat `spaceName` as the stable binding and numeric `spaceId` as a runtime cache. Account bindings do not perform credential login; the bound Ego Space must already have access to the intended ChatGPT account/project.
 
 Identify each binding from an existing managed ChatGPT page. The stable logged-in user ID (never tokens) shares cooldown across aliases/projects/Spaces; different users remain independent. Until identified, cooldown follows the configured alias and is explicitly unverified: reuse the alias for the same login. Re-identify after changing login/profile/Space; a different login requires another alias. Account-wide discovery uses a bound page, never an arbitrary default-profile global Space.

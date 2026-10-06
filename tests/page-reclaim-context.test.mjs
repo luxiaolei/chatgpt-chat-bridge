@@ -8,6 +8,39 @@ import "../src/task-policy.js";
 import "../src/session-policy.js";
 import "../src/page-pool.js";
 
+test('confirmed SENT with an exact technically terminal task releases occupancy without business ACK',()=>{
+  const code=String.raw`import json,pathlib,tempfile,subprocess,sys,os,hashlib,copy
+sys.path.insert(0,str(pathlib.Path("src").resolve()));import coordinator as c
+with tempfile.TemporaryDirectory() as root:
+ p=pathlib.Path(root);config=p/"config";state=p/"state";config.mkdir();state.mkdir()
+ pid="g-p-"+"a"*32;sid="11111111-1111-4111-8111-111111111111";owner="22222222-2222-4222-8222-222222222222";home="https://chatgpt.com/g/"+pid+"/project"
+ reg={"accounts":{"a":{"identity":"login"}},"projects":{"P":{"bindings":{"a":{"projectUrl":home}}}},"chats":{sid:{"id":sid,"project":"P","account":"a","role":"worker","url":home.replace("project","c/"+sid)},owner:{"id":owner,"project":"P","account":"a","role":"conductor"}}}
+ task={"taskId":"T","project":"P","account":"a","sessionId":sid,"role":"worker","controllerSessionRef":owner,"status":"CANCELLED"}
+ rt={"tasks":{"T":task}}
+ (config/"registry.json").write_text(json.dumps(reg));(state/"runtime.json").write_text(json.dumps(rt));db=c.connection(config,state)
+ db.execute("INSERT INTO operations(id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,role,message,task_id,created_at,updated_at,not_before) VALUES('op','op','hash','SENT','P','a',?,? ,?,'worker','body','T',?,?,0)",(c.account_id("login"),owner,sid,c.stamp(),c.stamp()));db.commit()
+ env=dict(os.environ);env.pop("CHAT_BRIDGE_FROM_ACCOUNT_ID",None);env.pop("CHAT_BRIDGE_FROM_SPACE",None)
+ def context():
+  before=[tuple(r) for r in db.execute("SELECT * FROM operations")],[tuple(r) for r in db.execute("SELECT * FROM documents")]
+  r=subprocess.run([sys.executable,"src/coordinator.py","page-reclaim-context",str(config),str(state)],input=json.dumps({"account":"a"}),capture_output=True,text=True,env=env);assert r.returncode==0,r.stderr
+  assert before==([tuple(r) for r in db.execute("SELECT * FROM operations")],[tuple(r) for r in db.execute("SELECT * FROM documents")])
+  assert db.execute("SELECT count(*) FROM task_results").fetchone()[0]==0
+  return json.loads(r.stdout)["sessionRefs"]
+ def put(kind,value):db.execute("UPDATE documents SET payload=? WHERE kind=?",(json.dumps(value),kind));db.commit()
+ for status in ["CANCELLED","FAILED"]:
+  task["status"]=status;put("runtime",rt);assert context()==[],"terminal task remains permanently occupied"
+ for field,value in [("status","BLOCKED"),("status","RUNNING"),("watchdogPendingNotification",True),("externalResponsePending",True),("watchdogPausedForUserControl",True),("taskId","other"),("project","other"),("account","other"),("sessionId","other"),("role","other"),("controllerSessionRef","other")]:
+  changed=copy.deepcopy(rt);changed["tasks"]["T"][field]=value;put("runtime",changed);assert context()==[sid],field
+ put("runtime",{"tasks":{}});assert context()==[sid];put("runtime",rt)
+ for status in ["DELIVERY_UNKNOWN","DISPATCHING","SUPERSEDED","QUEUED"]:
+  db.execute("UPDATE operations SET status=?",(status,));db.commit();assert context()==[sid]
+ db.execute("UPDATE operations SET status='SENT',kind='rotation'");db.commit();assert context()==[]
+ changed=copy.deepcopy(reg);changed["projects"]["P"]["bindings"]["a"]["projectUrl"]=home.replace("chatgpt.com","foreign.test");put("registry",changed);assert context()==[sid]
+ put("registry",reg);db.execute("UPDATE operations SET status='SENT'");db.commit();assert context()==[]
+ print("PASS")`;
+  const r=spawnSync('python3',['-c',code],{encoding:'utf8',timeout:15000});assert.equal(r.status,0,r.stderr);assert.equal(r.stdout.trim(),'PASS');
+});
+
 test("reclaim reads preserve UNKNOWN, alias identity and exact claim while excluding native Codex pools",async()=>{
   const root=await mkdtemp(path.join(tmpdir(),"bridge-reclaim-")),config=path.join(root,"config"),state=path.join(root,"state");
   await mkdir(config);await mkdir(state);
