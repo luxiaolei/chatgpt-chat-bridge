@@ -174,13 +174,15 @@ def locked_call(call, deadline, on_lock=None):
 
 def begin_immediate(db, timeout=15):
     deadline = time.monotonic() + timeout
-    original = sqlite3.Connection.execute(db, "PRAGMA busy_timeout").fetchone()[0]
+    # Restore the busy handler even after a store deadline expires.
+    execute = db.execute if not isinstance(db, DeadlineConnection) else lambda sql: sqlite3.Connection.execute(db, sql)
+    original = execute("PRAGMA busy_timeout").fetchone()[0]
     try:
         # Native busy handlers can overshoot their millisecond budget on this host.
-        sqlite3.Connection.execute(db, "PRAGMA busy_timeout=0")
+        execute("PRAGMA busy_timeout=0")
         return locked_call(lambda: db.execute("BEGIN IMMEDIATE"), deadline, db.rollback)
     finally:
-        sqlite3.Connection.execute(db, f"PRAGMA busy_timeout={original}")
+        execute(f"PRAGMA busy_timeout={original}")
 
 
 class DeadlineConnection(sqlite3.Connection):
