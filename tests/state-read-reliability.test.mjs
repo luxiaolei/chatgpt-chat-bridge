@@ -58,3 +58,24 @@ test('peek returns authoritative state without repairing a stale projection',asy
  const repaired=call(store,'get',config,state,'runtime');assert.equal(repaired.status,0,repaired.stderr);
  assert.deepEqual(JSON.parse(await readFile(file,'utf8')),rt);
 }));
+
+test('local-only preflight read failures prove PRE_SEND without relabeling child orchestration',async()=>fixture(async({config,state})=>{
+ const code=String.raw`import runpy,sys,sqlite3,subprocess,importlib.util
+from unittest.mock import patch
+action,script,config,state=sys.argv[1:]
+sys.argv=[script,action,config,state,"send","C","--project","P","--account","a"]
+with patch.object(sqlite3,"connect",side_effect=ValueError("STATE_STORE_WAIT_EXHAUSTED:READ")), patch.object(subprocess,"run",side_effect=subprocess.CalledProcessError(2,"synthetic-child")):
+ try:runpy.run_path(script,run_name="__main__")
+ except SystemExit as error:assert error.code==2
+`;
+ for(const action of ['origin-account','origin','unambiguous','gate','scope','watch','loop','watch-all']) {
+  const r=spawnSync('python3',['-c',code,action,web,config,state],{encoding:'utf8',timeout:2000});
+  assert.equal(r.status,0,r.stderr);
+  const receipt=JSON.parse(r.stderr.trim());
+  assert.equal(receipt.status,'LOCAL_STATE_ERROR');
+  if(action!=='loop') assert.equal(receipt.error,'STATE_STORE_WAIT_EXHAUSTED:READ');
+  else assert.match(receipt.error,/synthetic-child/);
+  if(['loop','watch-all'].includes(action)) assert.equal(receipt.deliveryStage,undefined,action);
+  else {assert.equal(receipt.deliveryStage,'PRE_SEND',action);assert.equal(receipt.code,'LOCAL_STATE_ERROR',action);}
+ }
+}));
