@@ -43,3 +43,18 @@ test("state-store failures defer watchdog work without marking the worker failed
  `)();
  assert.equal(run.writes,0);assert.equal(run.result[0].state,"STATE_STORE_DEFERRED");
 });
+
+test("actual space prune --all CLI retains existing Project and account filters",async()=>{
+ const opt=source.slice(source.indexOf("function opt("),source.indexOf("\nfunction boolValue("));
+ const start=source.indexOf('else if(cmd==="space"){'),end=source.indexOf('\nelse if(',start+1),branch=source.slice(start,end);
+ const calls=[],output=[];
+ await new AsyncFunction("args","reg","pruneManagedOrphanTabs","print",opt+
+   'const project=opt("project"),accountArg=opt("account"),cmd=args[0];if(false){}'+branch)(
+     ["space","prune","--all","--project","P","--account","a"],{},async(_r,p,a)=>{calls.push([p,a]);return [];},value=>output.push(value));
+ assert.deepEqual(calls,[["P","a"]]);assert.deepEqual(output,[{ok:true,closed:[]}]);
+ calls.length=0;
+ await new AsyncFunction("args","reg","pruneManagedOrphanTabs","print",opt+
+   'const project=opt("project"),accountArg=opt("account"),cmd=args[0];if(false){}'+branch)(
+     ["space","prune","--all"],{},async(_r,p,a)=>{calls.push([p,a]);return [];},()=>{});
+ assert.deepEqual(calls,[[null,null]]);
+});

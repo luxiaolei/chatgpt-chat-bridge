@@ -209,3 +209,33 @@ test("sync ignores sidebar chats from other Projects and preserves existing atta
   assert.deepEqual(reg.chats[otherAccount],{project:"Target",account:"different-account"});
   assert.equal(saved,1);
 });
+
+test("repeated ensure reuses only its safe inactive control home without retaining another page",async()=>{
+  for(const name of ["control-routing","page-pool","liveness-policy","task-policy","web-policy","model-policy","session-policy"])await import(`../src/${name}.js`);
+  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor,home="https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project";
+  for(const unsafe of [null,"draft","approval","generating","active","user","UNKNOWN","unbound-Project","wrong-Project","wrong-Space","other-control","registered-session","unplaced-live","fresh-active"]) {
+    const binding={account:"a",spaceName:"managed",spaceId:7,profileId:"P1",projectUrl:home,controlPage:"p1"};
+    const f={reg:{accounts:{a:{identity:"login-a"}},projects:{P:{bindings:{a:binding}}},chats:{}},binding,unsafe,allocations:0,closes:0,retained:["p1"],saved:0,navigated:[],runtime:{tasks:{}}};
+    if(unsafe==="other-control")f.reg.projects.Q={bindings:{a:{...binding,projectUrl:home.replace("a".repeat(32),"b".repeat(32))}}};
+    if(unsafe==="registered-session")f.reg.chats.s={id:"s",spaceName:"managed",spaceId:7,page:"p1"};
+    if(unsafe==="unplaced-live")f.runtime.tasks.t={project:"P",account:"a",status:"RUNNING"};
+    const ensure=await new AsyncFunction("f","home",source.split('const cmd=args[0] || "help";')[0]+`
+      loadRuntime=async()=>normalizeRuntime(f.runtime);
+      imageSessionOccupancy=()=>({occupied:false});bindingObserved=()=>true;
+      saveRegistry=async()=>{f.saved++;};
+      coordinated=command=>{if(command!=='page-reclaim-context')throw Error(command);return {sessionRefs:[],unboundProjectIds:f.unsafe==='unbound-Project'?['g-p-'+ 'a'.repeat(32)]:[],unboundAny:f.unsafe==='UNKNOWN'};};
+      state=async()=>({approvalRequired:f.unsafe==='approval',generating:f.unsafe==='generating',composerCount:1,composerRawText:f.unsafe==='draft'?'keep human draft':''});
+      const url=f.unsafe==='wrong-Project'?home.replace('a'.repeat(32),'b'.repeat(32)):home;
+      const pages=[{label:'p1',url:async()=>url,close:async()=>{f.closes++;}}];let reads=0;
+      const task={spaceId:f.unsafe==='wrong-Space'?9:7,pages:async()=>pages,tabs:async()=>{const fresh=reads++>0;return pages.map(p=>({label:p.label,url:p.label==='p1'?url:home,active:p.label==='p1'&&(f.unsafe==='active'||f.unsafe==='fresh-active'&&fresh),openedBy:f.unsafe==='user'?'user':'agent'}));},newPage:async()=>{const label='p'+(++f.allocations+1);f.retained.push(label);const p={label,url:async()=>home,close:async()=>{f.closes++;}};pages.push(p);return p;}};
+      openBoundTask=async(_r,_p,_a,options)=>{if(!options.requireExistingSpace||!options.pauseOnUserControl)throw Error('verified existing Space required');return {task,binding:{...f.binding,...options.spaceOverride}};};
+      accountManagedTask=async()=>({task,spaceName:'managed',profileId:'P1'});
+      openProjectPage=async page=>{f.navigated.push(page.label);return home;};
+      return ensureProjectLocation;
+    `)(f,home);
+    assert.equal((await ensure(f.reg,"P","a")).status,"READY",unsafe);
+    if(!unsafe){assert.equal((await ensure(f.reg,"P","a")).status,"READY");assert.equal(f.allocations,0);assert.deepEqual(f.retained,["p1"]);assert.equal(binding.controlPage,"p1");assert.equal(f.saved,2);}
+    else {assert.equal(f.allocations,1,unsafe);assert.deepEqual(f.navigated,["p2"],unsafe);}
+    assert.equal(f.closes,0,unsafe);
+  }
+});

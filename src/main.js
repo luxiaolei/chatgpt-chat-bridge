@@ -636,26 +636,42 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
   return null;
 }
 
-async function reclaimOrphanManagedPage(reg, task, binding, account=null) {
+async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseControlBinding=null) {
+  if(reuseControlBinding && (Number(reuseControlBinding.spaceId)!==Number(task.spaceId) ||
+    reuseControlBinding.spaceName!==binding.spaceName || reuseControlBinding.profileId!==binding.profileId)) return null;
+  if(reuseControlBinding) {
+    const project=Object.entries(reg.projects||{}).find(([,record])=>record.bindings?.[account]===reuseControlBinding)?.[0];
+    if(!project) return null;
+    const opened=await openBoundTask(reg,project,account,{pauseOnUserControl:true,requireExistingSpace:true,
+      spaceOverride:{spaceName:binding.spaceName,spaceId:task.spaceId,profileId:binding.profileId}});
+    if(Number(opened.task.spaceId)!==Number(task.spaceId)) throw new Error("SPACE_ID_MISMATCH: "+binding.spaceName);
+    task=opened.task; binding=opened.binding;
+  }
   const rt=await loadRuntime();
+  const pages=await task.pages().catch(()=>[]), tabs=await task.tabs().catch(()=>[]);
   const liveTasks=Object.values(rt.tasks||{}).filter(item=>activeTaskStatus(item.status));
-  const hasLiveTasks=liveTasks.some(item=>{
+  const hasUnplacedLiveTasks=liveTasks.some(item=>{
     const chat=item.sessionId?reg.chats?.[item.sessionId]:null;
-    if(chat?.spaceName===binding.spaceName || (chat?.spaceId!=null && Number(chat.spaceId)===Number(task.spaceId))) return true;
-    const project=reg.projects?.[item.project];
-    const account=item.account||chat?.account||project?.activeAccount||reg.defaultAccount;
-    const taskBinding=project?.bindings?.[account];
-    return taskBinding?.spaceName===binding.spaceName ||
-      (taskBinding?.spaceId!=null && Number(taskBinding.spaceId)===Number(task.spaceId));
+    const taskBinding=projectBindingForTask(reg,item);
+    const identity=reg.accounts?.[account||binding.account]?.identity;
+    const liveAccount=item.account||chat?.account||reg.projects?.[item.project]?.activeAccount||reg.defaultAccount;
+    if(!chat?.page && identity && reg.accounts?.[liveAccount]?.identity===identity) return true;
+    if(!samePhysicalSpace(chat,binding,task) && !samePhysicalSpace(taskBinding,binding,task)) return false;
+    const targetProject=projectHomeId(taskBinding?.projectUrl);
+    return item.watchdogPausedForUserControl || !identity || reg.accounts?.[liveAccount]?.identity!==identity || reg.accounts?.[chat?.account]?.identity!==identity ||
+      !chat?.page || chat.id!==item.sessionId || chat.status!=="active" || chat.project!==item.project ||
+      Number(chat.spaceId)!==Number(task.spaceId) || chat.profileId!==binding.profileId || taskBinding?.profileId!==binding.profileId || !targetProject ||
+      !sameConversationUrl(tabs.find(tab=>tab.label===chat.page)?.url,chat.url,targetProject);
   });
-  if(hasLiveTasks) return null;
+  // Bound live pages remain protected below; an unplaced live task vetoes the Space.
+  if(hasUnplacedLiveTasks) return null;
 
   const protectedPages=new Set();
   for(const project of Object.values(reg.projects||{})) {
     for(const candidateBinding of Object.values(project.bindings||{})) {
       const sameSpace=candidateBinding?.spaceName===binding.spaceName ||
         (candidateBinding?.spaceId!=null && Number(candidateBinding.spaceId)===Number(task.spaceId));
-      if(sameSpace && candidateBinding?.controlPage) protectedPages.add(candidateBinding.controlPage);
+      if(sameSpace && candidateBinding?.controlPage && candidateBinding!==reuseControlBinding) protectedPages.add(candidateBinding.controlPage);
     }
   }
   for(const chat of Object.values(reg.chats||{})) {
@@ -664,8 +680,6 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null) {
     if(sameSpace && chat?.page) protectedPages.add(chat.page);
   }
 
-  const pages=await task.pages().catch(()=>[]);
-  const tabs=await task.tabs().catch(()=>[]);
   for(const chat of Object.values(reg.chats||{})) if(samePhysicalSpace(chat,binding,task))
     for(const tab of tabs) if(tab.label && sameConversationUrl(tab.url,chat.url)) protectedPages.add(tab.label);
   const candidates=orphanManagedPageCandidates(pages,tabs,{
@@ -674,6 +688,8 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null) {
   });
   for(const page of candidates.filter(page=>{
     const tab=tabs.find(t=>t.label===page.label);
+    if(reuseControlBinding) return page.label===reuseControlBinding.controlPage && !!projectHomeId(binding.projectUrl) &&
+      projectHomeId(tab?.url)===projectHomeId(binding.projectUrl);
     return /^(about:blank|chrome:\/\/newtab\/?$)$/i.test(String(tab?.url||"")) ||
       !!projectHomeId(binding.projectUrl) && projectHomeId(tab?.url)===projectHomeId(binding.projectUrl);
   }).slice(0,1)) {
@@ -685,6 +701,7 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null) {
     if(context.unboundAny || (blank?context.unboundProjectIds.length:context.unboundProjectIds.includes(projectHomeId(tab.url)))) continue;
     const fresh=(await task.tabs()).find(t=>t.label===page.label);
     if(!fresh || fresh.active || fresh.openedBy!=="agent" || fresh.url!==tab.url) continue;
+    if(reuseControlBinding) return {page:page.label,handle:page,reason:"control-home-reuse"};
     await page.close();
     return {page:page.label,reason:"orphan-managed"};
   }
@@ -2695,7 +2712,9 @@ async function ensureProjectLocation(reg, projectName, account, options={}) {
   const current=pr.bindings?.[account]||null;
   if(current?.projectUrl && bindingObserved(reg,account,current)) {
     const {task,spaceName,profileId}=await accountManagedTask(reg,account,current?.profileId||null);
-    const page=await newManagedPage(reg,projectName,account,task,{...current,spaceName,profileId,spaceId:task.spaceId});
+    const binding={...current,spaceName,profileId,spaceId:task.spaceId};
+    const reused=current.controlPage?await reclaimOrphanManagedPage(reg,task,binding,account,current):null;
+    const page=reused?.handle||await newManagedPage(reg,projectName,account,task,binding);
     try {
       const url=await openProjectPage(page,projectName,current.projectUrl);
       current.spaceName=spaceName;
@@ -3138,16 +3157,26 @@ async function pruneManagedOrphanTabs(reg, project=null, account=null) {
   const closed=[];
   const identity=account?reg.accounts?.[account]?.identity:null;
   const sameAccount=alias=>!account || alias===account || (!!identity && reg.accounts?.[alias]?.identity===identity);
+  const available=await listTaskSpaces();
   const records=[];
   for(const [name,record] of Object.entries(reg.projects||{})) {
     if(project && name!==project) continue;
-    for(const [alias,binding] of Object.entries(record.bindings||{}))
-      if(sameAccount(alias)) records.push({...binding,project:name,account:alias});
+    for(const [alias,binding] of Object.entries(record.bindings||{})) {
+      if(!sameAccount(alias)) continue;
+      records.push({...binding,project:name,account:alias});
+      const identity=reg.accounts?.[alias]?.identity, overflow=reg.capacityOverflow?.[`${identity}|${binding.profileId}`];
+      const targets=overflow?available.filter(space=>space.name===overflow.spaceName):[];
+      if(identity && binding.profileId && overflow?.identity===identity && overflow.profileId===binding.profileId &&
+        Number.isSafeInteger(Number(overflow.spaceId)) && Number(overflow.spaceId)>0 && targets.length===1 &&
+        Number(targets[0].id)===Number(overflow.spaceId) && targets[0].profileId===binding.profileId &&
+        targets[0].ownership==="agent" && targets[0].createdBy==="agent") records.push({...binding,project:name,account:alias,
+          spaceName:overflow.spaceName,spaceId:overflow.spaceId,controlPage:null});
+    }
   }
   for(const chat of Object.values(reg.chats||{}))
     if((!project || chat.project===project) && sameAccount(chat.account)) records.push({
       ...chat,projectUrl:reg.projects?.[chat.project]?.bindings?.[chat.account]?.projectUrl||null});
-  const spaces=(await listTaskSpaces()).filter(space=>space?.ownership==="agent" && space.createdBy==="agent" &&
+  const spaces=available.filter(space=>space?.ownership==="agent" && space.createdBy==="agent" &&
     String(space.name||"").startsWith("chat-bridge-agent-"));
   for(const space of spaces) {
     const scoped=records.filter(record=>
@@ -3841,7 +3870,7 @@ else if(cmd==="space"){
     const a=accountArg||reg.defaultAccount||DEFAULT_ACCOUNT;
     print(await consolidateAccountSpace(reg,a,{confirm:args.includes("--confirm"),profileId:opt("profile",null)}));
   } else if(sub==="prune" && args.includes("--all")) {
-    print({ok:true,closed:await pruneManagedOrphanTabs(reg)});
+    print({ok:true,closed:await pruneManagedOrphanTabs(reg,project,accountArg)});
   } else {
     const p=project; if(!p) throw new Error("--project required");
     const a=activeAccount(reg,p,accountArg), b=bindingFor(reg,p,a,true);
