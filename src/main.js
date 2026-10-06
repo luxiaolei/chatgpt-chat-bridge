@@ -350,6 +350,7 @@ async function loadRegistry() {
 async function saveRegistry(reg, registration=null) {
   const next=normalizeRegistry(reg),base=stateBaselines.get(reg);
   if(!base) throw new Error("registry state must be loaded before save");
+  if(!registration && JSON.stringify(base)===JSON.stringify(next)) return;
   stored("put","registry",{base,next,...(registration?{registration}:{})});
   stateBaselines.set(reg,structuredClone(next));
 }
@@ -1719,7 +1720,25 @@ async function closeEmptyPage(page) {
 }
 
 async function nativeSubmissionWitness(page, request, expectedIdentity) {
-  const witness=await page.evaluate(async({selector,request,expectedIdentity})=>{
+  let witness;
+  try {
+    witness=await page.evaluate(nativeSubmissionProbe,{selector:COMPOSER_SELECTOR,request,expectedIdentity});
+  } catch(error) {
+    if(String(error?.message||error).includes('NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED:')) {
+      error.code='NATIVE_SUBMISSION_UNSUPPORTED';
+      error.nativeAdapter={formatVersion:'chatgpt-native-adapter-v1',phase:'FORMAT',status:'UNSUPPORTED'};
+    }
+    throw error;
+  }
+  if(witness) {
+    witness.requestHash=crypto.createHash('sha256').update(normalizedEvidenceText(request)).digest('hex');
+    witness.bodyHash=crypto.createHash('sha256').update(witness.body).digest('hex');
+  }
+  return witness;
+}
+
+// Volatile UI formats live in one closed browser probe; no generic alias matching.
+async function nativeSubmissionProbe({selector,request,expectedIdentity}) {
     const fail=()=>{throw new Error('NATIVE_SUBMISSION_UNVERIFIED');};
     const composers=[...document.querySelectorAll(selector)];
     if(composers.length!==1) return fail();
@@ -1732,6 +1751,7 @@ async function nativeSubmissionWitness(page, request, expectedIdentity) {
     for(let i=0;host&&i<3&&!fiber;i++,host=host.parentElement)
       fiber=host[Object.keys(host).find(k=>k.startsWith('__reactFiber'))];
     const candidates=new Set();
+    let formatRecognized=false;
     // Pin the characterized native submit format; an unsupported format fails before Send.
     const formats=[
       {submit:"e=>{eg(j.getText(),e)}",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,T.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}"},
@@ -1744,6 +1764,7 @@ async function nativeSubmissionWitness(page, request, expectedIdentity) {
         (value.submit==='e=>up(rT.getText(),e)' && submit==='e=>uh(rE.getText(),e)') ||
         (value.persistedText && submit==='e=>{ev(F.getText(),e)}'));
       if(!format) continue;
+      formatRecognized=true;
       for(let hook=fiber.memoizedState,n=0;hook&&n<64;n++,hook=hook.next) {
         const deps=hook.memoizedState?.deps;
         if(!Array.isArray(deps)) continue;
@@ -1757,6 +1778,7 @@ async function nativeSubmissionWitness(page, request, expectedIdentity) {
             String(editor.getPersistedText)===format.getPersistedText))) candidates.add(editor);
       }
     }
+    if(!formatRecognized) throw new Error('NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED:chatgpt-native-adapter-v1:FORMAT');
     if(candidates.size!==1 || typeof doc.textBetween!=='function' ||
       doc.textBetween(0,doc.content.size,'\n').replace(/\s+/g,' ').trim()!==request.replace(/\s+/g,' ').trim()) return fail();
     const editor=[...candidates][0], body=editor.getText();
@@ -1764,12 +1786,6 @@ async function nativeSubmissionWitness(page, request, expectedIdentity) {
       editor.dictation.document!==doc || composer.pmViewDesc.node!==doc) return fail();
     return {format:'chatgpt-native-getText-v1',body,url:location.href,accountIdentity:expectedIdentity,
       getterSource:String(editor.getText),serializerSource:String(editor.markdownEditor.serialize),observedAt:new Date().toISOString()};
-  },{selector:COMPOSER_SELECTOR,request,expectedIdentity});
-  if(witness) {
-    witness.requestHash=crypto.createHash('sha256').update(normalizedEvidenceText(request)).digest('hex');
-    witness.bodyHash=crypto.createHash('sha256').update(witness.body).digest('hex');
-  }
-  return witness;
 }
 
 async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
@@ -4206,6 +4222,7 @@ else throw new Error("Unknown command: "+cmd);
   const payload={ok:false,deliveryStage:(sendAttempted||error?.deliveryStage==="SEND_ATTEMPTED")?"SEND_ATTEMPTED":"PRE_SEND",
     code:String(error?.code||error?.message||"BRIDGE_ERROR").slice(0,200)};
   if(error?.nativeWitness) payload.nativeWitness=error.nativeWitness;
+  if(error?.nativeAdapter) payload.nativeAdapter=error.nativeAdapter;
   if(error?.status) payload.status=error.status;
   if(error?.reason) payload.reason=String(error.reason).slice(0,500);
   if(error?.retryAfterSec!=null) payload.retryAfterSec=Number(error.retryAfterSec);

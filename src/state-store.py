@@ -107,10 +107,11 @@ def project(path, document):
             os.unlink(temporary)
 
 
-def read_authoritative(path, kind):
+def read_authoritative(path, kind, deadline=None):
     """Read an initialized store without joining the writer queue."""
     if not path.exists():
         return None
+    deadline = min(deadline if deadline is not None else float("inf"), time.monotonic() + 8)
     # A URI read-only handle cannot establish SQLite's WAL shared-memory
     # index while a writer is rotating it. A normal handle with query_only
     # keeps this read non-mutating and follows the same WAL path as writers.
@@ -118,9 +119,10 @@ def read_authoritative(path, kind):
         db = None
         try:
             # mode=rw never creates a missing DB; query_only permits no writes.
-            # Four 2s attempts plus backoff remain below the caller's 20s limit.
-            db = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, timeout=2)
-            db.execute("PRAGMA busy_timeout=2000")
+            # One total read deadline, including retries, stays below the 20s caller limit.
+            db = sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True, timeout=0, factory=DeadlineConnection)
+            db.deadline, db.phase = deadline, "READ"
+            db.set_progress_handler(lambda: time.monotonic() >= deadline, 1000)
             db.execute("PRAGMA query_only=ON")
             row = db.execute("SELECT payload FROM documents WHERE kind=?", (kind,)).fetchone()
             return json.loads(row[0]) if row is not None else None
@@ -131,7 +133,9 @@ def read_authoritative(path, kind):
             transient = "unable to open database file" in message or "database is locked" in message
             if not transient or attempt == 3:
                 raise
-            time.sleep(0.05 * (2 ** attempt))
+            if time.monotonic() >= deadline:
+                raise ValueError("STATE_STORE_WAIT_EXHAUSTED:READ") from error
+            time.sleep(min(0.05 * (2 ** attempt), deadline - time.monotonic()))
         finally:
             if db is not None:
                 db.close()
@@ -149,19 +153,69 @@ def peek_document(config, state, kind):
     return read_json((config if kind == "registry" else state) / (kind + ".json"))
 
 
-def begin_immediate(db):
-    # Keep the total wait below the Node caller's 20 second child timeout.
-    for attempt in range(3):
+def locked_call(call, deadline, on_lock=None):
+    attempt = 0
+    while True:
         try:
-            db.execute("BEGIN IMMEDIATE")
-            return
+            return call()
         except sqlite3.OperationalError as error:
-            if "locked" not in str(error).lower() or attempt == 2:
+            if "locked" not in str(error).lower():
                 raise
-            # A failed upgrade can leave a stale read snapshot on this handle.
-            db.rollback()
-            time.sleep(0.05 * (2 ** attempt))
+            if on_lock:
+                on_lock()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(0.05 * (2 ** min(attempt, 4)), remaining))
+            if time.monotonic() >= deadline:
+                raise
+            attempt += 1
 
+
+def begin_immediate(db, timeout=15):
+    deadline = time.monotonic() + timeout
+    # Restore the busy handler even after a store deadline expires.
+    execute = db.execute if not isinstance(db, DeadlineConnection) else lambda sql: sqlite3.Connection.execute(db, sql)
+    original = execute("PRAGMA busy_timeout").fetchone()[0]
+    try:
+        # Native busy handlers can overshoot their millisecond budget on this host.
+        execute("PRAGMA busy_timeout=0")
+        return locked_call(lambda: db.execute("BEGIN IMMEDIATE"), deadline, db.rollback)
+    finally:
+        execute(f"PRAGMA busy_timeout={original}")
+
+
+class DeadlineConnection(sqlite3.Connection):
+    """One total store deadline across bootstrap, transaction, fence and commit."""
+    deadline = None
+    phase = "BOOTSTRAP"
+
+    def remaining(self):
+        value = self.deadline - time.monotonic()
+        if value <= 0:
+            raise ValueError("STATE_STORE_WAIT_EXHAUSTED:" + self.phase)
+        return value
+
+    def bounded(self, call):
+        self.remaining()
+        super().execute("PRAGMA busy_timeout=0")
+        try:
+            return locked_call(call, self.deadline)
+        except sqlite3.OperationalError as error:
+            if ("locked" in str(error).lower() or str(error) == "interrupted") and time.monotonic() >= self.deadline:
+                raise ValueError("STATE_STORE_WAIT_EXHAUSTED:" + self.phase) from error
+            raise
+
+    def execute(self, sql, parameters=()):
+        if sql == "BEGIN IMMEDIATE":
+            # The shared helper owns rollback before retrying a stale read snapshot.
+            self.remaining()
+            super().execute("PRAGMA busy_timeout=0")
+            return super().execute(sql, parameters)
+        return self.bounded(lambda: super(DeadlineConnection, self).execute(sql, parameters))
+
+    def commit(self):
+        return self.bounded(super().commit)
 
 
 class RegistrationFenced(ValueError):
@@ -309,16 +363,19 @@ def main():
         payload = json.load(sys.stdin)
         if not isinstance(payload.get("base"), dict) or not isinstance(payload.get("next"), dict):
             raise ValueError("base and next must be objects")
+    deadline = time.monotonic() + 15
     old_umask = os.umask(0o077)
     try:
         if command == "get":
-            current = read_authoritative(state / "bridge.sqlite3", kind)
+            current = read_authoritative(state / "bridge.sqlite3", kind, deadline=deadline)
             if current is not None:
                 # The compatibility projection is outside the SQLite read handle.
                 project(destination, current)
                 print(json.dumps(current, ensure_ascii=False))
                 return
-        db = sqlite3.connect(state / "bridge.sqlite3", timeout=5)
+        db = sqlite3.connect(state / "bridge.sqlite3", timeout=5, factory=DeadlineConnection)
+        db.deadline = deadline
+        db.set_progress_handler(lambda: time.monotonic() >= deadline, 1000)
     finally:
         os.umask(old_umask)
     try:
@@ -342,17 +399,20 @@ def main():
             # SQLite is authoritative. Repair compatibility projection opportunistically.
             project(destination, current)
         else:
-            begin_immediate(db)
+            db.phase = "WRITE_TRANSACTION"
+            begin_immediate(db, timeout=max(0, deadline - time.monotonic()))
             current = json.loads(db.execute("SELECT payload FROM documents WHERE kind=?", (kind,)).fetchone()[0])
             before = json.loads(json.dumps(current))
             current = apply(current, payload["base"], payload["next"], kind=kind)
             if kind == "registry":
                 try:
+                    db.phase = "REGISTRATION_FENCE"
                     fence_rotation_registration(db, state, before, current, payload.get("registration"))
                 except RegistrationFenced as error:
                     record_registration_fence(db, error)
                     db.commit()
                     raise
+            db.phase = "DOCUMENT_WRITE"
             db.execute("UPDATE documents SET payload=? WHERE kind=?", (json.dumps(current, ensure_ascii=False), kind))
             db.commit()
             # Project only after the authoritative transaction commits. If a crash occurs
