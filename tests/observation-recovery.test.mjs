@@ -15,7 +15,7 @@ async function fixture(overrides={}) {
   let saved=0;
   const page={label:'p7',url:async()=>chat.url,waitForFunction:async()=>{},evaluate:async()=>overrides.login||'login-a',goto:async()=>{throw Error('unexpected navigation');}};
   const space={spaceId:9,tabs:async()=>[{label:'p7',url:chat.url,openedBy:'agent'}],page:()=>page};
-  const snapshot={composerPresent:true,composerText:overrides.draft||'',composerCount:1,composerRawText:overrides.draft||'',errorTexts:[],generating:false};
+  const snapshot={composerPresent:true,composerText:overrides.draft||'',composerCount:1,composerAttachmentsEmpty:true,composerRawText:overrides.draft||'',errorTexts:[],generating:false};
   const taskAccounts=new Map(overrides.accountConflict?[[9,'foreign']]:[]);
   const values={stored:()=>structuredClone(reg),taskAccounts,accountScope:(_reg,alias)=>alias,loadRuntime:async()=>runtime,activeTaskStatus:s=>s==='RUNNING',bindingFor:()=>binding,
     listTaskSpaces:async()=>[{id:9,name:binding.spaceName,ownership:overrides.ownership||'agent',createdBy:'agent',profileId:'Profile 1'}],

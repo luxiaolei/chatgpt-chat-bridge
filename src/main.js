@@ -365,9 +365,17 @@ function boolValue(value, def=false) {
   throw new Error(`invalid boolean: ${value}`);
 }
 function positionals(start=0) {
+  const booleans="aggressive all allow-duplicate-role background confirm create current-controller dry-run overflow quiet resume-watch skip-lifecycle skip-tasks strict-model".split(" ");
+  const valued="account affinity-key after auto-reconcile baseline-assistant-count baseline-assistant-hash baseline-assistant-id caller-ref candidate completion-mode controller cooldown dispatched-at effort escalation-to expected-hash github id image-path instruction issue label limit max-recovery max-total-recovery message mime-type min-gap-sec model name operation original-message page profile project project-id reconcile-role reply-to reply-to-session request-id resource-policy-version role root-controller session space stall-sec status task task-id timeout title turn-id type url workgroup".split(" ");
   const out=[];
   for (let i=start;i<args.length;i++) {
-    if (args[i].startsWith("--")) { i++; continue; }
+    if (args[i].startsWith("--")) {
+      const flag=args[i].slice(2);
+      if(booleans.includes(flag)) continue;
+      if(!valued.includes(flag)) throw new Error("unknown option: "+args[i]);
+      if(i+1>=args.length || args[i+1].startsWith("--")) throw new Error("missing option value: "+args[i]);
+      i++; continue;
+    }
     out.push(args[i]);
   }
   return out;
@@ -491,6 +499,7 @@ async function openBoundTask(reg, project, account=null, options={}) {
     if(options.spaceOverride) {
       if(!identity) throw new Error("TARGET_IDENTITY_UNVERIFIED");
       const target=available.find(space=>space.name===b.spaceName);
+      if(options.requireExistingSpace && !target) throw new Error("SPACE_NOT_FOUND: "+b.spaceName);
       if(target && target.ownership!=="agent") throw new Error("SPACE_OWNERSHIP_UNVERIFIED: "+b.spaceName);
       if(target && (!profileId || target.profileId!==profileId)) throw new Error("SPACE_PROFILE_MISMATCH: "+b.spaceName);
       if((target && (!Number.isSafeInteger(Number(target.id)) || Number(target.id)<=0 ||
@@ -574,22 +583,29 @@ function spaceProtection(reg, runtime, binding, task, tabs=[]) {
   return {labels,protectedChatIds};
 }
 
-async function reclaimIdlePageSlot(reg, project, account, task, binding, excludeChatId=null) {
+async function reclaimIdlePageSlot(reg, project, account, task, binding, excludeChatId=null, onlyChatId=null) {
+  const targetProject=projectHomeId(binding.projectUrl);
+  if(!targetProject) return null;
   const rt=await loadRuntime();
   const tabs=await task.tabs().catch(()=>[]);
   const activeLabels=tabs.filter(t=>t.active&&t.label).map(t=>t.label);
   const protection=spaceProtection(reg,rt,binding,task,tabs);
   for(const label of activeLabels) protection.labels.add(label);
-  const chats=Object.values(reg.chats||{}).filter(chat=>samePhysicalSpace(chat,binding,task));
+  const chats=Object.values(reg.chats||{}).filter(chat=>(!onlyChatId || chat.id===onlyChatId) && samePhysicalSpace(chat,binding,task));
   const candidates=pageDetachCandidates(
     chats,
     Object.values(rt.tasks||{}),
     {
+      project,account,
       excludeChatIds:[...protection.protectedChatIds,...(excludeChatId?[excludeChatId]:[])],
       excludePageLabels:[...protection.labels],
     }
   );
-  for(const candidate of candidates) {
+  for(const candidate of candidates.filter(chat=>{
+    const linked=Object.values(rt.tasks||{}).filter(t=>t.sessionId===chat.id);
+    return linked.length && linked.every(t=>["COMPLETE","FAILED","CANCELLED","RESULT_RECORDED"].includes(String(t.status).toUpperCase()) &&
+      !t.watchdogPendingNotification && !t.externalResponsePending && !t.watchdogPausedForUserControl);
+  }).filter(chat=>sameConversationUrl(tabs.find(t=>t.label===chat.page)?.url,chat.url,targetProject)).slice(0,1)) {
     let page=null;
     try { page=task.page(candidate.page); }
     catch {
@@ -602,11 +618,15 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     const tab=tabs.find(item=>item.label===candidate.page);
     if(!tab || tab.active || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) continue;
+    if(!snapshot || snapshot.approvalRequired!==false || snapshot.generating!==false || !composerIsEmpty(snapshot)) continue;
     const oldPage=candidate.page;
     if(imageSessionOccupancy(reg,candidate).occupied) continue;
-    try { await page.close(); }
-    catch { continue; }
+    if(!sameConversationUrl(await page.url(),candidate.url,targetProject)) continue;
+    const context=coordinated("page-reclaim-context",{account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
+    if(context.sessionRefs.includes(candidate.id) || context.unboundAny || context.unboundProjectIds.includes(targetProject)) continue;
+    const fresh=(await task.tabs()).find(t=>t.label===candidate.page);
+    if(!fresh || fresh.active || fresh.openedBy!=="agent" || !sameConversationUrl(fresh.url,candidate.url,targetProject)) continue;
+    await page.close(); // An uncertain close must not fall through to another candidate.
     candidate.page=null;
     candidate.detachedAt=new Date().toISOString();
     candidate.attachmentEpoch=Number(candidate.attachmentEpoch||0)+1;
@@ -616,26 +636,42 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
   return null;
 }
 
-async function reclaimOrphanManagedPage(reg, task, binding) {
+async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseControlBinding=null) {
+  if(reuseControlBinding && (Number(reuseControlBinding.spaceId)!==Number(task.spaceId) ||
+    reuseControlBinding.spaceName!==binding.spaceName || reuseControlBinding.profileId!==binding.profileId)) return null;
+  if(reuseControlBinding) {
+    const project=Object.entries(reg.projects||{}).find(([,record])=>record.bindings?.[account]===reuseControlBinding)?.[0];
+    if(!project) return null;
+    const opened=await openBoundTask(reg,project,account,{pauseOnUserControl:true,requireExistingSpace:true,
+      spaceOverride:{spaceName:binding.spaceName,spaceId:task.spaceId,profileId:binding.profileId}});
+    if(Number(opened.task.spaceId)!==Number(task.spaceId)) throw new Error("SPACE_ID_MISMATCH: "+binding.spaceName);
+    task=opened.task; binding=opened.binding;
+  }
   const rt=await loadRuntime();
+  const pages=await task.pages().catch(()=>[]), tabs=await task.tabs().catch(()=>[]);
   const liveTasks=Object.values(rt.tasks||{}).filter(item=>activeTaskStatus(item.status));
-  const hasLiveTasks=liveTasks.some(item=>{
+  const hasUnplacedLiveTasks=liveTasks.some(item=>{
     const chat=item.sessionId?reg.chats?.[item.sessionId]:null;
-    if(chat?.spaceName===binding.spaceName || (chat?.spaceId!=null && Number(chat.spaceId)===Number(task.spaceId))) return true;
-    const project=reg.projects?.[item.project];
-    const account=item.account||chat?.account||project?.activeAccount||reg.defaultAccount;
-    const taskBinding=project?.bindings?.[account];
-    return taskBinding?.spaceName===binding.spaceName ||
-      (taskBinding?.spaceId!=null && Number(taskBinding.spaceId)===Number(task.spaceId));
+    const taskBinding=projectBindingForTask(reg,item);
+    const identity=reg.accounts?.[account||binding.account]?.identity;
+    const liveAccount=item.account||chat?.account||reg.projects?.[item.project]?.activeAccount||reg.defaultAccount;
+    if(!chat?.page && identity && reg.accounts?.[liveAccount]?.identity===identity) return true;
+    if(!samePhysicalSpace(chat,binding,task) && !samePhysicalSpace(taskBinding,binding,task)) return false;
+    const targetProject=projectHomeId(taskBinding?.projectUrl);
+    return item.watchdogPausedForUserControl || !identity || reg.accounts?.[liveAccount]?.identity!==identity || reg.accounts?.[chat?.account]?.identity!==identity ||
+      !chat?.page || chat.id!==item.sessionId || chat.status!=="active" || chat.project!==item.project ||
+      Number(chat.spaceId)!==Number(task.spaceId) || chat.profileId!==binding.profileId || taskBinding?.profileId!==binding.profileId || !targetProject ||
+      !sameConversationUrl(tabs.find(tab=>tab.label===chat.page)?.url,chat.url,targetProject);
   });
-  if(hasLiveTasks) return null;
+  // Bound live pages remain protected below; an unplaced live task vetoes the Space.
+  if(hasUnplacedLiveTasks) return null;
 
   const protectedPages=new Set();
   for(const project of Object.values(reg.projects||{})) {
     for(const candidateBinding of Object.values(project.bindings||{})) {
       const sameSpace=candidateBinding?.spaceName===binding.spaceName ||
         (candidateBinding?.spaceId!=null && Number(candidateBinding.spaceId)===Number(task.spaceId));
-      if(sameSpace && candidateBinding?.controlPage) protectedPages.add(candidateBinding.controlPage);
+      if(sameSpace && candidateBinding?.controlPage && candidateBinding!==reuseControlBinding) protectedPages.add(candidateBinding.controlPage);
     }
   }
   for(const chat of Object.values(reg.chats||{})) {
@@ -644,21 +680,30 @@ async function reclaimOrphanManagedPage(reg, task, binding) {
     if(sameSpace && chat?.page) protectedPages.add(chat.page);
   }
 
-  const pages=await task.pages().catch(()=>[]);
-  const tabs=await task.tabs().catch(()=>[]);
-  for(const chat of Object.values(reg.chats||{})) if(samePhysicalSpace(chat,binding,task) && imageSessionOccupancy(reg,chat).occupied)
+  for(const chat of Object.values(reg.chats||{})) if(samePhysicalSpace(chat,binding,task))
     for(const tab of tabs) if(tab.label && sameConversationUrl(tab.url,chat.url)) protectedPages.add(tab.label);
   const candidates=orphanManagedPageCandidates(pages,tabs,{
     hasLiveTasks:false,
     protectedPageLabels:[...protectedPages],
   });
-  for(const page of candidates) {
-    const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) continue;
-    try {
-      await page.close();
-      return {page:page.label,reason:"orphan-managed"};
-    } catch {}
+  for(const page of candidates.filter(page=>{
+    const tab=tabs.find(t=>t.label===page.label);
+    if(reuseControlBinding) return page.label===reuseControlBinding.controlPage && !!projectHomeId(binding.projectUrl) &&
+      projectHomeId(tab?.url)===projectHomeId(binding.projectUrl);
+    return /^(about:blank|chrome:\/\/newtab\/?$)$/i.test(String(tab?.url||"")) ||
+      !!projectHomeId(binding.projectUrl) && projectHomeId(tab?.url)===projectHomeId(binding.projectUrl);
+  }).slice(0,1)) {
+    const tab=tabs.find(t=>t.label===page.label), blank=/^(about:blank|chrome:\/\/newtab\/?$)$/i.test(tab.url);
+    const snapshot=blank?null:await state(page).catch(()=>null);
+    if(!blank && (!snapshot || snapshot.approvalRequired!==false || snapshot.generating!==false || !composerIsEmpty(snapshot))) continue;
+    if(!blank && await page.url()!==tab.url) continue;
+    const context=coordinated("page-reclaim-context",{account:account||binding.account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
+    if(context.unboundAny || (blank?context.unboundProjectIds.length:context.unboundProjectIds.includes(projectHomeId(tab.url)))) continue;
+    const fresh=(await task.tabs()).find(t=>t.label===page.label);
+    if(!fresh || fresh.active || fresh.openedBy!=="agent" || fresh.url!==tab.url) continue;
+    if(reuseControlBinding) return {page:page.label,handle:page,reason:"control-home-reuse"};
+    await page.close();
+    return {page:page.label,reason:"orphan-managed"};
   }
   return null;
 }
@@ -712,7 +757,7 @@ async function newManagedPage(reg, project, account, task, binding, excludeChatI
   catch(error) {
     if(!pageBudgetError(error)) throw error;
     const reclaimed=await reclaimIdlePageSlot(reg,project,account,task,binding,excludeChatId) ||
-      await reclaimOrphanManagedPage(reg,task,binding);
+      await reclaimOrphanManagedPage(reg,task,binding,account);
     if(reclaimed) {
       try { const page=await task.newPage(); await clearCapacityWait(reg,account,binding); return page; }
       catch(errorAfterReclaim) { if(!pageBudgetError(errorAfterReclaim)) throw errorAfterReclaim; }
@@ -723,7 +768,15 @@ async function newManagedPage(reg, project, account, task, binding, excludeChatI
     if(options.allowOverflow && elapsedSec>=CAPACITY_OVERFLOW_AFTER_SEC) {
       try {
         const overflow=await overflowManagedTask(reg,project,account,binding);
-        const page=await overflow.task.newPage();
+        let page;
+        try { page=await overflow.task.newPage(); }
+        catch(error) {
+          if(!pageBudgetError(error)) throw error;
+          const reclaimed=await reclaimIdlePageSlot(reg,project,account,overflow.task,overflow.binding,excludeChatId) ||
+            await reclaimOrphanManagedPage(reg,overflow.task,overflow.binding,account);
+          if(!reclaimed) throw error;
+          page=await overflow.task.newPage();
+        }
         await clearCapacityWait(reg,account,binding);
         return {...overflow,page,overflow:true};
       } catch(overflowError) {
@@ -1323,6 +1376,17 @@ async function state(page, includeUserMessages=false, controlAction=null, includ
     const composerEl=document.querySelector(composerSelector);
     // textContent preserves draft whitespace; an empty ProseMirror <p><br></p> has no semantic text.
     const rawComposers=includeRawComposer?[...document.querySelectorAll(composerSelector)]:null;
+    let composerAttachmentsEmpty=null;
+    if(rawComposers?.length===1) try {
+      const draftForm=rawComposers[0].closest('form');
+      if(draftForm) {
+        const fileLists=[...document.querySelectorAll('input[type="file"]')].map(input=>input.files);
+        // Uploads can reset FileList while retaining a preview; disabled controls still protect drafts.
+        composerAttachmentsEmpty=fileLists.every(files=>files && Number.isSafeInteger(files.length) && files.length===0) &&
+          draftForm.querySelectorAll('button[aria-label^="Remove "], img, [data-testid="attachment-preview"]').length===0 &&
+          rawComposers[0].querySelectorAll('img, [contenteditable="false"]').length===0;
+      }
+    } catch {}
     const composer=!!composerEl;
     const composerText=(composerEl?.innerText||composerEl?.textContent||"").trim();
     const visibleButton=b=>{
@@ -1343,7 +1407,8 @@ async function state(page, includeUserMessages=false, controlAction=null, includ
       sendAvailable:!!send && !send.disabled && send.getAttribute('aria-disabled')!=='true',
       inputReady:composer && !stop,composerPresent:composer,composerText,recoveryControls,approvalRequired,
       ...(includeRawComposer?{composerCount:rawComposers.length,
-        composerRawText:rawComposers.length===1&&typeof rawComposers[0].textContent==="string"?rawComposers[0].textContent:null}:{}),
+        composerRawText:rawComposers.length===1&&typeof rawComposers[0].textContent==="string"?rawComposers[0].textContent:null,
+        composerAttachmentsEmpty}:{}),
       errorTexts:[...alerts,...knownErrors].filter((v,i,a)=>a.indexOf(v)===i),
       online:navigator.onLine,visibility:document.visibilityState,pageWasDiscarded:!!document.wasDiscarded,
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,
@@ -2658,9 +2723,11 @@ async function ensureProjectLocation(reg, projectName, account, options={}) {
   if(!accountRecord?.identity) return {ok:false,status:"NEEDS_LOGIN",project:projectName,account};
   const current=pr.bindings?.[account]||null;
   if(current?.projectUrl && bindingObserved(reg,account,current)) {
+    const {task,spaceName,profileId}=await accountManagedTask(reg,account,current?.profileId||null);
+    const binding={...current,spaceName,profileId,spaceId:task.spaceId};
+    const reused=current.controlPage?await reclaimOrphanManagedPage(reg,task,binding,account,current):null;
+    const page=reused?.handle||await newManagedPage(reg,projectName,account,task,binding);
     try {
-      const {task,spaceName,profileId}=await accountManagedTask(reg,account,current?.profileId||null);
-      const page=await newManagedPage(reg,projectName,account,task,{...current,spaceName,profileId,spaceId:task.spaceId});
       const url=await openProjectPage(page,projectName,current.projectUrl);
       current.spaceName=spaceName;
       current.profileId=profileId;
@@ -3058,6 +3125,7 @@ async function clearUserControlPause(chat) {
 }
 
 async function detachTerminalTaskPages(reg, project=null, account=null) {
+  if(typeof listTaskSpaces!=="function") return [];
   const graceSec=Math.max(30,Number(process.env.CHAT_BRIDGE_TERMINAL_TAB_GRACE_SEC||180)||180);
   const rt=await loadRuntime(), now=Date.now(), closed=[];
   const terminal=new Set(["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"]);
@@ -3066,76 +3134,81 @@ async function detachTerminalTaskPages(reg, project=null, account=null) {
     if(account && (taskRecord.account||reg.chats?.[taskRecord.sessionId]?.account)!==account) continue;
     if(!terminal.has(String(taskRecord.status||"").toUpperCase())) continue;
     if(taskRecord.watchdogPendingNotification || taskRecord.externalResponsePending) continue;
-    const updated=Date.parse(taskRecord.updatedAt||taskRecord.stateUpdatedAt||taskRecord.createdAt||0);
+    const updated=Date.parse(taskRecord.updatedAt||taskRecord.stateUpdatedAt||taskRecord.createdAt||"");
     if(!Number.isFinite(updated) || (now-updated)/1000<graceSec) continue;
     const chat=taskRecord.sessionId?reg.chats?.[taskRecord.sessionId]:null;
     if(!chat?.page || chat.status!=="active") continue;
+    if(taskRecord.project!==chat.project || (taskRecord.account && taskRecord.account!==chat.account)) continue;
     if(imageSessionOccupancy(reg,chat).occupied) continue;
-    const otherActive=Object.values(rt.tasks||{}).some(other=>other.taskId!==taskRecord.taskId &&
-      activeTaskStatus(other.status) && other.sessionId===chat.id);
-    if(otherActive) continue;
+    const otherUnsafe=Object.values(rt.tasks||{}).some(other=>{
+      if(other.taskId===taskRecord.taskId || other.sessionId!==chat.id) return false;
+      const updated=Date.parse(other.updatedAt||other.stateUpdatedAt||other.createdAt||"");
+      return activeTaskStatus(other.status) || !Number.isFinite(updated) || (now-updated)/1000<graceSec;
+    });
+    if(otherUnsafe) continue;
+    const configured=reg.projects?.[chat.project]?.bindings?.[chat.account];
+    const spaceOverride={spaceName:chat.spaceName,spaceId:chat.spaceId,profileId:chat.profileId||configured?.profileId||null};
+    if(!spaceOverride.spaceName || !Number.isSafeInteger(Number(spaceOverride.spaceId)) || Number(spaceOverride.spaceId)<=0 || !spaceOverride.profileId) continue;
     let opened;
-    try { opened=await openBoundTask(reg,chat.project,chat.account,{pauseOnUserControl:true}); }
+    try {
+      const available=await listTaskSpaces();
+      if(!available.some(space=>space.name===spaceOverride.spaceName && Number(space.id)===Number(spaceOverride.spaceId) &&
+        space.profileId===spaceOverride.profileId && space.ownership==="agent")) continue;
+      opened=await openBoundTask(reg,chat.project,chat.account,{pauseOnUserControl:true,spaceOverride,requireExistingSpace:true});
+    }
     catch { continue; }
-    let page;
-    try { page=opened.task.page(chat.page); } catch { continue; }
-    const tabs=await opened.task.tabs().catch(()=>[]);
-    const tab=tabs.find(item=>item.label===chat.page);
-    if(!tab || tab.active || tab.openedBy!=="agent") continue;
-    const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) continue;
-    const oldPage=chat.page;
-    if(imageSessionOccupancy(reg,chat).occupied) continue;
-    try { await page.close(); } catch { continue; }
-    chat.page=null;
-    chat.detachedAt=new Date().toISOString();
-    chat.attachmentEpoch=Number(chat.attachmentEpoch||0)+1;
-    closed.push({taskId:taskRecord.taskId,sessionId:chat.id,page:oldPage});
+    if(Number(opened.task.spaceId)!==Number(chat.spaceId)) continue;
+    const reclaimed=await reclaimIdlePageSlot(reg,chat.project,chat.account,opened.task,opened.binding,null,chat.id);
+    if(reclaimed) closed.push({taskId:taskRecord.taskId,sessionId:chat.id,page:reclaimed.page});
   }
-  if(closed.length) await saveRegistry(reg);
   return closed;
 }
 
 async function pruneManagedOrphanTabs(reg, project=null, account=null) {
   if(typeof listTaskSpaces!=="function") return [];
-  const runtime=await loadRuntime(), closed=[];
+  const closed=[];
   const identity=account?reg.accounts?.[account]?.identity:null;
   const sameAccount=alias=>!account || alias===account || (!!identity && reg.accounts?.[alias]?.identity===identity);
+  const available=await listTaskSpaces();
   const records=[];
   for(const [name,record] of Object.entries(reg.projects||{})) {
     if(project && name!==project) continue;
-    for(const [alias,binding] of Object.entries(record.bindings||{}))
-      if(sameAccount(alias)) records.push({...binding,account:alias});
+    for(const [alias,binding] of Object.entries(record.bindings||{})) {
+      if(!sameAccount(alias)) continue;
+      records.push({...binding,project:name,account:alias});
+      const identity=reg.accounts?.[alias]?.identity, overflow=reg.capacityOverflow?.[`${identity}|${binding.profileId}`];
+      const targets=overflow?available.filter(space=>space.name===overflow.spaceName):[];
+      if(identity && binding.profileId && overflow?.identity===identity && overflow.profileId===binding.profileId &&
+        Number.isSafeInteger(Number(overflow.spaceId)) && Number(overflow.spaceId)>0 && targets.length===1 &&
+        Number(targets[0].id)===Number(overflow.spaceId) && targets[0].profileId===binding.profileId &&
+        targets[0].ownership==="agent" && targets[0].createdBy==="agent") records.push({...binding,project:name,account:alias,
+          spaceName:overflow.spaceName,spaceId:overflow.spaceId,controlPage:null});
+    }
   }
   for(const chat of Object.values(reg.chats||{}))
-    if((!project || chat.project===project) && sameAccount(chat.account)) records.push(chat);
-  const spaces=(await listTaskSpaces()).filter(space=>space?.ownership==="agent" && space.createdBy==="agent" &&
-    String(space.name||"").startsWith("chat-bridge-agent-") && records.some(record=>
+    if((!project || chat.project===project) && sameAccount(chat.account)) records.push({
+      ...chat,projectUrl:reg.projects?.[chat.project]?.bindings?.[chat.account]?.projectUrl||null});
+  const spaces=available.filter(space=>space?.ownership==="agent" && space.createdBy==="agent" &&
+    String(space.name||"").startsWith("chat-bridge-agent-"));
+  for(const space of spaces) {
+    const scoped=records.filter(record=>
       record.spaceName===space.name && record.profileId===space.profileId && reg.accounts?.[record.account]?.identity && (
         record.spaceId!=null && Number(record.spaceId)===Number(space.id) ||
         Object.values(reg.spaces||{}).some(observed=>observed.name===space.name && Number(observed.spaceId)===Number(space.id) &&
           observed.profileId===space.profileId && observed.identity===reg.accounts[record.account].identity)
-      )));
-  for(const space of spaces) {
-    let task;
-    try { task=await taskSpace(space.id); } catch { continue; }
-    const pages=await pagesOf(task), tabs=await task.tabs().catch(()=>[]);
-    const binding={spaceName:space.name,spaceId:space.id};
-    const protection=spaceProtection(reg,runtime,binding,task,tabs);
-    for(const tab of tabs) if(tab.active&&tab.label) protection.labels.add(tab.label);
-    for(const chat of Object.values(reg.chats||{})) {
-      if(chat.page&&samePhysicalSpace(chat,binding,task)) protection.labels.add(chat.page);
-    }
-    for(const page of pages) {
-      if(!page?.label||protection.labels.has(page.label)) continue;
-      const tab=tabs.find(item=>item.label===page.label);
-      if(!tab||tab.active||tab.openedBy!=="agent") continue;
-      const emptyTab=/^(about:blank|chrome:\/\/newtab\/?$)/i.test(String(tab.url||""));
-      const snapshot=emptyTab?null:await state(page).catch(()=>null);
-      if(!emptyTab && (!snapshot||snapshot.approvalRequired===true||snapshot.generating||!composerIsEmpty(snapshot))) continue;
-      try { await page.close(); closed.push({spaceId:space.id,spaceName:space.name,page:page.label}); }
-      catch {}
-    }
+      ));
+    if(!scoped.length) continue;
+    const owner=scoped[0];
+    let opened;
+    try { opened=await openBoundTask(reg,owner.project,owner.account,{pauseOnUserControl:true,requireExistingSpace:true,
+      spaceOverride:{spaceName:space.name,spaceId:space.id,profileId:space.profileId}}); }
+    catch { continue; }
+    if(Number(opened.task.spaceId)!==Number(space.id)) continue;
+    const tabs=await opened.task.tabs().catch(()=>[]);
+    const record=scoped.find(item=>reg.accounts[item.account].identity===reg.accounts[owner.account].identity &&
+      projectHomeId(item.projectUrl) && tabs.some(tab=>projectHomeId(tab.url)===projectHomeId(item.projectUrl)))||owner;
+    const reclaimed=await reclaimOrphanManagedPage(reg,opened.task,{...opened.binding,projectUrl:record.projectUrl},owner.account);
+    if(reclaimed) closed.push({spaceId:space.id,spaceName:space.name,page:reclaimed.page});
   }
   return closed;
 }
@@ -3390,29 +3463,10 @@ async function pruneProjectSpace(reg, project, account=null) {
     if(!item) break;
     detached.push(item);
   }
-  const pages=await pagesOf(task), tabs=await task.tabs().catch(()=>[]);
+  const orphan=await reclaimOrphanManagedPage(reg,task,binding,a),closed=orphan?[orphan.page]:[];
+  const tabs=await task.tabs().catch(()=>[]);
   const protection=spaceProtection(reg,rt,binding,task,tabs);
   for(const tab of tabs) if(tab.active&&tab.label) protection.labels.add(tab.label);
-  const closed=[];
-  for(const page of pages) {
-    if(protection.labels.has(page.label)) continue;
-    const tab=tabs.find(item=>item.label===page.label);
-    if(!tab || tab.active || tab.openedBy!=="agent") continue;
-    const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) continue;
-    if(Object.values(reg.chats||{}).some(chat=>samePhysicalSpace(chat,binding,task) && (chat.page===page.label || sameConversationUrl(tab.url,chat.url)) && imageSessionOccupancy(reg,chat).occupied)) continue;
-    try { await page.close(); }
-    catch { continue; }
-    closed.push(page.label);
-    for(const chat of Object.values(reg.chats||{})) {
-      if(samePhysicalSpace(chat,binding,task) && chat.page===page.label) {
-        chat.page=null;
-        chat.detachedAt=new Date().toISOString();
-        chat.attachmentEpoch=Number(chat.attachmentEpoch||0)+1;
-      }
-    }
-  }
-  if(closed.length) await saveRegistry(reg);
   return {ok:true,project,account:a,spaceName:binding.spaceName,spaceId:task.spaceId,
     protected:[...protection.labels],detached,closed};
 }
@@ -3828,7 +3882,7 @@ else if(cmd==="space"){
     const a=accountArg||reg.defaultAccount||DEFAULT_ACCOUNT;
     print(await consolidateAccountSpace(reg,a,{confirm:args.includes("--confirm"),profileId:opt("profile",null)}));
   } else if(sub==="prune" && args.includes("--all")) {
-    print({ok:true,closed:await pruneManagedOrphanTabs(reg)});
+    print({ok:true,closed:await pruneManagedOrphanTabs(reg,project,accountArg)});
   } else {
     const p=project; if(!p) throw new Error("--project required");
     const a=activeAccount(reg,p,accountArg), b=bindingFor(reg,p,a,true);

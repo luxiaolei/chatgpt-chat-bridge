@@ -62,12 +62,14 @@ function fixture(change=()=>{}){
   const composer=new Element('DIV'),doc={content:{size:request.length},textBetween:()=>request};
   composer.pmViewDesc={node:doc};
   const editor={...new Function('T','return {'+getter+'};')({g:()=>request}),view:{dom:composer,state:{doc}},dictation:{document:doc},plainTextMode:false,markdownEditor:{serialize:()=>request}};
-  composer.parentElement={__reactFiber$editor:{memoizedProps:{onSubmit:new Function('return e=>{eg(j.getText(),e)}')()},memoizedState:{memoizedState:{deps:[null,editor]}}}};
+  const form=root.append(new Element('FORM'));form.append(composer);
+  form.__reactFiber$editor={memoizedProps:{onSubmit:new Function('return e=>{eg(j.getText(),e)}')()},memoizedState:{memoizedState:{deps:[null,editor]}}};
   const send=new Element('BUTTON',{'data-testid':'send-button'}), f={root,unit,bubble,outer,copy,frames,copyFrames,composer,editor,source:frames[14].memoizedProps,url:home,sends:0,polls:0,persisted:[],printed:[],closed:0,now:Date.now(),trace:[],skipTemporary:false};
   f.reg={accounts:{a:{identity:'verified-user'}},projects:{P:{activeAccount:'a',bindings:{a:{projectUrl:home,projectId:project}}}},chats:{}};
   f.binding=f.reg.projects.P.bindings.a;
   f.document={title:'Canary',visibilityState:'visible',body:root,querySelector(selector){
     if(selector==='main'||selector==='[role="main"]')return root;
+    if(selector==='form')return form;
     if(selector.includes('contenteditable="true"'))return composer;
     if(selector==='button[data-testid="send-button"]')return send;
     return null;
@@ -140,7 +142,7 @@ test('captured owned Copy chrome yields the nearest exact source tuple without c
 
 test('actual new → native getter → temporary source → permanent URL confirms once and registers only the permanent conversation',async()=>{
   const f=fixture();
-  await inBrowser(f,async({runNew})=>runNew());
+  await inBrowser(f,async({state,runNew})=>{assert.equal((await state(f.page)).composerAttachmentsEmpty,true);await runNew();});
   assert.equal(f.sends,1);assert.equal(f.persisted.length,1);assert.equal(f.closed,0);
   assert.deepEqual(Object.keys(f.reg.chats),[uuid]);
   assert.equal(f.reg.chats[uuid].status,'active');assert.equal(f.reg.chats[uuid].url,permanent);

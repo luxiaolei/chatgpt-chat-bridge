@@ -28,7 +28,7 @@ async function fixture(options={}) {
   r=>r.projects.P.bindings.a,async()=>{},()=>true,()=>{throw Error('Repair forbidden');},
   options.noInventory?undefined:async()=>structuredClone(inventory),SPACE_CATALOG,taskSpace,accounts,
   (r,a)=>r.accounts[a]?.identity||a,()=>{throw Error('Registry write forbidden');});
- let result,error;try{result=await open(reg,'P','a',{spaceOverride:override});}catch(e){error=e;}
+ let result,error;try{result=await open(reg,'P','a',{spaceOverride:override,requireExistingSpace:!!options.requireExistingSpace});}catch(e){error=e;}
  assert.deepEqual(reg,original,'canonical registry changed');
  return {result,error,calls,accounts};
 }
@@ -40,6 +40,9 @@ test('existing overflow reuse observes the exact ID and omits creation-only prof
 test('explicit missing overflow creation retains its requested profile',async()=>{
  const f=await fixture({inventory:[],expectedId:null});assert.ifError(f.error);
  assert.deepEqual(f.calls,[{target:name,creation:{profileId:'Profile 1'}}]);
+});
+test('cleanup refuses a vanished overflow without creating a replacement',async()=>{
+ const f=await fixture({inventory:[],requireExistingSpace:true});assert.match(f.error?.message||'',/SPACE_NOT_FOUND/);assert.deepEqual(f.calls,[]);
 });
 test('canonical existing-space behavior is unchanged',async()=>{
  const f=await fixture({canonical:true,inventory:[{id:7,name:'chat-bridge-agent-a',profileId:'Profile 1',ownership:'agent'}]});

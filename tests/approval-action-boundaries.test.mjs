@@ -49,7 +49,7 @@ test('approval during support inspection, fill or native witness prevents submit
       waitForTimeout:async()=>{},evaluate:async fn=>String(fn).includes("/api/auth/session")?"identity":false,press:async()=>f.calls.push('send-Enter')};
     const api=await build(f,`
       assertImagePageFree=async()=>{};
-      state=async()=>({url:f.chat.url,approvalRequired:f.approval,inputReady:true,generating:false,composerText:f.draft,composerCount:1,composerRawText:f.draft,userMessageIds:[]});
+      state=async()=>({url:f.chat.url,approvalRequired:f.approval,inputReady:true,generating:false,composerText:f.draft,composerCount:1,composerAttachmentsEmpty:true,composerRawText:f.draft,userMessageIds:[]});
       nativeSubmissionWitness=async(_page,_request,_identity,capabilityOnly=false)=>{if(f.phase===(capabilityOnly?'support':'witness'))f.approval=true;return null;};
       waitForDelivery=async()=>{throw new Error('PROBE_STOP_AFTER_REAL_TRIGGER');};
     `);

@@ -25,11 +25,12 @@ function node(text='',options={}) {
 }
 function fixture(change={}) {
   const composer=node(change.raw??''), root=node('',{root:true}), form=node(), send=node('Send',{attrs:{'data-testid':'send-button'}});
+  composer.closest=s=>s==='form'?form:null;
   if(change.unknownRaw)composer.textContent=undefined;
   const composers=change.count===0?[]:change.count===2?[composer,node('')]:[composer];
   const buttons=[send], calls=[], chat={id:'11111111-1111-4111-8111-111111111111',project:'P',account:'a',url,model:'Latest',effort:'High'};
   root.contains=n=>n===root||n===form||composers.includes(n)||buttons.includes(n);
-  form.querySelectorAll=()=>buttons;
+  form.querySelectorAll=s=>s==='button'?buttons:[];
   const f={composers,composer,root,buttons,calls,chat,currentUrl:url,login:change.nullLogin?null:change.login??'verified-user',change,closed:0,
     reg:{accounts:change.noIdentity?{}:{a:{identity:'verified-user'}},chats:{[chat.id]:chat},
       projects:{P:{activeAccount:'a',bindings:{a:{projectUrl:home}}}}}};
@@ -92,7 +93,7 @@ test('actual input entry points reject raw drafts and unverified fresh login bef
 test('semantic empty p/br allows one complete send and read-only state performs no login request',async()=>{
   const f=fixture();f.composer.innerText='\n'; // Empty paragraph/br has no semantic textContent.
   await run(f,async api=>{
-    const snapshot=await api.state(f.page);assert.equal(snapshot.composerText,'');assert.deepEqual(f.calls,[]);
+    const snapshot=await api.state(f.page);assert.equal(snapshot.composerText,'');assert.equal(snapshot.composerAttachmentsEmpty,true);assert.deepEqual(f.calls,[]);
     const receipt=await api.send();assert.equal(receipt.delivered,true);assert.equal(receipt.lastUserId,'new-user');
   });
   assert.equal(f.calls.filter(x=>x==='fill').length,1);assert.equal(f.calls.filter(x=>x==='send').length,1);

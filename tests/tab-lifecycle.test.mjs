@@ -1,89 +1,46 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
+import {readFile} from "node:fs/promises";
+for(const name of ["control-routing","page-pool","liveness-policy","task-policy","web-policy","model-policy","session-policy"]) await import(`../src/${name}.js`);
+const source=await readFile(new URL("../src/main.js",import.meta.url),"utf8"),prefix=source.split('const cmd=args[0] || "help";')[0];
+const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+const cid="11111111-1111-4111-8111-111111111111",home="https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project";
+async function fixture(status="RESULT_RECORDED",tab={},snapshot={}) {
+  const chat={id:cid,project:"P",account:"a",status:"active",spaceName:"managed",spaceId:7,profileId:"P1",page:"p1",attachmentEpoch:1,url:home.replace(/project$/,"c/"+cid)};
+  const binding={spaceName:"managed",spaceId:7,profileId:"P1",projectUrl:home};
+  const f={chat,reg:{accounts:{a:{identity:"login-a"}},chats:{[cid]:chat},projects:{P:{bindings:{a:binding}}}},binding,saved:0,closed:0,
+    runtime:{tasks:{t1:{taskId:"t1",project:"P",account:"a",sessionId:cid,status,updatedAt:"2020-01-01T00:00:00Z"}}},
+    tab:{label:"p1",url:chat.url,active:false,openedBy:"agent",...tab},snapshot:{approvalRequired:false,generating:false,composerCount:1,composerAttachmentsEmpty:true,composerRawText:"",...snapshot}};
+  const detach=await new AsyncFunction("f",prefix+`
+    loadRuntime=async()=>f.runtime;
+    saveRegistry=async()=>{f.saved++;};
+    imageSessionOccupancy=()=>({occupied:false});
+    state=async()=>f.snapshot;
+    listTaskSpaces=async()=>[{id:7,name:'managed',profileId:'P1',ownership:'agent'}];
+    coordinated=command=>{if(command!=='page-reclaim-context')throw Error(command);return {sessionRefs:[],unboundProjectIds:[],unboundAny:false};};
+    openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,tabs:async()=>[f.tab],page:()=>({url:async()=>f.tab.url,close:async()=>{f.closed++;}})}});
+    return detachTerminalTaskPages;
+  `)(f);
+  f.out=await detach(f.reg,"P","a");return f;
+}
 
-import "../src/task-policy.js";
-const source=await readFile(path.resolve("src/main.js"),"utf8");
-
-test("terminal RESULT_RECORDED task detaches only safe inactive agent page after grace", async()=>{
-  const begin=source.indexOf("async function detachTerminalTaskPages");
-  const end=source.indexOf("\nasync function watchOnce",begin);
-  assert.ok(begin>=0&&end>begin);
-  const code='const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(begin,end);
-  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
-  let saved=0,closed=0;
-  const chat={id:"worker",project:"P",account:"a",status:"active",spaceName:"managed",spaceId:7,page:"p1",attachmentEpoch:1};
-  const reg={chats:{worker:chat},projects:{P:{activeAccount:"a",bindings:{a:{spaceName:"managed",spaceId:7}}}},defaultAccount:"a"};
-  const runtime={tasks:{t1:{taskId:"t1",project:"P",account:"a",sessionId:"worker",status:"RESULT_RECORDED",updatedAt:"2020-01-01T00:00:00Z"}}};
-  const page={close:async()=>{closed++}};
-  const task={spaceId:7,page:label=>{assert.equal(label,"p1");return page},tabs:async()=>[{label:"p1",active:false,openedBy:"agent"}]};
-  const detach=await new AsyncFunction("process","loadRuntime","activeTaskStatus","openBoundTask","state","saveRegistry","imageSessionOccupancy",
-    code+";return detachTerminalTaskPages;")(
-      {env:{CHAT_BRIDGE_TERMINAL_TAB_GRACE_SEC:"30"}},
-      async()=>runtime,
-      status=>!["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"].includes(String(status).toUpperCase()),
-      async()=>({task,binding:{spaceName:"managed",spaceId:7}}),
-      async()=>({generating:false,composerText:"",composerCount:1,composerRawText:""}),
-      async()=>{saved++},()=>({occupied:false})
-    );
-  const out=await detach(reg,"P","a");
-  assert.equal(out.length,1);assert.equal(closed,1);assert.equal(saved,1);
-  assert.equal(chat.page,null);assert.equal(chat.attachmentEpoch,2);
+test("terminal RESULT_RECORDED task detaches only safe inactive agent page after grace",async()=>{
+  const f=await fixture();assert.equal(f.out.length,1);assert.equal(f.closed,1);assert.equal(f.saved,1);assert.equal(f.chat.page,null);assert.equal(f.chat.attachmentEpoch,2);
 });
 
-test("settled BLOCKED task detaches a safe inactive agent page after grace", async()=>{
-  const begin=source.indexOf("async function detachTerminalTaskPages");
-  const end=source.indexOf("\nasync function watchOnce",begin);
-  const code='const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(begin,end);
-  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
-  let saved=0,closed=0;
-  const chat={id:"worker",project:"P",account:"a",status:"active",spaceName:"managed",spaceId:7,page:"p1",attachmentEpoch:1};
-  const reg={chats:{worker:chat},projects:{P:{activeAccount:"a",bindings:{a:{spaceName:"managed",spaceId:7}}}},defaultAccount:"a"};
-  const runtime={tasks:{t1:{taskId:"t1",project:"P",account:"a",sessionId:"worker",status:"BLOCKED",updatedAt:"2020-01-01T00:00:00Z"}}};
-  const page={close:async()=>{closed++}};
-  const task={spaceId:7,page:()=>page,tabs:async()=>[{label:"p1",active:false,openedBy:"agent"}]};
-  const detach=await new AsyncFunction("process","loadRuntime","activeTaskStatus","openBoundTask","state","saveRegistry","imageSessionOccupancy",
-    code+";return detachTerminalTaskPages;")(
-      {env:{CHAT_BRIDGE_TERMINAL_TAB_GRACE_SEC:"30"}},async()=>runtime,
-      status=>!["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"].includes(String(status).toUpperCase()),
-      async()=>({task,binding:{spaceName:"managed",spaceId:7}}),async()=>({generating:false,composerText:"",composerCount:1,composerRawText:""}),async()=>{saved++},()=>({occupied:false})
-    );
-  const out=await detach(reg,"P","a");
-  assert.equal(out.length,1);assert.equal(closed,1);assert.equal(saved,1);
-  assert.equal(chat.page,null);
+test("BLOCKED task remains attached without a recorded terminal result",async()=>{
+  const f=await fixture("BLOCKED");assert.deepEqual(f.out,[]);assert.equal(f.closed,0);assert.equal(f.saved,0);assert.equal(f.chat.page,"p1");
 });
 
-test("terminal detach preserves active tab, user/unmanaged page, draft and generating page", async()=>{
-  const begin=source.indexOf("async function detachTerminalTaskPages");
-  const end=source.indexOf("\nasync function watchOnce",begin);
-  const code='const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(begin,end);
-  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
-  for(const scenario of [
-    {tab:{label:"p1",active:true,openedBy:"agent"},snap:{generating:false,composerText:"",composerCount:1,composerRawText:""}},
-    {tab:{label:"p1",active:false,openedBy:"user"},snap:{generating:false,composerText:"",composerCount:1,composerRawText:""}},
-    {tab:{label:"p1",active:false,openedBy:"agent"},snap:{generating:true,composerText:""}},
-    {tab:{label:"p1",active:false,openedBy:"agent"},snap:{generating:false,composerText:"draft",composerCount:1,composerRawText:"draft"}},
-    ...[" ","\t","\n","\u00a0"].map(raw=>({tab:{label:"p1",active:false,openedBy:"agent"},snap:{generating:false,composerText:"",composerCount:1,composerRawText:raw}})),
-    ...[{}, {composerCount:0,composerRawText:null}, {composerCount:2,composerRawText:null}].map(raw=>({tab:{label:"p1",active:false,openedBy:"agent"},snap:{generating:false,composerText:"",...raw}})),
-  ]){
-    let closed=0;
-    const chat={id:"worker",project:"P",account:"a",status:"active",spaceName:"managed",spaceId:7,page:"p1"};
-    const reg={chats:{worker:chat},projects:{P:{activeAccount:"a",bindings:{a:{spaceName:"managed",spaceId:7}}}},defaultAccount:"a"};
-    const runtime={tasks:{t1:{taskId:"t1",project:"P",account:"a",sessionId:"worker",status:"RESULT_RECORDED",updatedAt:"2020-01-01T00:00:00Z"}}};
-    const page={close:async()=>{closed++}};
-    const task={spaceId:7,page:()=>page,tabs:async()=>[scenario.tab]};
-    const detach=await new AsyncFunction("process","loadRuntime","activeTaskStatus","openBoundTask","state","saveRegistry","imageSessionOccupancy",
-      code+";return detachTerminalTaskPages;")(
-        {env:{CHAT_BRIDGE_TERMINAL_TAB_GRACE_SEC:"30"}},async()=>runtime,
-        status=>!["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"].includes(String(status).toUpperCase()),
-        async()=>({task,binding:{spaceName:"managed",spaceId:7}}),async()=>scenario.snap,async()=>{},()=>({occupied:false})
-      );
-    assert.deepEqual(await detach(reg,"P","a"),[]);assert.equal(closed,0);assert.equal(chat.page,"p1");
-  }
+test("terminal detach preserves active tab, user/unmanaged page, draft and generating page",async()=>{
+  for(const [tab,snapshot] of [
+    [{active:true},{}],[{openedBy:"user"},{}],[{},{generating:true}],[{},{composerRawText:"draft"}],
+    ...[" ","\t","\n","\u00a0"].map(raw=>[{}, {composerRawText:raw}]),
+    ...[{composerCount:undefined,composerRawText:undefined},{composerCount:0,composerRawText:null},{composerCount:2,composerRawText:null}].map(raw=>[{},raw])
+  ]){const f=await fixture("RESULT_RECORDED",tab,snapshot);assert.deepEqual(f.out,[]);assert.equal(f.closed,0);assert.equal(f.chat.page,"p1");}
 });
 
-test("background send does not clear user-control pause and requests hard Space protection", ()=>{
+test("background send does not clear user-control pause and requests hard Space protection",()=>{
   assert.match(source,/const background=args\.includes\("--background"\)/);
   assert.match(source,/&& !background\) await clearUserControlPause\(chat\)/);
   assert.match(source,/ensurePage\(reg,chat,\{pauseOnUserControl:background\}\)/);

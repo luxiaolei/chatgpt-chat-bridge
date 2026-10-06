@@ -5,12 +5,13 @@ const source=await readFile(new URL("../src/main.js",import.meta.url),"utf8");
 const begin=source.indexOf("async function pruneManagedOrphanTabs");
 const end=source.indexOf("\nasync function watchOnce",begin);
 const code=source.slice(begin,end);
+const projectHomeId=new Function(source.slice(source.indexOf("function projectHomeId("),source.indexOf("\nfunction projectKey("))+";return projectHomeId;")();
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 async function fixture(reg,spaces,account="a") {
  const visited=[];
- const prune=await new AsyncFunction("listTaskSpaces","loadRuntime","taskSpace","pagesOf","spaceProtection","samePhysicalSpace","state",code+";return pruneManagedOrphanTabs;")(
-   async()=>spaces,async()=>({tasks:{}}),async id=>{visited.push(id);return {tabs:async()=>[]};},
-   async()=>[],()=>({labels:new Set()}),()=>false,async()=>({generating:false,composerText:""}));
+ const prune=await new AsyncFunction("listTaskSpaces","loadRuntime","openBoundTask","pagesOf","spaceProtection","samePhysicalSpace","state","reclaimOrphanManagedPage","projectHomeId",code+";return pruneManagedOrphanTabs;")(
+   async()=>spaces,async()=>({tasks:{}}),async(_r,_p,_a,options)=>{visited.push(options.spaceOverride.spaceId);return {binding:options.spaceOverride,task:{spaceId:options.spaceOverride.spaceId,tabs:async()=>[]}};},
+   async()=>[],()=>({labels:new Set()}),()=>false,async()=>({generating:false,composerText:""}),async()=>null,projectHomeId);
  await prune(reg,null,account);return visited;
 }
 
@@ -41,4 +42,19 @@ test("state-store failures defer watchdog work without marking the worker failed
    return {result,writes};
  `)();
  assert.equal(run.writes,0);assert.equal(run.result[0].state,"STATE_STORE_DEFERRED");
+});
+
+test("actual space prune --all CLI retains existing Project and account filters",async()=>{
+ const opt=source.slice(source.indexOf("function opt("),source.indexOf("\nfunction boolValue("));
+ const start=source.indexOf('else if(cmd==="space"){'),end=source.indexOf('\nelse if(',start+1),branch=source.slice(start,end);
+ const calls=[],output=[];
+ await new AsyncFunction("args","reg","pruneManagedOrphanTabs","print",opt+
+   'const project=opt("project"),accountArg=opt("account"),cmd=args[0];if(false){}'+branch)(
+     ["space","prune","--all","--project","P","--account","a"],{},async(_r,p,a)=>{calls.push([p,a]);return [];},value=>output.push(value));
+ assert.deepEqual(calls,[["P","a"]]);assert.deepEqual(output,[{ok:true,closed:[]}]);
+ calls.length=0;
+ await new AsyncFunction("args","reg","pruneManagedOrphanTabs","print",opt+
+   'const project=opt("project"),accountArg=opt("account"),cmd=args[0];if(false){}'+branch)(
+     ["space","prune","--all"],{},async(_r,p,a)=>{calls.push([p,a]);return [];},()=>{});
+ assert.deepEqual(calls,[[null,null]]);
 });
