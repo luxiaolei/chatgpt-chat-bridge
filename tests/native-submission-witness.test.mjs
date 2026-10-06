@@ -9,7 +9,7 @@ const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const helper=source.slice(source.indexOf('async function nativeSubmissionWitness('),source.indexOf('\nasync function sendMessage('));
 const getter='getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,T.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}';
 const prepare=new AsyncFunction('crypto','COMPOSER_SELECTOR','normalizedEvidenceText',helper+';return nativeSubmissionWitness;')(crypto,'composer',v=>v.replace(/\s+/g,' ').trim());
-async function inspect(change=()=>{}) {
+async function inspect(change=()=>{},capabilityOnly=false) {
  const doc={content:{size:fixture.request.length},textBetween:()=>fixture.request};
  const composer={pmViewDesc:{node:doc},parentElement:null};
  const editor={...new Function('T','return {'+getter+'};')({g:()=>fixture.body}),view:{dom:composer,state:{doc}},dictation:{document:doc},plainTextMode:false,markdownEditor:{serialize:()=>fixture.body}};
@@ -22,7 +22,7 @@ async function inspect(change=()=>{}) {
  Object.defineProperty(globalThis,'document',{configurable:true,value:{querySelectorAll:()=>env.composers}});
  Object.defineProperty(globalThis,'location',{configurable:true,value:{href:'https://chatgpt.com/c/11111111-1111-4111-8111-111111111111'}});
  Object.defineProperty(globalThis,'fetch',{configurable:true,value:async()=>({json:async()=>({user:{email:env.email,id:env.id}})})});
- return await (await prepare)({evaluate:async(fn,args)=>fn(args)},env.request,env.identity);
+ return await (await prepare)({evaluate:async(fn,args)=>fn(args)},env.request,env.identity,capabilityOnly);
  } finally {for(const [k,d] of prior){if(d)Object.defineProperty(globalThis,k,d);else delete globalThis[k];}}
 }
 test('native getter requires unique composer/doc, verified account and exact characterized submit path',async()=>{
@@ -174,6 +174,21 @@ const configureLiveAlias=({host,editor})=>{
  host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+liveAliasFormat.submit)();
  editor.getText=new Function('M','return {'+liveAliasFormat.getter+'};')({g:()=>fixture.body}).getText;
 };
+const configureWmAlias=context=>{
+ configureLiveAlias(context);
+ context.host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return e=>up(rS.getText(),e)')();
+};
+test('captured WM rS submit retains the exact M getter for support inspection and full body verification',async()=>{
+ const witness=await inspect(configureWmAlias);
+ assert.equal(witness.body,fixture.body);
+ assert.equal(witness.getterSource,currentFormat.getter);
+ assert.deepEqual(await inspect(configureWmAlias,true),{supported:true});
+ for(const submit of ['e=>up(OTHER.getText(),e)','e=>uh(rS.getText(),e)','e=>up(rS.getText().trim(),e)'])
+  await assert.rejects(inspect(context=>{
+   configureWmAlias(context);
+   context.host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+submit)();
+  }),/NATIVE_SUBMISSION_UNVERIFIED/);
+});
 test('observed uh/rE submit alias retains the exact M getter and deduplicates one editor',async()=>{
  assert.equal(liveAliasFormat.getter,currentFormat.getter);
  assert.equal(crypto.createHash('sha256').update(liveAliasFormat.getter).digest('hex'),liveAliasFormat.getterSha256);
@@ -199,7 +214,8 @@ test('observed submit alias rejects mixed methods, nonunique editors, wrong docs
   ({host,editor})=>host.__reactFiber$fixture.memoizedState.memoizedState.deps.push({...editor}),
   ({env})=>env.request+=' changed footer',
   ({env})=>env.email='other@example.test',
- ]) await assert.rejects(inspect(context=>{configureLiveAlias(context);change(context);}),/NATIVE_SUBMISSION_UNVERIFIED/);
+ ]) for(const configure of [configureLiveAlias,configureWmAlias])
+  await assert.rejects(inspect(context=>{configure(context);change(context);}),/NATIVE_SUBMISSION_UNVERIFIED/);
 });
 
 test('unknown UI format reports an explicit bounded adapter diagnostic before Send',async()=>{
@@ -208,4 +224,25 @@ test('unknown UI format reports an explicit bounded adapter diagnostic before Se
   assert.deepEqual(error.nativeAdapter,{formatVersion:'chatgpt-native-adapter-v1',phase:'FORMAT',status:'UNSUPPORTED'});
   return true;
  });
+});
+
+test('native support can be checked before input without reading a body and retains exact binding guards',async()=>{
+ const empty=context=>{
+  context.env.request=null;
+  context.doc.content.size=0;
+  context.doc.textBetween=()=>{throw new Error('body must not be read');};
+  context.editor.getText=new Function('T','return {'+getter+'};')({g:()=>{throw new Error('getter must not be invoked');}}).getText;
+ };
+ assert.deepEqual(await inspect(empty,true),{supported:true});
+ for(const change of [
+  ({host})=>host.__reactFiber$fixture.memoizedProps.onSubmit=()=>{},
+  ({editor})=>editor.getText=()=>'',
+  ({editor})=>editor.view.dom={},
+  ({editor})=>editor.dictation.document={},
+  ({editor})=>editor.view.state.doc={},
+  ({editor})=>editor.markdownEditor.serialize=null,
+  ({env})=>env.email='other@example.test',
+  ({env})=>env.composers.push({}),
+  ({host,editor})=>host.__reactFiber$fixture.memoizedState.memoizedState.deps.push({...editor}),
+ ]) await assert.rejects(inspect(context=>{empty(context);change(context);},true),/NATIVE_SUBMISSION_UNVERIFIED/);
 });

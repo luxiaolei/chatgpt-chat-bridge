@@ -1719,10 +1719,10 @@ async function closeEmptyPage(page) {
   return page.close().then(()=>true).catch(()=>false);
 }
 
-async function nativeSubmissionWitness(page, request, expectedIdentity) {
+async function nativeSubmissionWitness(page, request, expectedIdentity, capabilityOnly=false) {
   let witness;
   try {
-    witness=await page.evaluate(nativeSubmissionProbe,{selector:COMPOSER_SELECTOR,request,expectedIdentity});
+    witness=await page.evaluate(nativeSubmissionProbe,{selector:COMPOSER_SELECTOR,request,expectedIdentity,capabilityOnly});
   } catch(error) {
     if(String(error?.message||error).includes('NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED:')) {
       error.code='NATIVE_SUBMISSION_UNSUPPORTED';
@@ -1730,7 +1730,7 @@ async function nativeSubmissionWitness(page, request, expectedIdentity) {
     }
     throw error;
   }
-  if(witness) {
+  if(witness && capabilityOnly!==true) {
     witness.requestHash=crypto.createHash('sha256').update(normalizedEvidenceText(request)).digest('hex');
     witness.bodyHash=crypto.createHash('sha256').update(witness.body).digest('hex');
   }
@@ -1738,7 +1738,7 @@ async function nativeSubmissionWitness(page, request, expectedIdentity) {
 }
 
 // Volatile UI formats live in one closed browser probe; no generic alias matching.
-async function nativeSubmissionProbe({selector,request,expectedIdentity}) {
+async function nativeSubmissionProbe({selector,request,expectedIdentity,capabilityOnly=false}) {
     const fail=()=>{throw new Error('NATIVE_SUBMISSION_UNVERIFIED');};
     const composers=[...document.querySelectorAll(selector)];
     if(composers.length!==1) return fail();
@@ -1761,7 +1761,7 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity}) {
     for(let i=0;fiber&&i<16;i++,fiber=fiber.return) {
       const submit=String(fiber.memoizedProps?.onSubmit);
       const format=formats.find(value=>submit===value.submit ||
-        (value.submit==='e=>up(rT.getText(),e)' && submit==='e=>uh(rE.getText(),e)') ||
+        (value.submit==='e=>up(rT.getText(),e)' && ['e=>uh(rE.getText(),e)','e=>up(rS.getText(),e)'].includes(submit)) ||
         (value.persistedText && submit==='e=>{ev(F.getText(),e)}'));
       if(!format) continue;
       formatRecognized=true;
@@ -1779,8 +1779,9 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity}) {
       }
     }
     if(!formatRecognized) throw new Error('NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED:chatgpt-native-adapter-v1:FORMAT');
-    if(candidates.size!==1 || typeof doc.textBetween!=='function' ||
-      doc.textBetween(0,doc.content.size,'\n').replace(/\s+/g,' ').trim()!==request.replace(/\s+/g,' ').trim()) return fail();
+    if(candidates.size!==1 || typeof doc.textBetween!=='function') return fail();
+    if(capabilityOnly===true) return {supported:true};
+    if(doc.textBetween(0,doc.content.size,'\n').replace(/\s+/g,' ').trim()!==request.replace(/\s+/g,' ').trim()) return fail();
     const editor=[...candidates][0], body=editor.getText();
     if(typeof body!=='string' || !body || editor.view.state.doc!==doc ||
       editor.dictation.document!==doc || composer.pmViewDesc.node!==doc) return fail();
@@ -1799,6 +1800,8 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
     if(targetUrl) assertInputTarget(before,targetUrl);
     const inputTarget=before.url;
     const identity=await assertInputSafe(page,expectedIdentity,inputTarget);
+    await nativeSubmissionWitness(page,null,identity,true);
+    await assertInputSafe(page,identity,inputTarget);
     before.expectedMessage=msg; before.targetUrl=targetUrl||before.url;
     await recordDeliveryStage("BEFORE_INPUT",{snapshot:deliveryStageSnapshot(before,page),targetUrl:before.targetUrl},msg);
     try { await page.fill(COMPOSER_SELECTOR,msg); }
