@@ -374,5 +374,8 @@ if __name__ == "__main__":
     try:
         run(sys.argv[1], pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), sys.argv[4:])
     except (ValueError, TypeError, KeyError, OSError, subprocess.CalledProcessError) as error:
-        print(json.dumps({"ok": False, "status": "LOCAL_STATE_ERROR", "error": str(error)}), file=sys.stderr)
+        payload = {"ok": False, "status": "LOCAL_STATE_ERROR", "error": str(error)}
+        if sys.argv[1] in {"origin-account", "origin", "unambiguous", "gate", "scope", "watch", "status", "clear"}:
+            payload.update(deliveryStage="PRE_SEND", code="LOCAL_STATE_ERROR")
+        print(json.dumps(payload), file=sys.stderr)
         sys.exit(2)
