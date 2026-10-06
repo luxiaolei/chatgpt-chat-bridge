@@ -190,7 +190,7 @@ test("terminal detach keeps an approval page attached and resumes normal cleanup
   const chat={id:cid,project:"P",account:"a",status:"active",spaceName:"managed",spaceId:7,profileId:"P1",page:"p1",url:home.replace(/project$/,"c/"+cid)};
   const binding={spaceName:"managed",spaceId:7,profileId:"P1",projectUrl:home};
   const f={detach:true,chat,binding,runtime:{tasks:{T:{taskId:"T",project:"P",account:"a",sessionId:cid,status:"RESULT_RECORDED",updatedAt:"2020-01-01T00:00:00Z"}},sessions:{},projects:{}},
-    raw:{approvalRequired:true,generating:false,composerText:"",composerCount:1,composerRawText:""}};
+    raw:{approvalRequired:true,generating:false,composerText:"",composerCount:1,composerAttachmentsEmpty:true,composerRawText:""}};
   const api=await harness(f), reg={accounts:{a:{identity:"login-a"}},projects:{P:{bindings:{a:binding}}},chats:{[cid]:chat}};
   assert.deepEqual(await api.detachTerminalTaskPages(reg),[]);
   assert.equal(chat.page,"p1");

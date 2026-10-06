@@ -13,7 +13,7 @@ const code='const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+s
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 
 async function run(snapshot) {
-  snapshot={approvalRequired:false,composerCount:1,composerRawText:snapshot.composerText,...snapshot};
+  snapshot={approvalRequired:false,composerCount:1,composerAttachmentsEmpty:true,composerRawText:snapshot.composerText,...snapshot};
   let closed=0;
   const home="https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project";
   const page={label:"p1",url:async()=>home,close:async()=>{closed++}};

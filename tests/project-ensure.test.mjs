@@ -224,7 +224,7 @@ test("repeated ensure reuses only its safe inactive control home without retaini
       imageSessionOccupancy=()=>({occupied:false});bindingObserved=()=>true;
       saveRegistry=async()=>{f.saved++;};
       coordinated=command=>{if(command!=='page-reclaim-context')throw Error(command);return {sessionRefs:[],unboundProjectIds:f.unsafe==='unbound-Project'?['g-p-'+ 'a'.repeat(32)]:[],unboundAny:f.unsafe==='UNKNOWN'};};
-      state=async()=>({approvalRequired:f.unsafe==='approval',generating:f.unsafe==='generating',composerCount:1,composerRawText:f.unsafe==='draft'?'keep human draft':''});
+      state=async()=>({approvalRequired:f.unsafe==='approval',generating:f.unsafe==='generating',composerCount:1,composerAttachmentsEmpty:true,composerRawText:f.unsafe==='draft'?'keep human draft':''});
       const url=f.unsafe==='wrong-Project'?home.replace('a'.repeat(32),'b'.repeat(32)):home;
       const pages=[{label:'p1',url:async()=>url,close:async()=>{f.closes++;}}];let reads=0;
       const task={spaceId:f.unsafe==='wrong-Space'?9:7,pages:async()=>pages,tabs:async()=>{const fresh=reads++>0;return pages.map(p=>({label:p.label,url:p.label==='p1'?url:home,active:p.label==='p1'&&(f.unsafe==='active'||f.unsafe==='fresh-active'&&fresh),openedBy:f.unsafe==='user'?'user':'agent'}));},newPage:async()=>{const label='p'+(++f.allocations+1);f.retained.push(label);const p={label,url:async()=>home,close:async()=>{f.closes++;}};pages.push(p);return p;}};

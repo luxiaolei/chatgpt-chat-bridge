@@ -10,7 +10,7 @@ async function fixture(status="RESULT_RECORDED",tab={},snapshot={}) {
   const binding={spaceName:"managed",spaceId:7,profileId:"P1",projectUrl:home};
   const f={chat,reg:{accounts:{a:{identity:"login-a"}},chats:{[cid]:chat},projects:{P:{bindings:{a:binding}}}},binding,saved:0,closed:0,
     runtime:{tasks:{t1:{taskId:"t1",project:"P",account:"a",sessionId:cid,status,updatedAt:"2020-01-01T00:00:00Z"}}},
-    tab:{label:"p1",url:chat.url,active:false,openedBy:"agent",...tab},snapshot:{approvalRequired:false,generating:false,composerCount:1,composerRawText:"",...snapshot}};
+    tab:{label:"p1",url:chat.url,active:false,openedBy:"agent",...tab},snapshot:{approvalRequired:false,generating:false,composerCount:1,composerAttachmentsEmpty:true,composerRawText:"",...snapshot}};
   const detach=await new AsyncFunction("f",prefix+`
     loadRuntime=async()=>f.runtime;
     saveRegistry=async()=>{f.saved++;};

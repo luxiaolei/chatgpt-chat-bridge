@@ -11,7 +11,7 @@ const project='g-p-'+'1'.repeat(32),otherProject='g-p-'+'2'.repeat(32);
 const conversation='11111111-1111-4111-8111-111111111111';
 const url=`https://chatgpt.com/g/${project}/c/${conversation}`;
 const message='This exact request\nwith its complete footer.';
-const before={url,messageCount:4,lastUser:'old message',lastUserId:'old-user',userMessageIds:['earlier-user','old-user'],composerText:'',composerCount:1,composerRawText:'',inputReady:true};
+const before={url,messageCount:4,lastUser:'old message',lastUserId:'old-user',userMessageIds:['earlier-user','old-user'],composerText:'',composerCount:1,composerAttachmentsEmpty:true,composerRawText:'',inputReady:true};
 const after={...before,messageCount:5,lastUser:message,lastUserId:'new-user',composerText:''};
 
 async function harness(f={}) {

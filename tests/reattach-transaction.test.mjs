@@ -143,7 +143,7 @@ test('confirmed controller UI path never retries/sends/resumes and rejects draft
     async()=>({spaceId:9,tabs:async()=>tabs,page:()=>page,newPage:async()=>{actions++;throw Error('unexpected allocation');}}),
     new Map(),()=> 'login-a',(x,y)=>x===y,async()=>{actions++;throw Error('unexpected Retry-capable readiness');},
     ()=> 'g-p-'+ 'a'.repeat(32),async()=>snapshot,async()=>{actions++;throw Error('unexpected observe/resume');},async()=>{actions++;throw Error('unexpected event');});
-  const reset=()=>{snapshot={composerPresent:true,composerText:'',composerCount:1,composerRawText:'',errorTexts:[],approvalRequired:false,generating:false};commits=reads=actions=0;stale=false;
+  const reset=()=>{snapshot={composerPresent:true,composerText:'',composerCount:1,composerAttachmentsEmpty:true,composerRawText:'',errorTexts:[],approvalRequired:false,generating:false};commits=reads=actions=0;stale=false;
     tabs=[{url:chat.url,label:'p7',openedBy:'agent'}];info={id:9,name:binding.spaceName,profileId:'P1',ownership:'agent',createdBy:'agent'};};
   reset();const placed=await api(reg,chat,null,{confirm:true,currentController:true});
   assert.equal(placed.messageSent,false);assert.equal(placed.resumeWatch,false);assert.equal(commits,1);assert.equal(actions,0);

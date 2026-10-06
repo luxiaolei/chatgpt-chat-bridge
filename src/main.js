@@ -1376,6 +1376,17 @@ async function state(page, includeUserMessages=false, controlAction=null, includ
     const composerEl=document.querySelector(composerSelector);
     // textContent preserves draft whitespace; an empty ProseMirror <p><br></p> has no semantic text.
     const rawComposers=includeRawComposer?[...document.querySelectorAll(composerSelector)]:null;
+    let composerAttachmentsEmpty=null;
+    if(rawComposers?.length===1) try {
+      const draftForm=rawComposers[0].closest('form');
+      if(draftForm) {
+        const fileLists=[...document.querySelectorAll('input[type="file"]')].map(input=>input.files);
+        // Uploads can reset FileList while retaining a preview; disabled controls still protect drafts.
+        composerAttachmentsEmpty=fileLists.every(files=>files && Number.isSafeInteger(files.length) && files.length===0) &&
+          draftForm.querySelectorAll('button[aria-label^="Remove "], img, [data-testid="attachment-preview"]').length===0 &&
+          rawComposers[0].querySelectorAll('img, [contenteditable="false"]').length===0;
+      }
+    } catch {}
     const composer=!!composerEl;
     const composerText=(composerEl?.innerText||composerEl?.textContent||"").trim();
     const visibleButton=b=>{
@@ -1396,7 +1407,8 @@ async function state(page, includeUserMessages=false, controlAction=null, includ
       sendAvailable:!!send && !send.disabled && send.getAttribute('aria-disabled')!=='true',
       inputReady:composer && !stop,composerPresent:composer,composerText,recoveryControls,approvalRequired,
       ...(includeRawComposer?{composerCount:rawComposers.length,
-        composerRawText:rawComposers.length===1&&typeof rawComposers[0].textContent==="string"?rawComposers[0].textContent:null}:{}),
+        composerRawText:rawComposers.length===1&&typeof rawComposers[0].textContent==="string"?rawComposers[0].textContent:null,
+        composerAttachmentsEmpty}:{}),
       errorTexts:[...alerts,...knownErrors].filter((v,i,a)=>a.indexOf(v)===i),
       online:navigator.onLine,visibility:document.visibilityState,pageWasDiscarded:!!document.wasDiscarded,
       lastUser,lastUserId:lastUserMsg?.id||null,lastAssistant,lastAssistantId:lastAssistantMsg?.id||null,

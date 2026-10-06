@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
+import "../src/task-policy.js";
+import "../src/page-pool.js";
+import "../src/session-policy.js";
 const source=await readFile(new URL("../src/main.js",import.meta.url),"utf8");
 const start=source.indexOf("async function state(");
 const end=source.indexOf("\nfunction classifySnapshot",start);
@@ -10,7 +13,7 @@ const retryEnd=source.indexOf("\nasync function waitForGenerationStop",retryStar
 const retry=new Function("state","assertImagePageFree",source.slice(retryStart,retryEnd)+";return nativeRetry;")(state,async()=>{});
 
 function node(text="",attributes={},options={}) {
-  const item={innerText:text,textContent:text,disabled:!!options.disabled,
+  const item={innerText:text,textContent:text,tagName:options.tagName||"DIV",disabled:!!options.disabled,
     getAttribute:name=>attributes[name]??null,
     getClientRects:()=>options.hidden?[]:[{}],
     getBoundingClientRect:()=>({width:options.hidden?0:100,height:options.hidden?0:40}),
@@ -22,19 +25,24 @@ function node(text="",attributes={},options={}) {
   };
   return item;
 }
-async function withDom({buttons=[],errors=[],known=[],messages=[]},fn) {
+async function withDom({buttons=[],errors=[],known=[],messages=[],files=[],previews=[],inline=[],missingForm=false,url="https://chatgpt.com/c/12345678-1234-1234-1234-123456789abc"},fn) {
   const root=node(), composer=node(), form=node();
+  composer.closest=selector=>selector==="form"&&!missingForm?form:null;
+  composer.querySelectorAll=()=>inline;
   root.matches=selector=>selector==='main, [role="main"]';
   root.contains=other=>other===root||buttons.includes(other)||errors.includes(other)||known.includes(other)||messages.includes(other);
-  form.querySelectorAll=()=>buttons;
+  form.querySelectorAll=selector=>selector==="button"?buttons:
+    selector==='button[aria-label^="Remove "], img, [data-testid="attachment-preview"]'?previews.filter(p=>p.tagName==="IMG"||p.getAttribute('aria-label')?.startsWith("Remove ")||p.getAttribute('data-testid')==="attachment-preview"):[];
   const document={title:"ChatGPT",visibilityState:"visible",wasDiscarded:false,
     querySelector:selector=>selector==="main"?root:selector==="form"?form:selector.includes("prompt-textarea")?composer:null,
     querySelectorAll:selector=>selector==="button"?buttons:
+      selector==='input[type="file"]'?files:
+      selector.includes("prompt-textarea")?[composer]:
       selector.includes('[role="alert"]')?errors:
       selector.startsWith("main div")?known:
       selector.includes("data-message-author-role")||selector.includes("search-unit")?messages:[],
   };
-  const values={document,location:{href:"https://chatgpt.com/c/12345678-1234-1234-1234-123456789abc"},
+  const values={document,location:{href:url},
     navigator:{onLine:true},getComputedStyle:()=>({visibility:"visible",display:"block",opacity:"1"}),
     __CHAT_BRIDGE_WATCH:{root,seq:0,lastMutationAt:Date.now(),startedAt:Date.now()},
   };
@@ -52,6 +60,56 @@ test("hidden or disabled Stop controls do not report active generation",async()=
     const snapshot=await withDom({buttons:[node("Stop generating",{"data-testid":"stop-button"},options)]},state);
     assert.equal(snapshot.generating,false);
   }
+});
+
+test("actual DOM attachment-only drafts protect shared reclaim, control reuse and empty-page cleanup",async()=>{
+  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  const section=(a,z)=>source.slice(source.indexOf(a),source.indexOf(z,source.indexOf(a)));
+  const projectHomeId=new Function(section("function projectHomeId(","\nfunction projectKey(")+";return projectHomeId;")();
+  const home="https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project",cid="11111111-1111-4111-8111-111111111111";
+  const {activeTaskStatus,composerIsEmpty,assertComposerSafe}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;
+  const file={files:[new File(["synthetic"],"draft.pdf",{type:"application/pdf"})]};
+  const throwing={get files(){throw Error("FileList unavailable");}};
+  for(const [name,dom,safe] of [
+    ["empty",{},true],
+    ["empty file control",{files:[{files:[]}]},true],
+    ["PDF and preview",{files:[file],previews:[node("draft.pdf",{"aria-label":"Remove draft.pdf"})]},false],
+    ["selected PDF only",{files:[file]},false],
+    ["preview after FileList reset",{files:[{files:[]}],previews:[node("draft.pdf",{"aria-label":"Remove draft.pdf"},{disabled:true,hidden:true})]},false],
+    ["image preview only",{previews:[node("",{},{tagName:"IMG"})]},false],
+    ["attachment card only",{previews:[node("draft.pdf",{"data-testid":"attachment-preview"})]},false],
+    ["nontext editor node",{inline:[node("",{contenteditable:"false"})]},false],
+    ["FileList unknown",{files:[{files:null}]},false],
+    ["FileList read failure",{files:[throwing]},false],
+    ["composer form unknown",{missingForm:true},false],
+  ]) for(const entry of ["registered","orphan","reuse","close"]) await withDom(dom,async page=>{
+    const binding={spaceName:"managed",spaceId:9,profileId:"P1",projectUrl:home,...(entry==="reuse"?{controlPage:"p9"}:{})};
+    const url=entry==="registered"?home.replace(/project$/,"c/"+cid):home;
+    const chat={id:cid,project:"P",account:"a",role:"worker",status:"active",spaceName:"managed",spaceId:9,page:"p9",url};
+    const reg={accounts:{a:{identity:"login-a"}},projects:{P:{bindings:{a:binding}}},chats:entry==="registered"?{[cid]:chat}:{}};
+    const rt={tasks:entry==="registered"?{t:{sessionId:cid,project:"P",account:"a",status:"COMPLETE"}}:{}};
+    let closes=0,saves=0;
+    Object.assign(page,{label:"p9",url:async()=>url,close:async()=>{closes++;}});
+    const task={spaceId:9,page:()=>page,pages:async()=>[page],tabs:async()=>[{label:"p9",url,active:false,openedBy:"agent"}]};
+    const api=await new AsyncFunction("loadRuntime","state","saveRegistry","imageSessionOccupancy","activeTaskStatus","composerIsEmpty","pageDetachCandidates","orphanManagedPageCandidates","sameConversationUrl","projectHomeId","coordinated","openBoundTask",
+      section("function samePhysicalSpace","\nasync function overflowManagedTask")+
+      section("async function closeEmptyPage(","\nasync function nativeSubmissionWitness")+";return {reclaimIdlePageSlot,reclaimOrphanManagedPage,closeEmptyPage};")(
+      async()=>rt,state,async()=>{saves++;},()=>({occupied:false}),activeTaskStatus,composerIsEmpty,
+      globalThis.__CHAT_BRIDGE_PAGE_POOL__.pageDetachCandidates,globalThis.__CHAT_BRIDGE_PAGE_POOL__.orphanManagedPageCandidates,
+      globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,projectHomeId,
+      ()=>({sessionRefs:[],unboundProjectIds:[],unboundAny:false}),async()=>({task,binding}));
+    const result=entry==="registered"?await api.reclaimIdlePageSlot(reg,"P","a",task,binding):entry==="close"?await api.closeEmptyPage(page):
+      await api.reclaimOrphanManagedPage(reg,task,binding,"a",entry==="reuse"?binding:null);
+    assert.equal(closes,safe&&entry!=="reuse"?1:0,`${name}:${entry} closes`);
+    assert.equal(saves,safe&&entry==="registered"?1:0,`${name}:${entry} registry writes`);
+    if(entry==="registered"&&!safe) assert.equal(chat.page,"p9");
+    if(entry==="reuse") assert.equal(result?.handle===page,safe,`${name}: reuse`);
+    const snapshot=await state(page);
+    assert.equal(snapshot.composerCount,1);assert.equal(snapshot.composerRawText,"");
+    assert.equal(composerIsEmpty(snapshot),safe,`${name}: shared predicate`);
+    if(!safe) assert.throws(()=>assertComposerSafe(snapshot),/USER_DRAFT_PRESENT/);
+    assert.equal(composerIsEmpty(await state(page,false,null,false)),false,"omitted draft observations remain unknown");
+  });
 });
 
 test("history Retry controls cannot make a healthy current turn recoverable",async()=>{

@@ -25,7 +25,7 @@ async function harness(f) {
     saveRuntime=async value=>{if((f.saves=(f.saves||0)+1)===f.saveFailAt || f.saveAlwaysFail)throw new Error('STATE_STORE_DEFERRED');f.runtime=structuredClone(value);};
     assertWebAvailable=async account=>{f.calls.push(['cooldown',account]);};
     ensurePage=async(_reg,chat,options)=>{f.calls.push(['page',chat.id,options]);if(f.pause){const e=new Error('user control');e.code='SPACE_IN_USER_CONTROL';throw e;}return {page:{}};};
-    observeSession=async()=>({inputReady:true,generating:false,composerCount:1,composerRawText:f.observed?.composerText||'',sessionState:'IDLE_COMPLETE',...f.observed});
+    observeSession=async()=>({inputReady:true,generating:false,composerCount:1,composerAttachmentsEmpty:true,composerRawText:f.observed?.composerText||'',sessionState:'IDLE_COMPLETE',...f.observed});
     sendMessage=async(_page,message)=>{f.calls.push(['send',message]);f.markerAtSend=structuredClone(f.runtime.projects.P.pendingReconcileEvent);if(f.deliveryError||f.preSendError){const e=new Error('DELIVERY_UNCONFIRMED');e.code='DELIVERY_UNCONFIRMED';e.deliveryStage=f.preSendError?'PRE_SEND':'SEND_ATTEMPTED';throw e;}return {delivered:true};};
     emitTaskEvent=async(task,type,data)=>f.emit?f.emit(task,type,data):(f.events.push({taskId:task.taskId,type,data}),{cursor:'event-'+f.events.length});
     coordinated=(command,payload)=>{f.calls.push([command,payload]);return f.coordinate?f.coordinate(command,payload):{status:'QUEUED',operationId:'op'};};

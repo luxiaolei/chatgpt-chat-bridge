@@ -22,7 +22,7 @@ async function fixture(orphan=false,change=()=>{}) {
   const rt={tasks:{}};
   if(!orphan){reg.chats[cid]={id:cid,project:"P",account:"a",role:"worker",status:"active",spaceName:"managed",spaceId:9,page:"p9",url};rt.tasks.t={taskId:"t",sessionId:cid,project:"P",account:"a",status:"COMPLETE"};}
   const f={reg,rt,binding,tabs:[{label:"p9",url:orphan?home:url,active:false,openedBy:"agent"}],
-    snapshot:{composerCount:1,composerRawText:"",generating:false,approvalRequired:false},
+    snapshot:{composerCount:1,composerAttachmentsEmpty:true,composerRawText:"",generating:false,approvalRequired:false},
     context:{sessionRefs:[],unboundProjectIds:[],unboundAny:false},closed:0,states:0,queries:0};
   change(f);let tabReads=0;
   const pages=f.tabs.map(tab=>({label:tab.label,url:async()=>f.pageUrl??tab.url,close:async()=>{f.closed++;(f.closedPages||=[]).push(tab.label);if(f.closeError)throw f.closeError;}}));

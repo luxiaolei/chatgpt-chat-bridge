@@ -13,7 +13,7 @@ async function runtimeApi(mode="Extra High", selectorAvailable=false, generating
   const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
   return await new AsyncFunction("setTimeout","taskSpace","testMode","selectorVisible","generating",source+
     '\nlet reapplyCalls=0;'+
-    '\nstate=async()=>({url:"https://chatgpt.com/c/11111111-1111-4111-8111-111111111111",mode:testMode,inputReady:true,generating,composerCount:1,composerRawText:""});'+
+    '\nstate=async()=>({url:"https://chatgpt.com/c/11111111-1111-4111-8111-111111111111",mode:testMode,inputReady:true,generating,composerCount:1,composerAttachmentsEmpty:true,composerRawText:""});'+
     '\napplyModelSpec=async(_page,model,effort)=>{ reapplyCalls+=1; return {model,effort,observed:{model,effort,raw:model+" "+effort}}; };'+
     '\nconst reg={accounts:{a:{identity:"verified-user"}},chats:{C:{account:"a",url:"https://chatgpt.com/c/11111111-1111-4111-8111-111111111111"}}};saveRegistry=async()=>{};'+
     '\nreturn {applyConfiguredSessionModel,applyDispatchModel,modelSelectorAvailable,calls:()=>reapplyCalls,page:{evaluate:async fn=>String(fn).includes("/api/auth/session")?"verified-user":selectorVisible}};'

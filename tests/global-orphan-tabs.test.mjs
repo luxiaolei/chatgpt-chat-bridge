@@ -9,7 +9,7 @@ async function fixture(change=()=>{}) {
   const binding={spaceName:name,spaceId:7,profileId:"P1",projectUrl:home};
   const f={binding,reg:{chats:{},accounts:{a:{identity:"login-a"}},projects:{P:{bindings:{a:binding}}}},runtime:{tasks:{}},closed:[],queries:0,
     tabs:[{label:"p1",url:"chrome://newtab/",active:false,openedBy:"agent"},{label:"p2",url:home,active:false,openedBy:"agent"}],
-    context:{sessionRefs:[],unboundProjectIds:[],unboundAny:false},snapshot:{approvalRequired:false,generating:false,composerCount:1,composerRawText:""}};
+    context:{sessionRefs:[],unboundProjectIds:[],unboundAny:false},snapshot:{approvalRequired:false,generating:false,composerCount:1,composerAttachmentsEmpty:true,composerRawText:""}};
   change(f);
   const run=await new AsyncFunction("f","name",source+`
     loadRuntime=async()=>f.runtime;

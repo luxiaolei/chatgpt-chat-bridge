@@ -40,7 +40,7 @@
     ) || null;
   }
   function composerIsEmpty(snapshot = {}) {
-    return snapshot.composerCount === 1 && snapshot.composerRawText === "";
+    return snapshot.composerCount === 1 && snapshot.composerRawText === "" && snapshot.composerAttachmentsEmpty === true;
   }
   function assertComposerSafe(snapshot = {}) {
     if (snapshot.approvalRequired === true) throw new Error("APPROVAL_REQUIRED");
