@@ -3103,15 +3103,18 @@ async function detachTerminalTaskPages(reg, project=null, account=null) {
     if(account && (taskRecord.account||reg.chats?.[taskRecord.sessionId]?.account)!==account) continue;
     if(!terminal.has(String(taskRecord.status||"").toUpperCase())) continue;
     if(taskRecord.watchdogPendingNotification || taskRecord.externalResponsePending) continue;
-    const updated=Date.parse(taskRecord.updatedAt||taskRecord.stateUpdatedAt||taskRecord.createdAt||0);
+    const updated=Date.parse(taskRecord.updatedAt||taskRecord.stateUpdatedAt||taskRecord.createdAt||"");
     if(!Number.isFinite(updated) || (now-updated)/1000<graceSec) continue;
     const chat=taskRecord.sessionId?reg.chats?.[taskRecord.sessionId]:null;
     if(!chat?.page || chat.status!=="active") continue;
     if(taskRecord.project!==chat.project || (taskRecord.account && taskRecord.account!==chat.account)) continue;
     if(imageSessionOccupancy(reg,chat).occupied) continue;
-    const otherActive=Object.values(rt.tasks||{}).some(other=>other.taskId!==taskRecord.taskId &&
-      activeTaskStatus(other.status) && other.sessionId===chat.id);
-    if(otherActive) continue;
+    const otherUnsafe=Object.values(rt.tasks||{}).some(other=>{
+      if(other.taskId===taskRecord.taskId || other.sessionId!==chat.id) return false;
+      const updated=Date.parse(other.updatedAt||other.stateUpdatedAt||other.createdAt||"");
+      return activeTaskStatus(other.status) || !Number.isFinite(updated) || (now-updated)/1000<graceSec;
+    });
+    if(otherUnsafe) continue;
     const configured=reg.projects?.[chat.project]?.bindings?.[chat.account];
     const spaceOverride={spaceName:chat.spaceName,spaceId:chat.spaceId,profileId:chat.profileId||configured?.profileId||null};
     if(!spaceOverride.spaceName || !Number.isSafeInteger(Number(spaceOverride.spaceId)) || Number(spaceOverride.spaceId)<=0 || !spaceOverride.profileId) continue;
