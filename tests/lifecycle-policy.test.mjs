@@ -10,6 +10,8 @@ test("lifecycle defaults are conservative", () => {
     reconcileRole: "00-g",
     minGapSec: 300,
     instruction: null,
+    draftPolicy: "preserve",
+    maxOverflowSpaces: 1,
   });
 });
 

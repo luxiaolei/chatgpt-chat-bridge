@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 const FORMAT='chat-bridge-delivery-attempt-v1';
 const sha=value=>crypto.createHash('sha256').update(value).digest('hex');
 const phases=new Map([
+  ['DRAFT_BACKUP','15'],['DRAFT_DISCARD_INTENT','17'],['DRAFT_DISCARDED','18'],
   ['TARGET_OBSERVED','10'],['BEFORE_INPUT','20'],['INPUT_VERIFIED','30'],
   ['SEND_INTENT','40'],['SEND_RETURNED','50'],['OBSERVED','60'],
   ['DELIVERY_CONFIRMED','70'],['ERROR','90']

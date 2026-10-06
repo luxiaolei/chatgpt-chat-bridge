@@ -46,6 +46,20 @@ test('global cleanup rejects same-name Space with different identity or Profile'
   assert.deepEqual(await fn(reg),[]);assert.equal(opened,0);
 });
 
+test('scoped orphan cleanup visits both verified overflow mappings without expanding its pool',async()=>{
+  const source=await readFile('src/main.js','utf8'),a=source.indexOf('async function pruneManagedOrphanTabs'),z=source.indexOf('\nasync function watchOnce',a);
+  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor,visited=[];
+  const home='https://chatgpt.com/g/g-p-'+'a'.repeat(32)+'/project',primary={spaceName:'chat-bridge-agent-a',spaceId:2,profileId:'P1',projectUrl:home};
+  const prior={spaceName:primary.spaceName+'-overflow',spaceId:9,profileId:'P1',identity:'login-a'},head={...prior,spaceName:prior.spaceName+'-2',spaceId:10,previousSpaces:[prior]};
+  const reg={accounts:{a:{identity:'login-a'}},projects:{P:{bindings:{a:primary}}},capacityOverflow:{'login-a|P1':head}};
+  const spaces=[primary,prior,head].map(s=>({id:s.spaceId,name:s.spaceName,profileId:s.profileId,ownership:'agent',createdBy:'agent'}));
+  const fn=await new AsyncFunction('listTaskSpaces','openBoundTask','reclaimOrphanManagedPage','projectHomeId',source.slice(a,z)+';return pruneManagedOrphanTabs;')(
+    async()=>spaces,async(_r,p,account,options)=>({binding:primary,task:{spaceId:options.spaceOverride.spaceId,tabs:async()=>[{url:home}]}}),
+    async(_r,task,binding)=>{assert.equal(binding.projectUrl,home);visited.push(task.spaceId);return {page:'old'};},u=>u===home?'g-p-'+'a'.repeat(32):null);
+  assert.equal((await fn(reg,'P','a',{excludeSpaceId:2})).length,2);assert.deepEqual(visited,[9,10]);
+  visited.length=0;spaces[1].id=99;assert.equal((await fn(reg,'P','a',{excludeSpaceId:2})).length,1);assert.deepEqual(visited,[10]);
+});
+
 test('formal current-controller placement CAS changes only attachment and preserves taskless worker gates',()=>{
   const code=String.raw`
 import copy,json,runpy,sqlite3
@@ -120,6 +134,19 @@ assert result['chat']['attachmentEpoch']==7 and result['chat']['page']=='p7'
 after=snapshot()
 assert after[0][1]==before[0][1] and after[1:]==before[1:]
 saved=json.loads(after[0][0][1]);expected=copy.deepcopy(reg);expected['chats'][sid].update(payload['attachment']);assert saved==expected
+pool=copy.deepcopy(reg);pool['capacityOverflow']['login-a|P1']={**copy.deepcopy(overflow),'spaceName':overflow['spaceName']+'-2','spaceId':10,'previousSpaces':[copy.deepcopy(overflow)]}
+db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(pool),));db.commit()
+context=m['controller_placement_context'](db,sid);payload={**copy.deepcopy(context),'overflowCandidate':copy.deepcopy(context['expectedOverflow']),'attachment':{**payload['attachment'],'spaceName':overflow['spaceName']+'-2','spaceId':10,'pageSpaceId':10},'observation':payload['observation']}
+before=snapshot()
+for discard in [True,False]:
+ bad=copy.deepcopy(payload)
+ if discard:bad['overflowCandidate'].pop('previousSpaces')
+ else:bad['overflowCandidate']['previousSpaces'][0]['spaceId']=99
+ try:m['controller_placement_commit'](db,bad);raise AssertionError('lost old pool mapping')
+ except ValueError:pass
+ assert snapshot()==before
+m['controller_placement_commit'](db,payload)
+saved=json.loads(db.execute("SELECT payload FROM documents WHERE kind='registry'").fetchone()[0]);assert saved['capacityOverflow']==pool['capacityOverflow']
 print('current controller placement checks passed')
 `;
   const r=spawnSync('python3',['-c',code],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);assert.match(r.stdout,/passed/);

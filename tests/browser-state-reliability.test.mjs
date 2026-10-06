@@ -92,7 +92,7 @@ test("actual DOM attachment-only drafts protect shared reclaim, control reuse an
     Object.assign(page,{label:"p9",url:async()=>url,close:async()=>{closes++;}});
     const task={spaceId:9,page:()=>page,pages:async()=>[page],tabs:async()=>[{label:"p9",url,active:false,openedBy:"agent"}]};
     const api=await new AsyncFunction("loadRuntime","state","saveRegistry","imageSessionOccupancy","activeTaskStatus","composerIsEmpty","pageDetachCandidates","orphanManagedPageCandidates","sameConversationUrl","projectHomeId","coordinated","openBoundTask",
-      section("function samePhysicalSpace","\nasync function overflowManagedTask")+
+      "const {draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n"+section("function samePhysicalSpace","\nasync function overflowManagedTask")+
       section("async function closeEmptyPage(","\nasync function nativeSubmissionWitness")+";return {reclaimIdlePageSlot,reclaimOrphanManagedPage,closeEmptyPage};")(
       async()=>rt,state,async()=>{saves++;},()=>({occupied:false}),activeTaskStatus,composerIsEmpty,
       globalThis.__CHAT_BRIDGE_PAGE_POOL__.pageDetachCandidates,globalThis.__CHAT_BRIDGE_PAGE_POOL__.orphanManagedPageCandidates,

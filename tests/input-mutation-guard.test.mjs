@@ -30,19 +30,20 @@ function fixture(change={}) {
   const composers=change.count===0?[]:change.count===2?[composer,node('')]:[composer];
   const buttons=[send], calls=[], chat={id:'11111111-1111-4111-8111-111111111111',project:'P',account:'a',url,model:'Latest',effort:'High'};
   root.contains=n=>n===root||n===form||composers.includes(n)||buttons.includes(n);
-  form.querySelectorAll=s=>s==='button'?buttons:[];
+  form.querySelectorAll=s=>s==='button'?buttons:change.attachment&&s.includes('Remove ')?[{}]:[];
   const f={composers,composer,root,buttons,calls,chat,currentUrl:url,login:change.nullLogin?null:change.login??'verified-user',change,closed:0,
     reg:{accounts:change.noIdentity?{}:{a:{identity:'verified-user'}},chats:{[chat.id]:chat},
-      projects:{P:{activeAccount:'a',bindings:{a:{projectUrl:home}}}}}};
+      projects:{P:{activeAccount:'a',lifecycle:change.discard?{draftPolicy:'discard'}:{},bindings:{a:{projectUrl:home}}}}}};
+  composer.outerHTML='<div id="prompt-textarea">'+(change.raw||'')+'</div>';form.outerHTML='<form>'+composer.outerHTML+'</form>';
   f.document={title:'Synthetic',visibilityState:'visible',body:root,querySelector:s=>
     s==='main'||s==='[role="main"]'?root:s==='form'?form:
     s.includes('prompt-textarea')?composers[0]||null:s==='button[data-testid="send-button"]'?send:null,
     querySelectorAll:s=>s.includes('contenteditable="true"')?composers:s==='button'?buttons:[]};
   f.page={label:'synthetic',spaceId:2,url:async()=>f.currentUrl,goto:async u=>{f.currentUrl=u;},waitForSelector:async()=>{},
-    fill:async(_s,text)=>{calls.push('fill');composer.textContent=composer.innerText=change.partialFill?'partial user content':change.emptyFill?'':text;if(change.loginAfterFill)f.login=change.loginAfterFill;if(change.fillFails)throw Error('fill transport failed');},
+    fill:async(_s,text)=>{calls.push('fill');if(text===''&&change.clearNotEmpty)return;if(text===''&&change.clearFails)throw Error('uncertain clear');composer.textContent=composer.innerText=change.partialFill?'partial user content':change.emptyFill?'':text;if(change.loginAfterFill)f.login=change.loginAfterFill;if(change.fillFails)throw Error('fill transport failed');},
     keyboard:{press:async key=>calls.push('key:'+key),insertText:async text=>{calls.push('insert');composer.textContent=composer.innerText=text;}},
     focus:async()=>calls.push('focus'),waitForTimeout:async()=>{},close:async()=>{f.closed++;},
-    click:async()=>{calls.push('send');composer.textContent=composer.innerText='';},
+    click:async()=>{calls.push('send');composer.textContent=composer.innerText='';if(f.currentUrl===home)f.currentUrl=url;},waitForURL:async()=>{},
     evaluate:async(fn,arg)=>fn(arg)};
   return f;
 }
@@ -52,6 +53,7 @@ async function run(f,fn) {
     MutationObserver:class{observe(){}disconnect(){}},Node:{ELEMENT_NODE:1},
     fetch:async(path,options)=>{f.calls.push('auth');assert.equal(path,'/api/auth/session');assert.equal(options?.cache,'no-store');assert.equal(options?.credentials,'same-origin');if(f.change.draftDuringLogin)f.composer.textContent=f.composer.innerText='new user draft';if(f.change.loginUnavailable)throw Error('offline');
       return {ok:!f.change.badResponse,json:async()=>({user:{id:f.login}})};},
+    __CHAT_BRIDGE_INPUT_RESUMED_USER_CONTROL__:!!f.change.resumedUserControl,
     __CHAT_BRIDGE_ARGS__:['new','--project','P','--account','a','--message',message,'--strict-model']};
   const saved=new Map([...Object.keys(values),'__CHAT_BRIDGE_WATCH'].map(k=>[k,Object.getOwnPropertyDescriptor(globalThis,k)]));
   try {
@@ -60,12 +62,14 @@ async function run(f,fn) {
     const setup=[
       'const reg=f.reg, page=f.page, chat=f.chat;',
       'assertImagePageFree=async()=>{};detectWebRateLimit=async()=>{};recordDeliveryStage=async()=>{};',
+      "coordinated=()=>{if(f.change.paused)throw Error('DRAFT_DISCARD_ADMISSION_DENIED');return {ok:true};};",
+      "saveDraftBackup=async backup=>{f.backup=backup;return {sha256:'synthetic',bytes:1};};",
       "applyModelSpec=async()=>{f.calls.push('model');return {model:'Latest',effort:'High'};};",
       "setEffort=async()=>{f.calls.push('effort');return true;};saveRegistry=async()=>{};touchRuntime=async()=>{};print=()=>{};",
       'openBoundTask=async()=>({task:{spaceId:2},binding:f.reg.projects.P.bindings.a});',
       'newManagedPage=async()=>page;openProjectPage=async()=>{f.currentUrl=home;};',
       "waitForDelivery=async()=>({url:f.currentUrl,lastUser:message,lastUserId:'new-user',messageCount:1,composerText:''});",
-      'return {state,send:()=>sendMessage(page,message,url),dispatch:()=>applyDispatchModel(page,chat,"Latest","High"),',
+      'return {state,prepare:()=>assertInputSafe(page,"verified-user",url,{discardDraft:true}),send:()=>sendMessage(page,message,url),dispatch:()=>applyDispatchModel(page,chat,"Latest","High"),',
       "model:async()=>{const positionals=()=>['Latest'],opt=()=>null;"+modelBody+'},',
       "effort:async()=>{const positionals=()=>['High'];"+effortBody+'},',
       "new:async()=>{const project='P',accountArg='a';"+newBody+'},',
@@ -89,6 +93,44 @@ test('actual input entry points reject raw drafts and unverified fresh login bef
       if(change.raw||change.count!=null||change.unknownRaw)assert.equal(f.closed,0,entry+' retains uncertain draft');
     }
   });
+});
+test('authorized Project draft discard backs up raw text and enters the normal send/model path',async()=>{
+  for(const raw of [' ','first paragraph\nsecond paragraph']) {
+    for(const entry of ['send','dispatch','new']) {
+      const f=fixture({raw,discard:true});
+      await run(f,api=>api[entry]());
+      assert.equal(f.backup?.rawText,raw,entry);
+      assert.equal(f.calls.filter(x=>x==='fill').length,entry==='dispatch'?1:2,entry);
+    }
+  }
+});
+test('authorized discard still preserves a changed draft, paused owner and partial Bridge input',async()=>{
+  for(const change of [{draftDuringLogin:true},{paused:true},{resumedUserControl:true},{fillFails:true,partialFill:true}]) {
+    const f=fixture({raw:'old draft',discard:true,...change});
+    await run(f,api=>assert.rejects(api.send()));
+    assert.equal(f.calls.includes('send'),false);
+    if(change.draftDuringLogin)assert.equal(f.composer.textContent,'new user draft');
+    if(change.paused||change.resumedUserControl)assert.equal(f.composer.textContent,'old draft');
+  }
+});
+test('discard permission never bypasses attachment, composer, login or clear acknowledgement guards',async()=>{
+  for(const change of [{attachment:true},{count:2},{login:'wrong-user'},{loginAfterFill:'wrong-user'},{clearNotEmpty:true},{clearFails:true}]) {
+    const f=fixture({raw:' ',discard:true,...change});
+    await run(f,api=>assert.rejects(api.send()));
+    assert.equal(f.calls.includes('send'),false);
+    assert.equal(f.calls.some(x=>x.startsWith('key:')),false);
+    if(change.attachment||change.count||change.login)assert.equal(f.backup,undefined);
+    assert.equal(f.calls.filter(x=>x==='fill').length,change.clearNotEmpty||change.clearFails||change.loginAfterFill?1:0);
+  }
+});
+test('multi-node native draft backup preserves the complete editor document and form',async()=>{
+  const f=fixture({raw:'firstsecond',discard:true});
+  f.composer.outerHTML='<div id="prompt-textarea"><p>first</p><p>second</p></div>';
+  f.composer.innerText='first\nsecond';f.composer.pmViewDesc={node:{toJSON:()=>({type:'doc',content:[{type:'paragraph',text:'first'},{type:'paragraph',text:'second'}]})}};
+  f.document.querySelector('form').outerHTML='<form>'+f.composer.outerHTML+'</form>';
+  await run(f,api=>api.prepare());
+  assert.equal(f.backup.rawText,'firstsecond');assert.equal(f.backup.text,'first\nsecond');
+  assert.equal(f.backup.document.content.length,2);assert.match(f.backup.formHtml,/<p>second<\/p>/);
 });
 test('semantic empty p/br allows one complete send and read-only state performs no login request',async()=>{
   const f=fixture();f.composer.innerText='\n'; // Empty paragraph/br has no semantic textContent.

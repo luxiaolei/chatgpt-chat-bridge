@@ -7,6 +7,49 @@ import {spawnSync} from "node:child_process";
 
 const coordinator=path.resolve("src/coordinator.py");
 
+test("an explicitly budgeted second overflow is used only after safe reclaim fails",async()=>{
+  const source=await readFile(path.resolve("src/main.js"),"utf8");
+  const code=source.slice(source.indexOf("async function newManagedPage"),source.indexOf("\nasync function controlPage"));
+  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  for(const [budget,created] of [[1,false],[2,false],[2,true]]) {
+    const calls=[],primary={spaceId:1,newPage:async()=>{throw Error("page budget reached");}};
+    const full={spaceId:9,newPage:primary.newPage},next={spaceId:10,newPage:async()=>({label:"next"})};
+    const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError",code+";return newManagedPage;")(
+      e=>/page budget reached/.test(e.message),async()=>calls.push("cleared"),
+      async(_r,_p,_a,t)=>{calls.push("idle:"+t.spaceId);return null;},async(_r,t)=>{calls.push("orphan:"+t.spaceId);return null;},
+      async()=>({firstAt:Date.now()-121000}),120,
+      async(_r,_p,_a,_b,options={})=>{calls.push(options.advance?"next":"overflow");if(options.advance&&budget===1)throw Error("OVERFLOW_SPACE_LIMIT");return {created,task:options.advance?next:full,binding:{spaceId:options.advance?10:9}};},
+      (_b,_w,reason)=>Error(reason)
+    );
+    if(budget===2&&!created)assert.equal((await allocate({projects:{P:{lifecycle:{maxOverflowSpaces:budget}}}},"P","a",primary,{spaceName:"main"},null,{allowOverflow:true})).page.label,"next");
+    else await assert.rejects(()=>allocate({},"P","a",primary,{spaceName:"main"},null,{allowOverflow:true}));
+    assert.deepEqual(calls.slice(0,6),["idle:1","orphan:1","overflow","idle:9","orphan:9",...(!created?["next"]:[])]);
+    assert.equal(calls.filter(x=>x==="next").length,created?0:1);
+  }
+});
+
+test("the identity/Profile overflow budget retains both attachments and reuses the previous Space",async()=>{
+  const source=await readFile('src/main.js','utf8'),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  const section=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
+  const name='chat-bridge-agent-a',reg={accounts:{a:{identity:'login-a'},alias:{identity:'login-a'}},projects:{P:{lifecycle:{maxOverflowSpaces:2},bindings:{a:{spaceName:name,spaceId:1,profileId:'P1'}}},other:{lifecycle:{maxOverflowSpaces:2}}},
+    chats:{},spaces:{primary:{name,spaceId:1,identity:'login-a',profileId:'P1',ownership:'agent'}}};
+  const available=[{id:1,name,profileId:'P1',ownership:'agent',createdBy:'agent'}];let creates=0;
+  const api=await new AsyncFunction('crypto','slug','listTaskSpaces','taskSpace','taskAccounts','accountScope','saveRegistry','emptyRegistry','defaultSpaceName','DEFAULT_ACCOUNT',
+    section('function managedSpacePlan','\nasync function accountManagedTask')+section('async function overflowManagedTask','\nasync function newManagedPage')+section('function normalizeRegistry','\nfunction normalizeRuntime')+';return {overflowManagedTask,normalizeRegistry,managedSpacePlan};')(
+    await import('node:crypto'),x=>x,async()=>available,async(name,options)=>{let info=available.find(x=>x.name===name);if(!info){creates++;info={id:creates+1,name,profileId:options.profileId,ownership:'agent',createdBy:'agent'};available.push(info);}return {spaceId:info.id};},new Map(),(r,a)=>r.accounts[a].identity,async()=>{},()=>({accounts:{},projects:{},chats:{},spaces:{}}),()=>name,'a');
+  const binding=reg.projects.P.bindings.a,first=await api.overflowManagedTask(reg,'P','a',binding),next=await api.overflowManagedTask(reg,'P','a',binding,{advance:true});
+  assert.equal(next.spaceName,first.spaceName+'-2');assert.equal(creates,2);
+  assert.deepEqual(next.mapping.previousSpaces,[first.mapping]);
+  await assert.rejects(()=>api.overflowManagedTask(reg,'other','alias',binding,{advance:true}),/OVERFLOW_SPACE_LIMIT/);assert.equal(creates,2);
+  const old=await api.overflowManagedTask(reg,'P','a',binding,{previous:true});assert.equal(old.spaceName,first.spaceName);assert.equal(reg.capacityOverflow['login-a|P1'].spaceName,next.spaceName);
+  for(const item of [first,next])reg.chats[item.spaceName]={id:item.spaceName,project:'P',account:'a',spaceName:item.spaceName,spaceId:item.task.spaceId,profileId:'P1',page:'kept'};
+  const normalized=api.normalizeRegistry(structuredClone(reg));for(const chat of Object.values(normalized.chats))assert.equal(chat.page,'kept');
+  for(const item of [first,next])reg.spaces[item.spaceName]={identity:'login-a',profileId:'P1',name:item.spaceName,spaceId:item.task.spaceId,ownership:'agent'};
+  assert.equal(api.managedSpacePlan(reg,'a','P1').spaceName,name);
+  reg.capacityOverflow['login-a|P1'].previousSpaces=null;
+  await assert.rejects(()=>api.overflowManagedTask(reg,'P','a',binding),/OVERFLOW_MAPPING_INVALID|AMBIGUOUS_CANONICAL_SPACE/);assert.equal(creates,2);
+});
+
 test("a full verified overflow reclaims once in that Space before retrying allocation",async()=>{
   const source=await readFile(path.resolve("src/main.js"),"utf8");
   const code=source.slice(source.indexOf("async function newManagedPage"),source.indexOf("\nasync function controlPage"));
@@ -35,6 +78,16 @@ test("a full verified overflow reclaims once in that Space before retrying alloc
   assert.deepEqual(calls,[["idle",1,1,"keep"],["orphan",1,1],["idle",9,9,"keep"]]);
 });
 
+test('a detached conversation reuses the bounded pool and preserves its CID during normal send allocation',async()=>{
+  const source=await readFile('src/main.js','utf8'),a=source.indexOf('async function ensurePage'),z=source.indexOf('\nfunction hashText',a),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  const url='https://chatgpt.com/g/g-p-'+'a'.repeat(32)+'/c/11111111-1111-4111-8111-111111111111',chat={id:url.split('/').at(-1),project:'P',account:'a',url,page:null},original=structuredClone(chat);
+  const binding={spaceName:'chat-bridge-agent-a',spaceId:1,profileId:'P1'},overflow={spaceName:binding.spaceName+'-overflow-2',spaceId:10,profileId:'P1'},page={label:'next',goto:async target=>assert.equal(target,url),url:async()=>url};
+  const ensure=await new AsyncFunction('openBoundTask','pagesOf','sameConversationUrl','newManagedPage','waitForConversationReady','saveRegistry','openConversationFromProject',source.slice(a,z)+';return ensurePage;')(
+    async()=>({binding,task:{spaceId:1}}),async()=>[],(a,b)=>a===b,async(_r,p,account,_t,_b,id,options)=>{assert.equal(options.allowOverflow,true);assert.equal(id,chat.id);return {page,task:{spaceId:10},binding:overflow,overflow:true};},async()=>{},async()=>{},()=>{throw Error('unexpected fallback');});
+  await ensure({projects:{P:{bindings:{a:binding}}}},chat,{allowOverflow:true});
+  assert.equal(chat.id,original.id);assert.equal(chat.url,original.url);assert.equal(chat.page,'next');assert.equal(chat.spaceId,10);assert.equal(chat.spaceName,overflow.spaceName);
+});
+
 test("overflow exhaustion keeps resource waiting without recursion or another reclaim",async()=>{
   const source=await readFile(path.resolve("src/main.js"),"utf8");
   const code=source.slice(source.indexOf("async function newManagedPage"),source.indexOf("\nasync function controlPage"));
@@ -48,7 +101,7 @@ test("overflow exhaustion keeps resource waiting without recursion or another re
       async(_r,_p,_a,task)=>{calls.push(["idle",task.spaceId]);return task===overflow&&mode==="still full"?{}:null;},
       async(_r,task,_b,account)=>{assert.equal(account,"a");calls.push(["orphan",task.spaceId]);return task===overflow&&mode==="orphan"?{}:null;},
       async(_r,_p,_a,_b,reason)=>{reasons.push(reason);return {firstAt:Date.now()-121000,reason};},120,
-      async()=>{selections++;return {task:overflow,binding:{spaceId:9},spaceName:"overflow"};},
+      async(_r,_p,_a,_b,options={})=>{if(options.advance)throw Error("OVERFLOW_SPACE_LIMIT");selections++;return {task:overflow,binding:{spaceId:9},spaceName:"overflow"};},
       (_b,_w,reason)=>Error("capacity waiting: "+reason)
     );
     if(mode==="orphan") assert.equal((await allocate({},"P","a",primary,{spaceName:"main"},null,{allowOverflow:true})).page.label,"p9");

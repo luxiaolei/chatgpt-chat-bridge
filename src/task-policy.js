@@ -42,6 +42,17 @@
   function composerIsEmpty(snapshot = {}) {
     return snapshot.composerCount === 1 && snapshot.composerRawText === "" && snapshot.composerAttachmentsEmpty === true;
   }
+  function draftDiscardProject(reg, identity, targetUrl) {
+    const projectId = value => {
+      try { const u = new URL(value); return u.origin === "https://chatgpt.com" ? u.pathname.match(/^\/g\/(g-p-[0-9a-f]{32})(?:-[^/]+)?\/(?:project|c\/[^/]+)\/?$/i)?.[1]?.toLowerCase() : null; }
+      catch { return null; }
+    };
+    const id = projectId(targetUrl);
+    if (!identity || !id) return null;
+    const matches = Object.entries(reg.projects || {}).filter(([,p]) => Object.entries(p.bindings || {}).some(([a,b]) =>
+      reg.accounts?.[a]?.identity === identity && projectId(b.projectUrl) === id));
+    return matches.length === 1 && matches[0][1].lifecycle?.draftPolicy === "discard" ? matches[0][0] : null;
+  }
   function assertComposerSafe(snapshot = {}) {
     if (snapshot.approvalRequired === true) throw new Error("APPROVAL_REQUIRED");
     if (snapshot.generating || !snapshot.inputReady) throw new Error("CHAT_BUSY");
@@ -58,6 +69,7 @@
     assertActiveTaskTarget,
     activeSessionConflict,
     composerIsEmpty,
+    draftDiscardProject,
     assertComposerSafe,
     isPreSendDefer,
   };

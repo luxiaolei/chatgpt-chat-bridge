@@ -107,6 +107,9 @@ if [[ "$CMD" == "control" ]]; then
   [[ -f "$COORDINATOR" ]] || { echo "chat-bridge: coordinator missing: $COORDINATOR" >&2; exit 127; }
   exec python3 "$COORDINATOR" control "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
 fi
+if [[ "$CMD" == "policy" ]]; then
+  exec python3 "${MAIN:h}/coordinator.py" project-policy "$CONFIG_DIR" "$STATE_DIR" "${@:2}"
+fi
 if [[ "$CMD" == "github-project" ]]; then
   GITHUB_PROJECT="${MAIN:h}/github-project.py"
   [[ -f "$GITHUB_PROJECT" ]] || { echo "chat-bridge: GitHub Project adapter missing: $GITHUB_PROJECT" >&2; exit 127; }

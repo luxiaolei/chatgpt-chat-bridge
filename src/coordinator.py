@@ -2,6 +2,7 @@
 """Local durable dispatch queue. A claim is never silently retried after a crash."""
 import hashlib
 import json
+import math
 import os
 import re
 import pathlib
@@ -2783,6 +2784,53 @@ def uncertain_new_session(db, row, result):
 
 
 
+def draft_discard_admission(db, payload):
+    reg = registry(db)
+    project, identity = payload.get("project"), payload.get("identity")
+    cfg = reg.get("projects", {}).get(project) or {}
+    route = re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/(?:project|c/([0-9a-f-]{36}))/?", str(payload.get("targetUrl") or ""), re.I)
+    aliases = [a for a,b in cfg.get("bindings", {}).items() if identity and
+               reg.get("accounts", {}).get(a, {}).get("identity") == identity and route and
+               re.fullmatch(r"https://chatgpt\.com/g/" + route[1] + r"(?:-[^/?#]+)?/project/?", str(b.get("projectUrl") or ""), re.I)]
+    projects = [name for name,p in reg.get("projects", {}).items() if route and any(
+        reg.get("accounts", {}).get(a, {}).get("identity") == identity and
+        re.fullmatch(r"https://chatgpt\.com/g/" + route[1] + r"(?:-[^/?#]+)?/project/?", str(b.get("projectUrl") or ""), re.I)
+        for a,b in p.get("bindings", {}).items())]
+    origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+    if not aliases or projects != [project] or cfg.get("lifecycle", {}).get("draftPolicy") != "discard" or origin and origin != account_id(identity) or not origin and os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+        raise ValueError("DRAFT_DISCARD_POLICY_OR_IDENTITY_CHANGED")
+    session, current = route[2], None
+    if payload.get("attempt"):
+        current = delivery_attempt_module().verify_current(state_dir_for(db), db, payload["attempt"])
+        if current["project"] != project or current["account_id"] != account_id(identity) or current["native_target"] or (
+                payload.get("reclaim") is not True and current["session_ref"] != session):
+            raise ValueError("DRAFT_DISCARD_CLAIM_MISMATCH")
+    chat = reg.get("chats", {}).get(session) or {}
+    mode = management_mode(db, project, current["workgroup_id"] if current else chat.get("workgroupId"))
+    if mode["mode"] in {"PAUSED", "DRAINING"} or current and current["kind"] in {"dispatch", "rotation"} and (
+            mode.get("scope") != current["control_scope"] or int(mode.get("epoch") or 0) != int(current["control_epoch"] or 0)):
+        raise ValueError("DRAFT_DISCARD_ADMISSION_DENIED")
+    rt = runtime(db)
+    if rt.get("projects", {}).get(project, {}).get("watchdogPausedForUserControl") or session and (
+            rt.get("sessions", {}).get(session, {}).get("watchdogPausedForUserControl") or
+            any(t.get("sessionId") == session and t.get("watchdogPausedForUserControl") for t in rt.get("tasks", {}).values()) or
+            image_session_reservations(db, {"accountId":account_id(identity), "conversationId":session})):
+        raise ValueError("DRAFT_DISCARD_USER_CONTROLLED_OR_IMAGE")
+    rows = db.execute("""SELECT * FROM operations WHERE account_id=? AND native_target IS NULL
+        AND (id=? OR (session_ref=? OR (session_ref IS NULL AND project=?)))""",
+        (account_id(identity), current["id"] if current else "", session, project)).fetchall()
+    for row in rows:
+        if (not current or row["id"] != current["id"]) and row["status"] in {"DISPATCHING", "DELIVERY_UNKNOWN", "SUPERSEDED"}:
+            raise ValueError("DRAFT_DISCARD_DELIVERY_UNCERTAIN")
+        if row["status"] not in {"FAILED_PRE_SEND", "DISPATCHING", "QUEUED"}:
+            continue
+        directory = state_dir_for(db) / "delivery-attempts" / row["id"]
+        if directory.exists() and any((claim / phase).exists() for claim in directory.iterdir()
+                                     for phase in ("17-DRAFT_DISCARD_INTENT.json", "20-BEFORE_INPUT.json", "40-SEND_INTENT.json")):
+            raise ValueError("DRAFT_DISCARD_PARTIAL_INPUT_OR_SEND")
+    return {"ok": True, "readOnly": True}
+
+
 def resource_wait_category(receipt):
     if not receipt or receipt.get("ok") is not False or receipt.get("deliveryStage") != "PRE_SEND":
         return None
@@ -3625,12 +3673,22 @@ def controller_placement_commit(db, payload):
         if overflow is not None:
             legacy = binding["spaceName"] + "-overflow"
             scoped = legacy + "-" + hashlib.sha256(binding["profileId"].encode()).hexdigest()[:8]
-            if (not isinstance(overflow, dict) or set(overflow) != {
-                    "spaceName", "spaceId", "profileId", "identity", "account", "createdAt"}
-                    or overflow["spaceName"] not in {legacy, scoped}
+            fields = {"spaceName", "spaceId", "profileId", "identity", "account", "createdAt"}
+            previous = overflow.get("previousSpaces") if isinstance(overflow, dict) else None
+            if (not isinstance(overflow, dict) or set(overflow) not in (fields, fields | {"previousSpaces"})
+                    or overflow["spaceName"] not in {legacy, scoped, legacy + "-2", scoped + "-2"}
                     or overflow["identity"] != current["accountIdentity"]
                     or overflow["profileId"] != binding["profileId"] or overflow["account"] != chat["account"]
                     or not isinstance(overflow["createdAt"], str) or not overflow["createdAt"]):
+                raise ValueError("CONTROLLER_PLACEMENT_OVERFLOW_INVALID")
+            if "previousSpaces" in overflow and (not isinstance(previous, list) or len(previous) != 1 or
+                    previous != (current["expectedOverflow"] or {}).get("previousSpaces") or
+                    any(not isinstance(p, dict) or set(p) != fields or p["identity"] != current["accountIdentity"] or
+                        p["profileId"] != binding["profileId"] or p["spaceName"] not in {legacy, scoped} or
+                        type(p["spaceId"]) is not int or p["spaceId"] <= 0 for p in previous)):
+                raise ValueError("CONTROLLER_PLACEMENT_OVERFLOW_INVALID")
+            if (overflow["spaceName"] in {legacy + "-2", scoped + "-2"} or
+                    "previousSpaces" in (current["expectedOverflow"] or {})) and "previousSpaces" not in overflow:
                 raise ValueError("CONTROLLER_PLACEMENT_OVERFLOW_INVALID")
         main = overflow is None and attachment["spaceName"] == binding.get("spaceName") and attachment["spaceId"] == binding.get("spaceId")
         extra = (overflow and attachment["spaceName"] == overflow["spaceName"] and attachment["spaceId"] == overflow["spaceId"])
@@ -4818,6 +4876,61 @@ def main():
                 },config,state)
             else:
                 raise ValueError("UNKNOWN_CONTROL_COMMAND")
+        elif command == "project-policy":
+            sub = args[0] if args else "show"
+            raw = args[1:]
+            flags = {item for item in raw if item == "--confirm"}
+            pairs = [item for item in raw if item not in flags]
+            allowed = {"--project", "--caller-ref", "--draft-policy", "--max-overflow-spaces", "--auto-reconcile", "--reconcile-role", "--min-gap-sec", "--instruction"}
+            if len(pairs) % 2 or set(pairs[::2]) - allowed or len(set(pairs[::2])) != len(pairs[::2]):
+                raise ValueError("policy options must be unique name/value pairs")
+            opts = dict(zip(pairs[::2], pairs[1::2]))
+            project = opts.get("--project")
+            if sub not in {"show", "set"} or not project:
+                raise ValueError("policy requires show|set --project NAME")
+            if sub == "set":
+                begin_immediate(db)
+                if os.environ.get("CHAT_BRIDGE_FROM_SPACE") and not os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID"):
+                    raise ValueError("CONTROL_ORIGIN_UNVERIFIED")
+                authorize_control(db, opts.get("--caller-ref"), project, False)
+                if ("--draft-policy" in opts or "--max-overflow-spaces" in opts) and "--confirm" not in flags:
+                    raise ValueError("policy mutation requires --confirm")
+            pr = registry(db).get("projects", {}).get(project)
+            if pr is None:
+                raise ValueError("PROJECT_NOT_FOUND")
+            policy = dict(pr.get("lifecycle") or {})
+            for option, field in (("--draft-policy", "draftPolicy"), ("--max-overflow-spaces", "maxOverflowSpaces"), ("--auto-reconcile", "autoReconcile"),
+                                  ("--reconcile-role", "reconcileRole"), ("--min-gap-sec", "minGapSec"), ("--instruction", "instruction")):
+                if sub != "set" or option not in opts:
+                    continue
+                item = opts[option]
+                if field == "draftPolicy" and item not in {"preserve", "discard"} or field == "maxOverflowSpaces" and item not in {"1", "2"}:
+                    raise ValueError("INVALID_PROJECT_INPUT_POLICY")
+                if field == "autoReconcile":
+                    if item.lower() not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
+                        raise ValueError("INVALID_BOOLEAN")
+                    item = item.lower() in {"true", "1", "yes", "on"}
+                elif field == "minGapSec":
+                    item = float(item)
+                    if not math.isfinite(item) or item < 0:
+                        raise ValueError("min-gap-sec must be >= 0")
+                elif field == "maxOverflowSpaces":
+                    item = int(item)
+                elif field in {"instruction", "reconcileRole"}:
+                    item = item.strip() or None
+                policy[field] = item
+            if sub == "set":
+                reg = registry(db); reg["projects"][project]["lifecycle"] = policy
+                db.execute("UPDATE documents SET payload=? WHERE kind='registry'", (json.dumps(reg, ensure_ascii=False),)); db.commit()
+            gap = policy.get("minGapSec", 300)
+            value = {"project":project, "rootController":pr.get("rootController") or "conductor", "raw":policy,
+                     "lifecycle":{**policy, "autoReconcile":policy.get("autoReconcile") is True, "reconcileRole":policy.get("reconcileRole") or pr.get("rootController") or "conductor",
+                                  "minGapSec":gap if type(gap) in {int,float} and math.isfinite(gap) and gap >= 0 else 300,
+                                  "instruction":policy.get("instruction"), "draftPolicy":"discard" if policy.get("draftPolicy") == "discard" else "preserve",
+                                  "maxOverflowSpaces":2 if type(policy.get("maxOverflowSpaces")) is int and policy["maxOverflowSpaces"] == 2 else 1},
+                     **({"ok":True} if sub == "set" else {})}
+        elif command == "draft-discard-admission":
+            value = draft_discard_admission(db, json.load(sys.stdin))
         elif command == "page-reclaim-context":
             payload = json.load(sys.stdin)
             reg = registry(db)
@@ -4837,15 +4950,36 @@ def main():
                 current = claim["id"]
             # ponytail: snapshot relies on the account mutex; reserve slots if independent writers need atomic allocation.
             sessions, unbound, any_unbound = set(), set(), False
+            rt = runtime(db)
             has_operations = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operations'").fetchone()
             if has_operations:
-                rows = db.execute("""SELECT id,session_ref,project,account_alias FROM operations o
+                rows = db.execute("""SELECT * FROM operations o
                     WHERE account_id=? AND native_target IS NULL AND id!=?
                     AND (status IN ('DISPATCHING','DELIVERY_UNKNOWN','SUPERSEDED')
                          OR (status='QUEUED' AND session_ref IS NOT NULL)
                          OR (status='SENT' AND kind IN ('dispatch','rotation')
                              AND NOT EXISTS (SELECT 1 FROM task_results r WHERE r.task_id=o.task_id)))""", (stable, current or ""))
                 for row in rows:
+                    task = (rt.get("tasks") or {}).get(row["task_id"]) or {}
+                    chat = (reg.get("chats") or {}).get(row["session_ref"]) or {}
+                    owner = (reg.get("chats") or {}).get(row["caller_ref"]) or {}
+                    binding = ((reg.get("projects") or {}).get(row["project"]) or {}).get("bindings", {}).get(row["account_alias"]) or {}
+                    route = re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/project/?", binding.get("projectUrl") or "", re.I)
+                    if (row["status"] == "SENT" and row["session_ref"] and row["caller_ref"] and route and
+                            ((reg.get("accounts") or {}).get(row["account_alias"]) or {}).get("identity") == identity and
+                            task.get("status") in {"CANCELLED", "FAILED"} and task.get("taskId") == row["task_id"] and
+                            task.get("project") == chat.get("project") == owner.get("project") == row["project"] and
+                            task.get("account") == chat.get("account") == row["account_alias"] and
+                            task.get("sessionId") == chat.get("id") == row["session_ref"] and
+                            re.fullmatch(r"https://chatgpt\.com/g/" + route[1] + r"(?:-[^/?#]+)?/c/" + re.escape(row["session_ref"]) + r"/?", chat.get("url") or "", re.I) and
+                            task.get("role") == chat.get("role") == row["role"] and
+                            task.get("controllerSessionRef") == owner.get("id") == row["caller_ref"] and
+                            task_workgroup(task) == (chat.get("workgroupId") or None) == row["workgroup_id"] and
+                            target_matches_task_scope(task, owner, reg) and
+                            not any(task.get(flag) for flag in ("watchdogPendingNotification", "externalResponsePending", "watchdogPausedForUserControl")) and
+                            not rt.get("projects", {}).get(row["project"], {}).get("watchdogPausedForUserControl") and
+                            not rt.get("sessions", {}).get(row["session_ref"], {}).get("watchdogPausedForUserControl")):
+                        continue  # Technical termination releases occupancy; SENT and business acceptance remain unchanged.
                     if row["session_ref"]:
                         sessions.add(row["session_ref"])
                         continue
