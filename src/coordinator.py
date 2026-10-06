@@ -4518,7 +4518,7 @@ def main():
         if "--confirm" not in args:
             db.execute("PRAGMA query_only=ON")
             db.execute("BEGIN")
-    elif command in {"observe", "observation-context", "controller-placement-context", "delivery-attempts", "delivery-admission"}:
+    elif command in {"observe", "observation-context", "controller-placement-context", "delivery-attempts", "delivery-admission", "page-reclaim-context"}:
         db = connection(config, state, initialize=False)
         db.execute("PRAGMA query_only=ON")
     elif command in {"admission-check", "local-owner-contract"} and (state / "bridge.sqlite3").exists():
@@ -4818,6 +4818,43 @@ def main():
                 },config,state)
             else:
                 raise ValueError("UNKNOWN_CONTROL_COMMAND")
+        elif command == "page-reclaim-context":
+            payload = json.load(sys.stdin)
+            reg = registry(db)
+            alias = payload.get("account")
+            identity = (reg.get("accounts", {}).get(alias) or {}).get("identity")
+            if not identity:
+                raise ValueError("PAGE_RECLAIM_ACCOUNT_UNVERIFIED")
+            stable = account_id(identity)
+            origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+            if origin and origin != stable or not origin and os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+                raise ValueError("PAGE_RECLAIM_ORIGIN_MISMATCH")
+            current = None
+            if payload.get("attempt"):
+                claim = delivery_attempt_module().verify_current(state, db, payload["attempt"])
+                if claim["account_id"] != stable or claim["native_target"]:
+                    raise ValueError("PAGE_RECLAIM_CLAIM_MISMATCH")
+                current = claim["id"]
+            # ponytail: snapshot relies on the account mutex; reserve slots if independent writers need atomic allocation.
+            sessions, unbound, any_unbound = set(), set(), False
+            if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operations'").fetchone():
+                rows = db.execute("""SELECT id,session_ref,project,account_alias FROM operations o
+                    WHERE account_id=? AND native_target IS NULL AND id!=?
+                    AND (status IN ('DISPATCHING','DELIVERY_UNKNOWN','SUPERSEDED')
+                         OR (status='QUEUED' AND session_ref IS NOT NULL)
+                         OR (status='SENT' AND kind IN ('dispatch','rotation')
+                             AND NOT EXISTS (SELECT 1 FROM task_results r WHERE r.task_id=o.task_id)))""", (stable, current or ""))
+                for row in rows:
+                    if row["session_ref"]:
+                        sessions.add(row["session_ref"])
+                        continue
+                    binding = ((reg.get("projects") or {}).get(row["project"]) or {}).get("bindings", {}).get(row["account_alias"]) or {}
+                    match = re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/project/?", binding.get("projectUrl") or "", re.I)
+                    if match and ((reg.get("accounts") or {}).get(row["account_alias"]) or {}).get("identity") == identity:
+                        unbound.add(match[1].lower())
+                    else:
+                        any_unbound = True
+            value = {"sessionRefs": sorted(sessions), "unboundProjectIds": sorted(unbound), "unboundAny": any_unbound, "readOnly": True}
         elif command == "delivery-admission":
             context = json.load(sys.stdin)
             row = delivery_attempt_module().verify_current(state, db, context)

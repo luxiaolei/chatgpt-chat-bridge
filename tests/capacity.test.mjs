@@ -7,6 +7,58 @@ import {spawnSync} from "node:child_process";
 
 const coordinator=path.resolve("src/coordinator.py");
 
+test("a full verified overflow reclaims once in that Space before retrying allocation",async()=>{
+  const source=await readFile(path.resolve("src/main.js"),"utf8");
+  const code=source.slice(source.indexOf("async function newManagedPage"),source.indexOf("\nasync function controlPage"));
+  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  const primary={spaceId:1,newPage:async()=>{throw Error("page budget reached");}};
+  let allocations=0,overflowSelections=0,cleared=0;
+  const page={label:"p9"},overflowTask={spaceId:9,newPage:async()=>{
+    if(++allocations===1) throw Error("page budget reached");
+    return page;
+  }};
+  const binding={spaceName:"primary",spaceId:1},overflowBinding={spaceName:"overflow",spaceId:9};
+  const calls=[];
+  const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError",code+";return newManagedPage;")(
+    error=>error.message==="page budget reached",async()=>{cleared++;},
+    async(_reg,_project,_account,task,target,exclude)=>{
+      calls.push(["idle",task.spaceId,target.spaceId,exclude]);
+      return task===overflowTask?{page:"old"}:null;
+    },async(_reg,task,target)=>{calls.push(["orphan",task.spaceId,target.spaceId]);return null;},
+    async()=>({firstAt:Date.now()-121000}),120,
+    async()=>{overflowSelections++;return {task:overflowTask,binding:overflowBinding,spaceName:"overflow"};},
+    ()=>Error("capacity waiting")
+  );
+  const result=await allocate({},"P","a",primary,binding,"keep",{allowOverflow:true});
+  assert.equal(result.page,page);assert.equal(result.task,overflowTask);assert.equal(result.binding,overflowBinding);
+  assert.equal(allocations,2);assert.equal(overflowSelections,1);assert.equal(cleared,1);
+  assert.deepEqual(calls,[["idle",1,1,"keep"],["orphan",1,1],["idle",9,9,"keep"]]);
+});
+
+test("overflow exhaustion keeps resource waiting without recursion or another reclaim",async()=>{
+  const source=await readFile(path.resolve("src/main.js"),"utf8");
+  const code=source.slice(source.indexOf("async function newManagedPage"),source.indexOf("\nasync function controlPage"));
+  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  for(const mode of ["no safe page","still full","orphan","non-budget error"]) {
+    let allocations=0,selections=0,cleared=0;const calls=[],reasons=[];
+    const primary={spaceId:1,newPage:async()=>{throw Error("page budget reached");}};
+    const overflow={spaceId:9,newPage:async()=>{allocations++;if(mode==="orphan"&&allocations===2)return {label:"p9"};throw Error(mode==="non-budget error"?"connection lost":"page budget reached");}};
+    const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError",code+";return newManagedPage;")(
+      error=>error.message==="page budget reached",async()=>{cleared++;},
+      async(_r,_p,_a,task)=>{calls.push(["idle",task.spaceId]);return task===overflow&&mode==="still full"?{}:null;},
+      async(_r,task,_b,account)=>{assert.equal(account,"a");calls.push(["orphan",task.spaceId]);return task===overflow&&mode==="orphan"?{}:null;},
+      async(_r,_p,_a,_b,reason)=>{reasons.push(reason);return {firstAt:Date.now()-121000,reason};},120,
+      async()=>{selections++;return {task:overflow,binding:{spaceId:9},spaceName:"overflow"};},
+      (_b,_w,reason)=>Error("capacity waiting: "+reason)
+    );
+    if(mode==="orphan") assert.equal((await allocate({},"P","a",primary,{spaceName:"main"},null,{allowOverflow:true})).page.label,"p9");
+    else await assert.rejects(()=>allocate({},"P","a",primary,{spaceName:"main"},null,{allowOverflow:true}),/capacity waiting: OVERFLOW_UNAVAILABLE:/);
+    assert.equal(selections,1);assert.equal(allocations,["still full","orphan"].includes(mode)?2:1);assert.equal(cleared,mode==="orphan"?1:0);
+    assert.deepEqual(calls,mode==="non-budget error"?[["idle",1],["orphan",1]]:mode==="still full"?[["idle",1],["orphan",1],["idle",9]]:[["idle",1],["orphan",1],["idle",9],["orphan",9]]);
+    assert.equal(reasons[0],"PAGE_BUDGET_NO_SAFE_RECLAIM:main");
+  }
+});
+
 test("queue capacity exhaustion waits with backoff and stays distinct from BLOCKED", async()=>{
   const root=await mkdtemp(path.join(tmpdir(),"bridge-capacity-")), config=path.join(root,"config"), state=path.join(root,"state");
   await mkdir(config); await mkdir(state);

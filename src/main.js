@@ -365,9 +365,17 @@ function boolValue(value, def=false) {
   throw new Error(`invalid boolean: ${value}`);
 }
 function positionals(start=0) {
+  const booleans="aggressive all allow-duplicate-role background confirm create current-controller dry-run overflow quiet resume-watch skip-lifecycle skip-tasks strict-model".split(" ");
+  const valued="account affinity-key after auto-reconcile baseline-assistant-count baseline-assistant-hash baseline-assistant-id caller-ref candidate completion-mode controller cooldown dispatched-at effort escalation-to expected-hash github id image-path instruction issue label limit max-recovery max-total-recovery message mime-type min-gap-sec model name operation original-message page profile project project-id reconcile-role reply-to reply-to-session request-id resource-policy-version role root-controller session space stall-sec status task task-id timeout title turn-id type url workgroup".split(" ");
   const out=[];
   for (let i=start;i<args.length;i++) {
-    if (args[i].startsWith("--")) { i++; continue; }
+    if (args[i].startsWith("--")) {
+      const flag=args[i].slice(2);
+      if(booleans.includes(flag)) continue;
+      if(!valued.includes(flag)) throw new Error("unknown option: "+args[i]);
+      if(i+1>=args.length || args[i+1].startsWith("--")) throw new Error("missing option value: "+args[i]);
+      i++; continue;
+    }
     out.push(args[i]);
   }
   return out;
@@ -585,11 +593,16 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     chats,
     Object.values(rt.tasks||{}),
     {
+      project,account,
       excludeChatIds:[...protection.protectedChatIds,...(excludeChatId?[excludeChatId]:[])],
       excludePageLabels:[...protection.labels],
     }
   );
-  for(const candidate of candidates) {
+  for(const candidate of candidates.filter(chat=>{
+    const linked=Object.values(rt.tasks||{}).filter(t=>t.sessionId===chat.id);
+    return linked.length && linked.every(t=>["COMPLETE","FAILED","CANCELLED","RESULT_RECORDED"].includes(String(t.status).toUpperCase()) &&
+      !t.watchdogPendingNotification && !t.externalResponsePending && !t.watchdogPausedForUserControl);
+  }).filter(chat=>sameConversationUrl(tabs.find(t=>t.label===chat.page)?.url,chat.url)).slice(0,1)) {
     let page=null;
     try { page=task.page(candidate.page); }
     catch {
@@ -602,11 +615,15 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     const tab=tabs.find(item=>item.label===candidate.page);
     if(!tab || tab.active || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) continue;
+    if(!snapshot || snapshot.approvalRequired!==false || snapshot.generating!==false || !composerIsEmpty(snapshot)) continue;
     const oldPage=candidate.page;
     if(imageSessionOccupancy(reg,candidate).occupied) continue;
-    try { await page.close(); }
-    catch { continue; }
+    if(!sameConversationUrl(await page.url(),candidate.url)) continue;
+    const context=coordinated("page-reclaim-context",{account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
+    if(context.sessionRefs.includes(candidate.id)) continue;
+    const fresh=(await task.tabs()).find(t=>t.label===candidate.page);
+    if(!fresh || fresh.active || fresh.openedBy!=="agent" || !sameConversationUrl(fresh.url,candidate.url)) continue;
+    await page.close(); // An uncertain close must not fall through to another candidate.
     candidate.page=null;
     candidate.detachedAt=new Date().toISOString();
     candidate.attachmentEpoch=Number(candidate.attachmentEpoch||0)+1;
@@ -616,7 +633,7 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
   return null;
 }
 
-async function reclaimOrphanManagedPage(reg, task, binding) {
+async function reclaimOrphanManagedPage(reg, task, binding, account=null) {
   const rt=await loadRuntime();
   const liveTasks=Object.values(rt.tasks||{}).filter(item=>activeTaskStatus(item.status));
   const hasLiveTasks=liveTasks.some(item=>{
@@ -646,19 +663,27 @@ async function reclaimOrphanManagedPage(reg, task, binding) {
 
   const pages=await task.pages().catch(()=>[]);
   const tabs=await task.tabs().catch(()=>[]);
-  for(const chat of Object.values(reg.chats||{})) if(samePhysicalSpace(chat,binding,task) && imageSessionOccupancy(reg,chat).occupied)
+  for(const chat of Object.values(reg.chats||{})) if(samePhysicalSpace(chat,binding,task))
     for(const tab of tabs) if(tab.label && sameConversationUrl(tab.url,chat.url)) protectedPages.add(tab.label);
   const candidates=orphanManagedPageCandidates(pages,tabs,{
     hasLiveTasks:false,
     protectedPageLabels:[...protectedPages],
   });
-  for(const page of candidates) {
-    const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) continue;
-    try {
-      await page.close();
-      return {page:page.label,reason:"orphan-managed"};
-    } catch {}
+  for(const page of candidates.filter(page=>{
+    const tab=tabs.find(t=>t.label===page.label);
+    return /^(about:blank|chrome:\/\/newtab\/?$)$/i.test(String(tab?.url||"")) ||
+      !!projectHomeId(binding.projectUrl) && projectHomeId(tab?.url)===projectHomeId(binding.projectUrl);
+  }).slice(0,1)) {
+    const tab=tabs.find(t=>t.label===page.label), blank=/^(about:blank|chrome:\/\/newtab\/?$)$/i.test(tab.url);
+    const snapshot=blank?null:await state(page).catch(()=>null);
+    if(!blank && (!snapshot || snapshot.approvalRequired!==false || snapshot.generating!==false || !composerIsEmpty(snapshot))) continue;
+    if(!blank && await page.url()!==tab.url) continue;
+    const context=coordinated("page-reclaim-context",{account:account||binding.account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
+    if(context.unboundAny || (blank?context.unboundProjectIds.length:context.unboundProjectIds.includes(projectHomeId(tab.url)))) continue;
+    const fresh=(await task.tabs()).find(t=>t.label===page.label);
+    if(!fresh || fresh.active || fresh.openedBy!=="agent" || fresh.url!==tab.url) continue;
+    await page.close();
+    return {page:page.label,reason:"orphan-managed"};
   }
   return null;
 }
@@ -712,7 +737,7 @@ async function newManagedPage(reg, project, account, task, binding, excludeChatI
   catch(error) {
     if(!pageBudgetError(error)) throw error;
     const reclaimed=await reclaimIdlePageSlot(reg,project,account,task,binding,excludeChatId) ||
-      await reclaimOrphanManagedPage(reg,task,binding);
+      await reclaimOrphanManagedPage(reg,task,binding,account);
     if(reclaimed) {
       try { const page=await task.newPage(); await clearCapacityWait(reg,account,binding); return page; }
       catch(errorAfterReclaim) { if(!pageBudgetError(errorAfterReclaim)) throw errorAfterReclaim; }
@@ -723,7 +748,15 @@ async function newManagedPage(reg, project, account, task, binding, excludeChatI
     if(options.allowOverflow && elapsedSec>=CAPACITY_OVERFLOW_AFTER_SEC) {
       try {
         const overflow=await overflowManagedTask(reg,project,account,binding);
-        const page=await overflow.task.newPage();
+        let page;
+        try { page=await overflow.task.newPage(); }
+        catch(error) {
+          if(!pageBudgetError(error)) throw error;
+          const reclaimed=await reclaimIdlePageSlot(reg,project,account,overflow.task,overflow.binding,excludeChatId) ||
+            await reclaimOrphanManagedPage(reg,overflow.task,overflow.binding,account);
+          if(!reclaimed) throw error;
+          page=await overflow.task.newPage();
+        }
         await clearCapacityWait(reg,account,binding);
         return {...overflow,page,overflow:true};
       } catch(overflowError) {

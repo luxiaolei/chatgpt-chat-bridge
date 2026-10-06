@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import "../src/task-policy.js";
+import "../src/session-policy.js";
 const source=await readFile(path.resolve("src/main.js"),"utf8");
 const begin=source.indexOf("async function reclaimOrphanManagedPage");
 const end=source.indexOf("\nasync function newManagedPage",begin);
@@ -12,18 +13,22 @@ const code='const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+s
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 
 async function run(snapshot) {
-  snapshot={composerCount:1,composerRawText:snapshot.composerText,...snapshot};
+  snapshot={approvalRequired:false,composerCount:1,composerRawText:snapshot.composerText,...snapshot};
   let closed=0;
-  const page={label:"p1",close:async()=>{closed++}};
-  const task={spaceId:7,pages:async()=>[page],tabs:async()=>[{label:"p1",active:false,openedBy:"agent"}]};
-  const reclaim=await new AsyncFunction("loadRuntime","activeTaskStatus","orphanManagedPageCandidates","state",
+  const home="https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project";
+  const page={label:"p1",url:async()=>home,close:async()=>{closed++}};
+  const task={spaceId:7,pages:async()=>[page],tabs:async()=>[{label:"p1",url:home,active:false,openedBy:"agent"}]};
+  const reclaim=await new AsyncFunction("loadRuntime","activeTaskStatus","orphanManagedPageCandidates","state","projectHomeId","coordinated","sameConversationUrl",
     code+";return reclaimOrphanManagedPage;")(
       async()=>({tasks:{}}),
       status=>!["COMPLETE","FAILED","CANCELLED","BLOCKED","RESULT_RECORDED"].includes(String(status).toUpperCase()),
       (pages,tabs)=>pages.filter(candidate=>candidate.label===tabs[0].label&&!tabs[0].active&&tabs[0].openedBy==="agent"),
       async()=>snapshot,
+      value=>value===home?"g-p-"+"a".repeat(32):null,
+      ()=>({sessionRefs:[],unboundProjectIds:[],unboundAny:false}),
+      globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,
     );
-  const result=await reclaim({},task,{spaceName:"managed",spaceId:7});
+  const result=await reclaim({},task,{spaceName:"managed",spaceId:7,projectUrl:home},"a");
   return {result,closed};
 }
 
