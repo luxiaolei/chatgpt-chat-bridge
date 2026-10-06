@@ -1,0 +1,12 @@
+{
+  "submit": "e=>uh(rE.getText(),e)",
+  "getter": "getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,M.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}",
+  "getterSha256": "ce893debd58fa25e54f219f9114c4c43fa80cf58cdf016ab798329bf0e681ca5",
+  "observedAt": "2026-10-06T00:09:01.643Z",
+  "evidenceSha256": "013d4f62ecba6d60a3182fe678047fe46e1d0970c9d9eb052d87a10e8a2abf82",
+  "observedCompoundPredicate": {
+    "candidateCountNotOne": true,
+    "textBetweenNotFunction": false,
+    "normalizedDocRequestMismatch": false
+  }
+}

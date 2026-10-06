@@ -168,3 +168,36 @@ test('persisted getter rejects changed document and empty, non-string or throwin
   native.formatted=false;native.error=new Error('native getter failed');
  }),/native getter failed/);
 });
+
+const liveAliasFormat=JSON.parse(await readFile(new URL('./native-submission-submit-alias-fixture.json',import.meta.url),'utf8'));
+const configureLiveAlias=({host,editor})=>{
+ host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+liveAliasFormat.submit)();
+ editor.getText=new Function('M','return {'+liveAliasFormat.getter+'};')({g:()=>fixture.body}).getText;
+};
+test('observed uh/rE submit alias retains the exact M getter and deduplicates one editor',async()=>{
+ assert.equal(liveAliasFormat.getter,currentFormat.getter);
+ assert.equal(crypto.createHash('sha256').update(liveAliasFormat.getter).digest('hex'),liveAliasFormat.getterSha256);
+ const witness=await inspect(context=>{
+  configureLiveAlias(context);
+  context.host.__reactFiber$fixture.memoizedState.next={memoizedState:{deps:[context.editor]}};
+ });
+ assert.equal(witness.body,fixture.body);
+ assert.equal(witness.getterSource,liveAliasFormat.getter);
+ assert.equal(witness.bodyHash,crypto.createHash('sha256').update(fixture.body).digest('hex'));
+});
+test('observed submit alias rejects mixed methods, nonunique editors, wrong docs and changed full request',async()=>{
+ for(const change of [
+  ({host})=>host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return e=>uh(OTHER.getText(),e)')(),
+  ({editor})=>editor.getText=new Function('T','return {'+getter+'};')({g:()=>fixture.body}).getText,
+  ({editor})=>editor.getText=()=>fixture.body,
+  ({editor})=>editor.view.dom={},
+  ({editor})=>editor.view.state.doc={},
+  ({editor})=>editor.dictation.document={},
+  ({composer})=>composer.pmViewDesc.node={},
+  ({editor})=>editor.plainTextMode=true,
+  ({editor})=>editor.markdownEditor.serialize=null,
+  ({host,editor})=>host.__reactFiber$fixture.memoizedState.memoizedState.deps.push({...editor}),
+  ({env})=>env.request+=' changed footer',
+  ({env})=>env.email='other@example.test',
+ ]) await assert.rejects(inspect(context=>{configureLiveAlias(context);change(context);}),/NATIVE_SUBMISSION_UNVERIFIED/);
+});
