@@ -1741,6 +1741,7 @@ async function nativeSubmissionWitness(page, request, expectedIdentity) {
     for(let i=0;fiber&&i<16;i++,fiber=fiber.return) {
       const submit=String(fiber.memoizedProps?.onSubmit);
       const format=formats.find(value=>submit===value.submit ||
+        (value.submit==='e=>up(rT.getText(),e)' && submit==='e=>uh(rE.getText(),e)') ||
         (value.persistedText && submit==='e=>{ev(F.getText(),e)}'));
       if(!format) continue;
       for(let hook=fiber.memoizedState,n=0;hook&&n<64;n++,hook=hook.next) {
