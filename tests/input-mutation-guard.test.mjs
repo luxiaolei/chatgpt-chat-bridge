@@ -35,6 +35,15 @@ function fixture(change={}) {
     reg:{accounts:change.noIdentity?{}:{a:{identity:'verified-user'}},chats:{[chat.id]:chat},
       projects:{P:{activeAccount:'a',lifecycle:change.discard?{draftPolicy:'discard'}:{},bindings:{a:{projectUrl:home}}}}}};
   composer.outerHTML='<div id="prompt-textarea">'+(change.raw||'')+'</div>';form.outerHTML='<form>'+composer.outerHTML+'</form>';
+  if(change.discard&&!change.plainComposer) {
+    const doc={get content(){return {size:composer.textContent.length};},textBetween:()=>composer.innerText,
+      toJSON:()=>({type:'doc',content:[{type:'paragraph',text:composer.textContent}]})};
+    const getter='getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,T.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}';
+    const editor={...new Function('T','return {'+getter+'};')({g:node=>node.textBetween()}),view:{dom:composer,state:{doc,tr:{delete:()=>{}}},composing:false},dictation:{document:doc},plainTextMode:false,markdownEditor:{serialize:node=>node.textBetween()}};
+    editor.view.dispatch=()=>{calls.push('discard');if(change.clearFails)throw Error('uncertain native clear');if(!change.clearNotEmpty)composer.textContent=composer.innerText='';};
+    composer.pmViewDesc={node:doc};composer.parentElement={__reactFiber$fixture:{memoizedProps:{onSubmit:new Function('return e=>{eg(j.getText(),e)}')()},memoizedState:{memoizedState:{deps:[editor]}}}};
+    f.nativeDoc=doc;f.nativeEditor=editor;
+  }
   f.document={title:'Synthetic',visibilityState:'visible',body:root,querySelector:s=>
     s==='main'||s==='[role="main"]'?root:s==='form'?form:
     s.includes('prompt-textarea')?composers[0]||null:s==='button[data-testid="send-button"]'?send:null,
@@ -62,13 +71,14 @@ async function run(f,fn) {
     const setup=[
       'const reg=f.reg, page=f.page, chat=f.chat;',
       'assertImagePageFree=async()=>{};detectWebRateLimit=async()=>{};recordDeliveryStage=async()=>{};',
+      'if(f.change.afterIntent)recordDeliveryStage=async phase=>{if(phase==="DRAFT_DISCARD_INTENT")f.change.afterIntent(f);};',
       "coordinated=()=>{if(f.change.paused)throw Error('DRAFT_DISCARD_ADMISSION_DENIED');return {ok:true};};",
       "saveDraftBackup=async backup=>{f.backup=backup;return {sha256:'synthetic',bytes:1};};",
       "applyModelSpec=async()=>{f.calls.push('model');return {model:'Latest',effort:'High'};};",
       "setEffort=async()=>{f.calls.push('effort');return true;};saveRegistry=async()=>{};touchRuntime=async()=>{};print=()=>{};",
       'openBoundTask=async()=>({task:{spaceId:2},binding:f.reg.projects.P.bindings.a});',
       'newManagedPage=async()=>page;openProjectPage=async()=>{f.currentUrl=home;};',
-      "waitForDelivery=async()=>({url:f.currentUrl,lastUser:message,lastUserId:'new-user',messageCount:1,composerText:''});",
+      "waitForDelivery=async()=>({url:f.currentUrl,lastUser:message,lastUserId:'33333333-3333-4333-8333-333333333333',lastUserSource:{text:message,messageId:'33333333-3333-4333-8333-333333333333',conversationId:chat.id},lastUserSourceCondition:'BOUND_SOURCE',observedAt:new Date().toISOString(),messageCount:1,composerText:''});",
       'return {state,prepare:()=>assertInputSafe(page,"verified-user",url,{discardDraft:true}),send:()=>sendMessage(page,message,url),dispatch:()=>applyDispatchModel(page,chat,"Latest","High"),',
       "model:async()=>{const positionals=()=>['Latest'],opt=()=>null;"+modelBody+'},',
       "effort:async()=>{const positionals=()=>['High'];"+effortBody+'},',
@@ -100,7 +110,7 @@ test('authorized Project draft discard backs up raw text and enters the normal s
       const f=fixture({raw,discard:true});
       await run(f,api=>api[entry]());
       assert.equal(f.backup?.rawText,raw,entry);
-      assert.equal(f.calls.filter(x=>x==='fill').length,entry==='dispatch'?1:2,entry);
+      assert.equal(f.calls.filter(x=>x==='discard').length,1,entry);assert.equal(f.calls.filter(x=>x==='fill').length,entry==='dispatch'?0:1,entry);
     }
   }
 });
@@ -113,6 +123,31 @@ test('authorized discard still preserves a changed draft, paused owner and parti
     if(change.paused||change.resumedUserControl)assert.equal(f.composer.textContent,'old draft');
   }
 });
+test('intent persistence cannot clear new draft, foreign CID or an unrendered FileList',async()=>{
+  for(const kind of ['draft','cid','file-list','document','login','generation','approval']) {
+    const original='backed-up old draft',f=fixture({raw:original,discard:true,afterIntent:f=>{
+      if(kind==='draft')f.composer.textContent=f.composer.innerText='new user draft';
+      if(kind==='cid'){f.currentUrl=url.replace(f.chat.id,'22222222-2222-4222-8222-222222222222');f.composer.textContent=f.composer.innerText='foreign unbacked draft';}
+      if(kind==='file-list'){const query=f.document.querySelectorAll;f.document.querySelectorAll=s=>s==='input[type="file"]'?[{files:{length:1}}]:query(s);}
+      if(kind==='document')f.nativeDoc.toJSON=()=>({type:'doc',changed:true});
+      if(kind==='login')f.login='other-user';
+      if(kind==='generation')f.buttons.push(node('Stop generating',{attrs:{'data-testid':'stop-button'}}));
+      if(kind==='approval'){const query=f.document.querySelectorAll;f.document.querySelectorAll=s=>s==='[role="alert"], [data-testid*="error" i]'?[node('Codex Tasks Allow ChatGPT to use Codex Tasks?')]:query(s);}
+    }});
+    await run(f,api=>assert.rejects(api.prepare()));
+    assert.equal(f.backup.rawText,original,kind);assert.equal(f.calls.includes('discard'),false,kind);assert.equal(f.calls.includes('fill'),false,kind);assert.equal(f.calls.includes('send'),false,kind);
+    assert.equal(f.composer.textContent,kind==='draft'?'new user draft':kind==='cid'?'foreign unbacked draft':original,kind);
+  }
+});
+test('unavailable atomic editor capability is explicit and never falls back to fill or DOM clear',async()=>{
+  for(const change of [{plainComposer:true},{unsupportedView:true},{composing:true}]) {
+    const f=fixture({raw:'keep',discard:true,...change});
+    if(change.unsupportedView)f.nativeEditor.view.dispatch=undefined;
+    if(change.composing)f.nativeEditor.view.composing=true;
+    await run(f,api=>assert.rejects(api.prepare(),/DRAFT_DISCARD_UNSUPPORTED/));
+    assert.equal(f.composer.textContent,'keep');assert.equal(f.calls.includes('discard'),false);assert.equal(f.calls.includes('fill'),false);
+  }
+});
 test('discard permission never bypasses attachment, composer, login or clear acknowledgement guards',async()=>{
   for(const change of [{attachment:true},{count:2},{login:'wrong-user'},{loginAfterFill:'wrong-user'},{clearNotEmpty:true},{clearFails:true}]) {
     const f=fixture({raw:' ',discard:true,...change});
@@ -120,13 +155,13 @@ test('discard permission never bypasses attachment, composer, login or clear ack
     assert.equal(f.calls.includes('send'),false);
     assert.equal(f.calls.some(x=>x.startsWith('key:')),false);
     if(change.attachment||change.count||change.login)assert.equal(f.backup,undefined);
-    assert.equal(f.calls.filter(x=>x==='fill').length,change.clearNotEmpty||change.clearFails||change.loginAfterFill?1:0);
+    assert.equal(f.calls.filter(x=>x==='discard').length,change.clearNotEmpty||change.clearFails||change.loginAfterFill?1:0);
   }
 });
 test('multi-node native draft backup preserves the complete editor document and form',async()=>{
   const f=fixture({raw:'firstsecond',discard:true});
   f.composer.outerHTML='<div id="prompt-textarea"><p>first</p><p>second</p></div>';
-  f.composer.innerText='first\nsecond';f.composer.pmViewDesc={node:{toJSON:()=>({type:'doc',content:[{type:'paragraph',text:'first'},{type:'paragraph',text:'second'}]})}};
+  f.composer.innerText='first\nsecond';f.nativeDoc.toJSON=()=>({type:'doc',content:f.composer.textContent?[{type:'paragraph',text:'first'},{type:'paragraph',text:'second'}]:[]});
   f.document.querySelector('form').outerHTML='<form>'+f.composer.outerHTML+'</form>';
   await run(f,api=>api.prepare());
   assert.equal(f.backup.rawText,'firstsecond');assert.equal(f.backup.text,'first\nsecond');
@@ -136,7 +171,7 @@ test('semantic empty p/br allows one complete send and read-only state performs 
   const f=fixture();f.composer.innerText='\n'; // Empty paragraph/br has no semantic textContent.
   await run(f,async api=>{
     const snapshot=await api.state(f.page);assert.equal(snapshot.composerText,'');assert.equal(snapshot.composerAttachmentsEmpty,true);assert.deepEqual(f.calls,[]);
-    const receipt=await api.send();assert.equal(receipt.delivered,true);assert.equal(receipt.lastUserId,'new-user');
+    const receipt=await api.send();assert.equal(receipt.delivered,true);assert.equal(receipt.lastUserId,'33333333-3333-4333-8333-333333333333');
   });
   assert.equal(f.calls.filter(x=>x==='fill').length,1);assert.equal(f.calls.filter(x=>x==='send').length,1);
   assert.equal(f.calls.filter(x=>x==='auth').length,1);

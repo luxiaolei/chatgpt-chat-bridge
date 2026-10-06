@@ -1885,9 +1885,8 @@ async function assertInputSafe(page, expectedIdentity=null, targetUrl=null, opti
     if(fresh.composerRawText!==snapshot.composerRawText) throw new Error("USER_DRAFT_PRESENT");
     if(fresh.approvalRequired!==false || fresh.generating!==false) throw new Error("CHAT_BUSY");
     assertComposerSafe({...fresh,composerRawText:""});
-    if(JSON.stringify(await capture())!==JSON.stringify(backup)) throw new Error("DRAFT_CHANGED_BEFORE_DISCARD");
     await recordDeliveryStage("DRAFT_DISCARD_INTENT",{sha256:retained.sha256});
-    await page.fill(COMPOSER_SELECTOR,""); // No destructive fallback after an uncertain mutation.
+    await page.evaluate(nativeSubmissionProbe,{selector:COMPOSER_SELECTOR,expectedIdentity:identity,discardBackup:backup});
     const cleared=await state(page,false,null,true);
     assertInputTarget(cleared,targetUrl); assertComposerSafe(cleared);
     if(await readLogin()!==identity) throw new Error("INPUT_LOGIN_MISMATCH");
@@ -1921,14 +1920,17 @@ async function nativeSubmissionWitness(page, request, expectedIdentity, capabili
 }
 
 // Volatile UI formats live in one closed browser probe; no generic alias matching.
-async function nativeSubmissionProbe({selector,request,expectedIdentity,capabilityOnly=false}) {
+async function nativeSubmissionProbe({selector,request,expectedIdentity,capabilityOnly=false,discardBackup=null}) {
     const fail=()=>{throw new Error('NATIVE_SUBMISSION_UNVERIFIED');};
     const composers=[...document.querySelectorAll(selector)];
     if(composers.length!==1) return fail();
     const composer=composers[0], doc=composer.pmViewDesc?.node;
-    if(!doc) return null; // Legacy plain composer retains the existing exact-text path.
+    if(!doc) {
+      if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
+      return null; // Legacy plain composer retains the existing exact-text path.
+    }
     if(!expectedIdentity) return fail();
-    const session=await fetch('/api/auth/session').then(r=>r.json());
+    const session=await fetch('/api/auth/session',{credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(5000)}).then(r=>r.ok===false?null:r.json());
     if(session?.user?.id!==expectedIdentity && session?.user?.email!==expectedIdentity) return fail();
     let host=composer, fiber=null;
     for(let i=0;host&&i<3&&!fiber;i++,host=host.parentElement)
@@ -1961,8 +1963,40 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
             String(editor.getPersistedText)===format.getPersistedText))) candidates.add(editor);
       }
     }
-    if(!formatRecognized) throw new Error('NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED:chatgpt-native-adapter-v1:FORMAT');
-    if(candidates.size!==1 || typeof doc.textBetween!=='function') return fail();
+    if(!formatRecognized) throw new Error(discardBackup?'DRAFT_DISCARD_UNSUPPORTED':'NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED:chatgpt-native-adapter-v1:FORMAT');
+    if(candidates.size!==1 || typeof doc.textBetween!=='function') {
+      if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
+      return fail();
+    }
+    if(discardBackup) {
+      const editor=[...candidates][0],view=editor.view,editorState=view.state,transaction=editorState.tr;
+      if(!discardBackup.document || typeof doc.toJSON!=='function' || view.composing!==false || view.isDestroyed===true ||
+        typeof view.dispatch!=='function' || typeof transaction?.delete!=='function') throw new Error('DRAFT_DISCARD_UNSUPPORTED');
+      transaction.delete(0,doc.content.size);
+      // The final comparison and native transaction share one synchronous browser action.
+      const current=[...document.querySelectorAll(selector)],form=composer.closest('form');
+      const actual={url:location.href,rawText:composer.textContent,text:composer.innerText,composerHtml:composer.outerHTML,
+        formHtml:form?.outerHTML,document:doc.toJSON()};
+      const fileLists=[...document.querySelectorAll('input[type="file"]')].map(input=>input.files);
+      if(current.length!==1 || current[0]!==composer || !form || editorState!==view.state || view.state.doc!==doc ||
+        editor.dictation.document!==doc || composer.pmViewDesc?.node!==doc || JSON.stringify(actual)!==JSON.stringify(discardBackup) ||
+        !fileLists.every(files=>files && Number.isSafeInteger(files.length) && files.length===0) ||
+        form.querySelectorAll('button[aria-label^="Remove "], img, [data-testid="attachment-preview"]').length ||
+        composer.querySelectorAll('img, [contenteditable="false"]').length) throw new Error('DRAFT_CHANGED_BEFORE_DISCARD');
+      const messages='[data-message-author-role], [data-content-search-unit-key], [data-chatgpt-search-unit-key]';
+      const visible=node=>{const s=getComputedStyle(node);return node.getClientRects().length && s.visibility!=='hidden' && s.display!=='none' &&
+        s.opacity!=='0' && !node.closest('[inert], [hidden], [aria-hidden="true"]');};
+      if([...document.querySelectorAll('button')].some(b=>visible(b) && !b.closest(messages) &&
+          (/(?:^|-)stop(?:-|$)/i.test(b.getAttribute('data-testid')||'') ||
+           /^(?:Stop(?: generating| generation| streaming)?|停止(?:生成|回答|输出)?)$/i.test((b.getAttribute('aria-label')||b.innerText||'').trim()))) ||
+        [...document.querySelectorAll('[role="alert"], [data-testid*="error" i]')].some(n=>visible(n) && !n.closest(messages) && !n.querySelector(messages) &&
+          /^Codex Tasks\s+Allow ChatGPT to use Codex Tasks\?(?:\s|$)/.test((n.innerText||'').trim()))) throw new Error('CHAT_BUSY');
+      view.dispatch(transaction);
+      const cleared=view.state.doc;
+      if(location.href!==discardBackup.url || composer.textContent!=='' || composer.pmViewDesc?.node!==cleared ||
+        editor.dictation.document!==cleared || cleared.textBetween(0,cleared.content.size,'\n')!=='') throw new Error('DRAFT_DISCARD_UNCONFIRMED');
+      return {discarded:true};
+    }
     if(capabilityOnly===true) return {supported:true};
     if(doc.textBetween(0,doc.content.size,'\n').replace(/\s+/g,' ').trim()!==request.replace(/\s+/g,' ').trim()) return fail();
     const editor=[...candidates][0], body=editor.getText();
