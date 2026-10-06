@@ -4,7 +4,6 @@ import {mkdtemp,mkdir,writeFile,readFile,rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import path from "node:path";
 import {spawnSync} from "node:child_process";
-import {createHash} from "node:crypto";
 
 test("reclaim reads preserve UNKNOWN, alias identity and exact claim while excluding native Codex pools",async()=>{
   const root=await mkdtemp(path.join(tmpdir(),"bridge-reclaim-")),config=path.join(root,"config"),state=path.join(root,"state");

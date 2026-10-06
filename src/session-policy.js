@@ -17,14 +17,16 @@
     });
   }
 
-  function sameConversationUrl(actual, expected) {
+  function sameConversationUrl(actual, expected, requiredProject=null) {
     try {
       const a = new URL(actual), b = new URL(expected);
       if (a.origin !== "https://chatgpt.com" || b.origin !== a.origin || a.username || b.username || a.password || b.password) return false;
       const conversation = url => /\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$)/i.exec(url.pathname)?.[1]?.toLowerCase();
       const project = url => /\/g\/(g-p-[0-9a-f]{32})(?:[-/]|$)/i.exec(url.pathname)?.[1]?.toLowerCase();
       const id = conversation(a), other = conversation(b);
-      return !!id && id === other && (!project(a) || !project(b) || project(a) === project(b));
+      return !!id && id === other && (requiredProject
+        ? project(a) === requiredProject && project(b) === requiredProject
+        : !project(a) || !project(b) || project(a) === project(b));
     } catch { return false; }
   }
   globalObject.__CHAT_BRIDGE_SESSION_POLICY__ = { recoveryRequired, contextExhausted, sameConversationUrl };

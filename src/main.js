@@ -583,6 +583,8 @@ function spaceProtection(reg, runtime, binding, task, tabs=[]) {
 }
 
 async function reclaimIdlePageSlot(reg, project, account, task, binding, excludeChatId=null) {
+  const targetProject=projectHomeId(binding.projectUrl);
+  if(!targetProject) return null;
   const rt=await loadRuntime();
   const tabs=await task.tabs().catch(()=>[]);
   const activeLabels=tabs.filter(t=>t.active&&t.label).map(t=>t.label);
@@ -602,7 +604,7 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     const linked=Object.values(rt.tasks||{}).filter(t=>t.sessionId===chat.id);
     return linked.length && linked.every(t=>["COMPLETE","FAILED","CANCELLED","RESULT_RECORDED"].includes(String(t.status).toUpperCase()) &&
       !t.watchdogPendingNotification && !t.externalResponsePending && !t.watchdogPausedForUserControl);
-  }).filter(chat=>sameConversationUrl(tabs.find(t=>t.label===chat.page)?.url,chat.url)).slice(0,1)) {
+  }).filter(chat=>sameConversationUrl(tabs.find(t=>t.label===chat.page)?.url,chat.url,targetProject)).slice(0,1)) {
     let page=null;
     try { page=task.page(candidate.page); }
     catch {
@@ -618,11 +620,11 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     if(!snapshot || snapshot.approvalRequired!==false || snapshot.generating!==false || !composerIsEmpty(snapshot)) continue;
     const oldPage=candidate.page;
     if(imageSessionOccupancy(reg,candidate).occupied) continue;
-    if(!sameConversationUrl(await page.url(),candidate.url)) continue;
+    if(!sameConversationUrl(await page.url(),candidate.url,targetProject)) continue;
     const context=coordinated("page-reclaim-context",{account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
-    if(context.sessionRefs.includes(candidate.id)) continue;
+    if(context.sessionRefs.includes(candidate.id) || context.unboundAny || context.unboundProjectIds.includes(targetProject)) continue;
     const fresh=(await task.tabs()).find(t=>t.label===candidate.page);
-    if(!fresh || fresh.active || fresh.openedBy!=="agent" || !sameConversationUrl(fresh.url,candidate.url)) continue;
+    if(!fresh || fresh.active || fresh.openedBy!=="agent" || !sameConversationUrl(fresh.url,candidate.url,targetProject)) continue;
     await page.close(); // An uncertain close must not fall through to another candidate.
     candidate.page=null;
     candidate.detachedAt=new Date().toISOString();
@@ -2691,9 +2693,9 @@ async function ensureProjectLocation(reg, projectName, account, options={}) {
   if(!accountRecord?.identity) return {ok:false,status:"NEEDS_LOGIN",project:projectName,account};
   const current=pr.bindings?.[account]||null;
   if(current?.projectUrl && bindingObserved(reg,account,current)) {
+    const {task,spaceName,profileId}=await accountManagedTask(reg,account,current?.profileId||null);
+    const page=await newManagedPage(reg,projectName,account,task,{...current,spaceName,profileId,spaceId:task.spaceId});
     try {
-      const {task,spaceName,profileId}=await accountManagedTask(reg,account,current?.profileId||null);
-      const page=await newManagedPage(reg,projectName,account,task,{...current,spaceName,profileId,spaceId:task.spaceId});
       const url=await openProjectPage(page,projectName,current.projectUrl);
       current.spaceName=spaceName;
       current.profileId=profileId;
@@ -3423,29 +3425,10 @@ async function pruneProjectSpace(reg, project, account=null) {
     if(!item) break;
     detached.push(item);
   }
-  const pages=await pagesOf(task), tabs=await task.tabs().catch(()=>[]);
+  const orphan=await reclaimOrphanManagedPage(reg,task,binding,a),closed=orphan?[orphan.page]:[];
+  const tabs=await task.tabs().catch(()=>[]);
   const protection=spaceProtection(reg,rt,binding,task,tabs);
   for(const tab of tabs) if(tab.active&&tab.label) protection.labels.add(tab.label);
-  const closed=[];
-  for(const page of pages) {
-    if(protection.labels.has(page.label)) continue;
-    const tab=tabs.find(item=>item.label===page.label);
-    if(!tab || tab.active || tab.openedBy!=="agent") continue;
-    const snapshot=await state(page).catch(()=>null);
-    if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) continue;
-    if(Object.values(reg.chats||{}).some(chat=>samePhysicalSpace(chat,binding,task) && (chat.page===page.label || sameConversationUrl(tab.url,chat.url)) && imageSessionOccupancy(reg,chat).occupied)) continue;
-    try { await page.close(); }
-    catch { continue; }
-    closed.push(page.label);
-    for(const chat of Object.values(reg.chats||{})) {
-      if(samePhysicalSpace(chat,binding,task) && chat.page===page.label) {
-        chat.page=null;
-        chat.detachedAt=new Date().toISOString();
-        chat.attachmentEpoch=Number(chat.attachmentEpoch||0)+1;
-      }
-    }
-  }
-  if(closed.length) await saveRegistry(reg);
   return {ok:true,project,account:a,spaceName:binding.spaceName,spaceId:task.spaceId,
     protected:[...protection.labels],detached,closed};
 }
