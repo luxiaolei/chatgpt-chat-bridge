@@ -1800,8 +1800,11 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
     if(targetUrl) assertInputTarget(before,targetUrl);
     const inputTarget=before.url;
     const identity=await assertInputSafe(page,expectedIdentity,inputTarget);
-    await nativeSubmissionWitness(page,null,identity,true);
-    await assertInputSafe(page,identity,inputTarget);
+    if(await nativeSubmissionWitness(page,null,identity,true)) await assertInputSafe(page,identity,inputTarget);
+    else {
+      const current=await state(page,false,null,true);
+      assertComposerSafe(current); assertInputTarget(current,inputTarget);
+    }
     before.expectedMessage=msg; before.targetUrl=targetUrl||before.url;
     await recordDeliveryStage("BEFORE_INPUT",{snapshot:deliveryStageSnapshot(before,page),targetUrl:before.targetUrl},msg);
     try { await page.fill(COMPOSER_SELECTOR,msg); }
