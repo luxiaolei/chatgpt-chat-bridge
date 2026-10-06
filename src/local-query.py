@@ -228,6 +228,11 @@ def main():
     runtime = load_store(config, state, "runtime")
     if action == "health":
         value = health(reg, runtime)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("bridge_release_version", pathlib.Path(__file__).with_name("release-version.py"))
+        release = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(release)
+        value["release"] = release.health(state, pathlib.Path(__file__).parent)
     elif action == "topology":
         value = topology(reg, runtime)
     elif action == "runtime":

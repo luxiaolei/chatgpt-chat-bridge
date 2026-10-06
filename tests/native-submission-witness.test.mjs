@@ -201,3 +201,11 @@ test('observed submit alias rejects mixed methods, nonunique editors, wrong docs
   ({env})=>env.email='other@example.test',
  ]) await assert.rejects(inspect(context=>{configureLiveAlias(context);change(context);}),/NATIVE_SUBMISSION_UNVERIFIED/);
 });
+
+test('unknown UI format reports an explicit bounded adapter diagnostic before Send',async()=>{
+ await assert.rejects(inspect(({host})=>host.__reactFiber$fixture.memoizedProps.onSubmit=()=>{}),error=>{
+  assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');
+  assert.deepEqual(error.nativeAdapter,{formatVersion:'chatgpt-native-adapter-v1',phase:'FORMAT',status:'UNSUPPORTED'});
+  return true;
+ });
+});

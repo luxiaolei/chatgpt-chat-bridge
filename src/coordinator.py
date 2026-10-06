@@ -17,6 +17,17 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 
+_EXECUTING_CODE = sys._getframe().f_code
+
+
+def release_version_module():
+    import importlib.util
+    path = pathlib.Path(__file__).with_name("release-version.py")
+    spec = importlib.util.spec_from_file_location("bridge_release_version", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 def stamp():
     return datetime.now(timezone.utc).isoformat()
@@ -32,6 +43,7 @@ CAPACITY_WAITING = "WAITING_CAPACITY"
 PRE_SEND_RETRY_LIMIT = 3
 PRE_SEND_RETRY_INITIAL_SEC = 5
 PRE_SEND_RETRY_MAX_SEC = 60
+RESOURCE_WAIT_LIMIT_SEC = 30 * 60
 
 
 def ensure_column(db, table, name, declaration):
@@ -259,17 +271,13 @@ def connection(config, state, initialize=True):
     return db
 
 
-def begin_immediate(db):
-    for attempt in range(6):
-        try:
-            db.execute("BEGIN IMMEDIATE")
-            return
-        except sqlite3.OperationalError as error:
-            if "locked" not in str(error).lower() or attempt == 5:
-                raise
-            # A failed upgrade can leave a stale read snapshot on this handle.
-            db.rollback()
-            time.sleep(0.05 * (2 ** attempt))
+def begin_immediate(db, timeout=60):
+    import importlib.util
+    path = pathlib.Path(__file__).with_name("state-store.py")
+    spec = importlib.util.spec_from_file_location("bridge_state_store", path)
+    store = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(store)
+    store.begin_immediate(db, timeout=timeout)
 
 
 def registry(db):
@@ -377,7 +385,11 @@ def response(row):
     if "routing_advice" in row.keys() and row["routing_advice"]:
         result["routingAdvice"] = json.loads(row["routing_advice"])
     if row["result"]:
-        candidate = (json.loads(row["result"]) or {}).get("newSession")
+        detail = json.loads(row["result"]) or {}
+        for key in ("resourceWait", "resourceWaitNotice"):
+            if key in detail:
+                result[key] = detail[key]
+        candidate = detail.get("newSession")
         if isinstance(candidate, dict) and candidate.get("format") == "uncertain-new-session-v1":
             result["uncertainNewSession"] = candidate
     return result
@@ -521,7 +533,7 @@ def work_native(db, row):
         return finish(db, row, "SENT", result=result)
     if receipt.get("deliveryStage") == "PRE_SEND":
         if receipt.get("code") in {"NATIVE_TARGET_BUSY", "NATIVE_ADMISSION_BLOCKED"}:
-            return finish(db, row, "QUEUED", receipt["code"], 30, result=result)
+            return finish(db, row, "QUEUED", receipt["code"], 30, result=result, resource_receipt=receipt)
         return finish(db, row, "FAILED_PRE_SEND", receipt.get("code"), result=result, pre_send_failure=True)
     return finish(db, row, "DELIVERY_UNKNOWN", receipt.get("code"), result=result)
 
@@ -1615,6 +1627,22 @@ def set_control_mode(db, project, mode, reason=None, workgroup=None):
                   ON CONFLICT(scope) DO UPDATE SET mode=excluded.mode,epoch=excluded.epoch,
                     reason=excluded.reason,updated_at=excluded.updated_at""",
                (scope, mode, epoch, reason, stamp()))
+    # Settle active waits at the control boundary so manual pauses never spend this budget.
+    for operation in db.execute("SELECT * FROM operations WHERE status IN ('QUEUED','DISPATCHING') AND kind IN ('dispatch','rotation')"):
+        result = json.loads(operation["result"]) if operation["result"] else {}
+        episode = result.get("resourceWait")
+        if not episode:
+            continue
+        paused = management_mode(db, operation["project"], operation["workgroup_id"])["mode"] in {"PAUSED", "DRAINING"}
+        last = episode.get("lastPhase") or {}
+        if paused and last.get("category") != "paused":
+            episode["resumeCategory"] = last.get("category")
+            result["resourceWait"] = advance_resource_wait(episode, time.time(), "paused", "ADMISSION_PAUSED")
+        elif not paused and last.get("category") == "paused":
+            result["resourceWait"] = advance_resource_wait(episode, time.time(), episode.pop("resumeCategory", "inactive"), "ADMISSION_RESUMED")
+        else:
+            continue
+        db.execute("UPDATE operations SET result=? WHERE id=?", (json.dumps(result), operation["id"]))
     db.commit()
     return {"scope": scope, "mode": mode, "epoch": epoch, "reason": reason}
 
@@ -2673,6 +2701,9 @@ def worker_diagnostic(returncode, stderr, phase, error=None, stdout=None):
         worker["capturedReceipt"] = {"deliveryStage": receipt["deliveryStage"]}
         if re.fullmatch(r"[A-Z0-9_]{1,100}", str(receipt.get("code") or "")):
             worker["capturedReceipt"]["code"] = receipt["code"]
+        adapter = receipt.get("nativeAdapter")
+        if adapter == {"formatVersion": "chatgpt-native-adapter-v1", "phase": "FORMAT", "status": "UNSUPPORTED"}:
+            worker["capturedReceipt"]["nativeAdapter"] = adapter
     result = {"worker": worker}
     # Full parsed witness is private diagnostic evidence, not a delivery upgrade.
     # In particular, timeout used to throw this away before uncertain_new_session.
@@ -2751,9 +2782,80 @@ def uncertain_new_session(db, row, result):
             "capturedAt": stamp()}
 
 
-def finish(db, row, status, reason=None, retry_after=0, result=None, session_ref=None, pre_send_failure=False):
+
+def resource_wait_category(receipt):
+    if not receipt or receipt.get("ok") is not False or receipt.get("deliveryStage") != "PRE_SEND":
+        return None
+    code = receipt.get("code")
+    if code == "PACING_DEFERRED":
+        return "mutex" if receipt.get("reason") == "UI_LOCK_BUSY" else "pacing"
+    return {"WEB_COOLDOWN_ACTIVE": "pacing", "CAPACITY_WAIT": "capacity",
+            "CHAT_BUSY": "busy", "USER_DRAFT_PRESENT": "draft", "NATIVE_TARGET_BUSY": "busy"}.get(code)
+
+
+def advance_resource_wait(episode, now, category, reason):
+    episode = dict(episode)
+    previous = episode.get("lastPhase") or {}
+    elapsed = max(0, now - previous.get("at", now))
+    if previous.get("category") in {"pacing", "capacity", "mutex", "busy", "draft"}:
+        episode["waitedSec"] = episode.get("waitedSec", 0) + elapsed
+        seconds = dict(episode.get("seconds") or {})
+        seconds[previous["category"]] = seconds.get(previous["category"], 0) + elapsed
+        episode["seconds"] = seconds
+    episode["lastPhase"] = {"category": category, "reason": reason, "at": now}
+    return episode
+
+
+def resource_wait_event(db, row, episode):
+    event_id = "resource-wait:" + row["id"] + ":" + episode["id"]
+    local_owner = json.loads(row["local_owner"]) if row["local_owner"] else None
+    original = row["caller_ref"]
+    target_ref = original if local_owner else resolve_successor(db, original)
+    body = {"operationId": row["id"], "taskId": row["task_id"], "project": row["project"],
+            "accountId": row["account_id"], "workgroupId": row["workgroup_id"],
+            "callerRef": original, "targetRef": target_ref, "localOwner": local_owner,
+            "resourceWait": episode, "reason": "RESOURCE_WAIT_EXHAUSTED",
+            "next": "Inspect the resource conflict, then explicitly queue retry this operation.",
+            "transport": "local-pull" if local_owner else "WAITING_ROUTE"}
+    reg = registry(db)
+    target = (reg.get("chats") or {}).get(target_ref) if not local_owner else None
+    identity = ((reg.get("accounts") or {}).get(target.get("account")) or {}).get("identity") if target else None
+    # Exact caller or its committed successor only; never substitute a root controller.
+    if target and target.get("status", "active") == "active" and target.get("project") == row["project"] and identity:
+        body["transport"] = "management"
+        enqueue_management(db, event_id, {"sessionRef": target_ref, "project": row["project"],
+            "account": target["account"], "accountId": account_id(identity), "role": target.get("role") or target_ref},
+            "[CHATBRIDGE RESOURCE WAIT v1]\n" + json.dumps(body, ensure_ascii=False))
+    db.execute("INSERT OR IGNORE INTO management_events(id,kind,scope,payload,created_at) VALUES (?,?,?,?,?)",
+               (event_id, "RESOURCE_WAIT_EXHAUSTED", "project:" + row["project"], json.dumps(body, ensure_ascii=False), stamp()))
+    return {"eventId": event_id, "transport": body["transport"], "callerRef": original, "targetRef": target_ref}
+
+
+def finish(db, row, status, reason=None, retry_after=0, result=None, session_ref=None, pre_send_failure=False, resource_receipt=None):
     begin_immediate(db)
     try:
+        current = db.execute("SELECT * FROM operations WHERE id=?", (row["id"],)).fetchone()
+        if not current or current["status"] != "DISPATCHING" or current["attempts"] != row["attempts"] or current["claimed_at"] != row["claimed_at"]:
+            db.commit()
+            return response(current)
+        previous = json.loads(current["result"]) if current["result"] else {}
+        episode = previous.get("resourceWait")
+        category = resource_wait_category(resource_receipt) if status == "QUEUED" else None
+        paused = row["kind"] in {"dispatch", "rotation"} and management_mode(db, row["project"], row["workgroup_id"])["mode"] in {"PAUSED", "DRAINING"}
+        if category and not paused:
+            episode = episode or {"id": str(uuid.uuid4()), "startedAt": stamp(), "waitedSec": 0, "counters": {}, "seconds": {}}
+            episode = advance_resource_wait(episode, time.time(), category, resource_receipt["code"])
+            counters = dict(episode["counters"])
+            counters[category] = counters.get(category, 0) + 1
+            episode["counters"] = counters
+            if episode["waitedSec"] >= RESOURCE_WAIT_LIMIT_SEC:
+                status, reason, retry_after = "FAILED_PRE_SEND", "RESOURCE_WAIT_EXHAUSTED", 0
+                episode["exhaustedAt"] = stamp()
+        elif episode:
+            episode = advance_resource_wait(episode, time.time(), "paused" if paused or reason == "TARGET_USER_CONTROLLED" else "inactive", reason or status)
+        if episode:
+            result = {**(result or {}), "resourceWait": episode}
+
         if isinstance(row, dict) and row.get("_attemptEvidence"):
             result = {**(result or {}), "attemptEvidence": row["_attemptEvidence"]}
         if status == 'DELIVERY_UNKNOWN' and row['kind'] in {'dispatch', 'rotation'} and not row['session_ref'] and not session_ref:
@@ -2767,6 +2869,17 @@ def finish(db, row, status, reason=None, retry_after=0, result=None, session_ref
         if changed.rowcount != 1:
             db.commit()
             return response(updated)
+        if reason == "RESOURCE_WAIT_EXHAUSTED" and row["kind"] == "dispatch" and not row["native_target"]:
+            rt = runtime(db)
+            task = (rt.get("tasks") or {}).get(row["task_id"])
+            if task and str(task.get("status") or "").upper() not in TERMINAL:
+                task.update({"status": "BLOCKED", "blockedReason": reason, "capacityState": reason,
+                             "capacityReason": reason, "updatedAt": stamp()})
+                db.execute("UPDATE documents SET payload=? WHERE kind=?", (json.dumps(rt, ensure_ascii=False), "runtime"))
+        if reason == "RESOURCE_WAIT_EXHAUSTED" and not str(row["event_id"] or "").startswith("resource-wait:"):
+            result["resourceWaitNotice"] = resource_wait_event(db, row, episode)
+            db.execute("UPDATE operations SET result=? WHERE id=?", (json.dumps(result), row["id"]))
+            updated = db.execute("SELECT * FROM operations WHERE id=?", (row["id"],)).fetchone()
         if row["kind"] == "management" and row["event_id"]:
             delivery_status = "DELIVERED" if status == "SENT" else status
             db.execute("""UPDATE management_deliveries SET status=?,operation_id=?,updated_at=?
@@ -3347,14 +3460,14 @@ def work_one(db):
     if completed.returncode == 75:
         detail = receipt or {}
         if detail.get("ok") is False and detail.get("deliveryStage") == "PRE_SEND" and detail.get("code") in {"PACING_DEFERRED", "WEB_COOLDOWN_ACTIVE"}:
-            return finish(db, row, "QUEUED", detail.get("reason"), max(1, float(detail.get("retryAfterSec", 10))))
+            return finish(db, row, "QUEUED", detail.get("reason"), max(1, float(detail.get("retryAfterSec", 10))), resource_receipt=detail)
     if completed.returncode and receipt and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("code") == "CAPACITY_WAIT":
         if row["kind"] == "dispatch":
             mark_capacity_wait(db, row, receipt)
-        return finish(db, row, "QUEUED", "CAPACITY_WAITING", max(1, float(receipt.get("retryAfterSec", 15))))
+        return finish(db, row, "QUEUED", "CAPACITY_WAITING", max(1, float(receipt.get("retryAfterSec", 15))), resource_receipt=receipt)
     if completed.returncode and receipt and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("code") in {"CHAT_BUSY", "USER_DRAFT_PRESENT", "SPACE_IN_USER_CONTROL"}:
         reason = "TARGET_USER_CONTROLLED" if receipt["code"] == "SPACE_IN_USER_CONTROL" else "TARGET_BUSY_OR_DRAFT"
-        return finish(db, row, "QUEUED", reason, 30)
+        return finish(db, row, "QUEUED", reason, 30, resource_receipt=receipt)
     if completed.returncode:
         if receipt and receipt.get("deliveryStage") == "PRE_SEND" and receipt.get("ok") is False:
             diagnostic = worker_diagnostic(completed.returncode, completed.stderr, "dispatch", stdout=completed.stdout)
@@ -3426,6 +3539,7 @@ def serve(config, state):
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError("COORDINATOR_ALREADY_RUNNING")
+        release_version_module().startup_receipt(state, pathlib.Path(__file__), _EXECUTING_CODE)
         print(json.dumps({"status": "RUNNING"}), flush=True)
         with ThreadPoolExecutor(max_workers=3) as pool:
             pending = set()
@@ -4738,10 +4852,22 @@ def main():
             prior = db.execute("SELECT * FROM operations WHERE id=? AND status='FAILED_PRE_SEND'", (args[1],)).fetchone()
             if prior and prior["native_target"] and native_reservation(db, prior["session_ref"], prior["id"]):
                 raise ValueError("TARGET_SESSION_BUSY")
-            changed = db.execute("UPDATE operations SET status='QUEUED',pre_send_failures=0,not_before=?,updated_at=? WHERE id=? AND status='FAILED_PRE_SEND'",
-                                 (time.time(),stamp(),args[1]))
+            retry_result = json.loads(prior["result"]) if prior and prior["result"] else {}
+            retry_result.pop("resourceWait", None)
+            retry_result.pop("resourceWaitNotice", None)
+            changed = db.execute("UPDATE operations SET status='QUEUED',pre_send_failures=0,not_before=?,updated_at=?,result=? WHERE id=? AND status='FAILED_PRE_SEND'",
+                                 (time.time(),stamp(),json.dumps(retry_result) if retry_result else None,args[1]))
             if changed.rowcount != 1:
                 raise ValueError("RETRY_REQUIRES_PROVEN_PRE_SEND_FAILURE")
+            if prior["reason"] == "RESOURCE_WAIT_EXHAUSTED" and prior["kind"] == "dispatch" and not prior["native_target"]:
+                rt = runtime(db)
+                task = (rt.get("tasks") or {}).get(prior["task_id"])
+                if task and task.get("blockedReason") == "RESOURCE_WAIT_EXHAUSTED":
+                    task["status"] = "QUEUED"
+                    for key in ("blockedReason", "capacityState", "capacityReason", "capacityRetryAfterSec", "capacityNextRetryAt"):
+                        task.pop(key, None)
+                    task["updatedAt"] = stamp()
+                    db.execute("UPDATE documents SET payload=? WHERE kind=?", (json.dumps(rt, ensure_ascii=False), "runtime"))
             if prior["kind"] == "callback":
                 db.execute("UPDATE task_results SET callback_status='QUEUED' WHERE callback_operation_id=?", (args[1],))
             if prior["kind"] == "management":

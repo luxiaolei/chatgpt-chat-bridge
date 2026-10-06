@@ -44,6 +44,31 @@ pools. Results and owner ACK retain the same contract. See
 [`native-codex-delivery.md`](native-codex-delivery.md) for startup, ownership,
 readback/cancellation and the boundary from ordinary desktop conversations.
 
+
+Resource waits are recorded as one episode in the existing operation result,
+with separate pacing, capacity, mutex, busy and draft counters. Only a normal,
+trusted PRE_SEND resource receipt can exhaust the 30-minute automatic wait
+budget. Manual admission pauses do not spend that budget. The exact claim CAS
+then records FAILED_PRE_SEND / RESOURCE_WAIT_EXHAUSTED and one episode-specific
+event for the original caller or its committed successor. Unavailable routes
+stay actionable without a root-controller guess; local Codex owners see the
+notice through local-pull. Only explicit queue retry starts a new episode.
+UNKNOWN, post-send and identity failures retain their existing contracts.
+
+SQLite lock retries use one monotonic deadline and nonblocking native attempts:
+the coordinator keeps its 60-second finish allowance; a state-store invocation
+shares a 15-second deadline across bootstrap, transaction, registration fence
+and commit, beneath the unchanged 20-second outer timeout. Registry saves skip
+a write only when there is no normalized delta and no registration to fence.
+
+The installer publishes an atomic private release manifest from its actual
+copy map, including source commit/tree/clean state and every destination hash.
+A serving coordinator records a private startup receipt beside its lock.
+Pure-local health compares current disk hashes, startup disk hashes, process
+start identity, and executing coordinator/helper code fingerprints. Fresh CLI,
+native children and late module imports load independently and are not attested
+by the resident receipt. None of these file/process checks inspect the browser.
+
 ## Registry and runtime state
 
 The bridge keeps **routing identity** and **operational state** separate.
