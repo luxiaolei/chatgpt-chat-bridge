@@ -39,7 +39,10 @@ async function harness(f={}) {
       if(f.recoveryApprovalRace) nativeRetry=async()=>{throw new Error("APPROVAL_REQUIRED");};
     }
     if(f.detach) {
-      openBoundTask=async()=>({task:{page:()=>({close:async()=>f.calls.push("close")}),tabs:async()=>[{label:"p1",active:false,openedBy:"agent"}]}});
+      listTaskSpaces=async()=>[{id:7,name:"managed",profileId:"P1",ownership:"agent"}];
+      imageSessionOccupancy=()=>({occupied:false});
+      coordinated=command=>{if(command!=="page-reclaim-context")throw Error(command);return {sessionRefs:[],unboundProjectIds:[],unboundAny:false};};
+      openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,page:()=>({url:async()=>f.chat.url,close:async()=>f.calls.push("close")}),tabs:async()=>[{label:"p1",url:f.chat.url,active:false,openedBy:"agent"}]}});
     }
     return {classifySnapshot,gradedRecover,ensurePage,state,nativeRetry,watchOnce,detachTerminalTaskPages};
   `)(f);
@@ -183,10 +186,12 @@ test("approval appearing at recovery action defers without watch failure account
 });
 
 test("terminal detach keeps an approval page attached and resumes normal cleanup after gate disappears",async()=>{
-  const chat={id:"C",project:"P",account:"a",status:"active",page:"p1"};
-  const f={detach:true,chat,runtime:{tasks:{T:{taskId:"T",sessionId:"C",status:"BLOCKED",updatedAt:"2020-01-01T00:00:00Z"}},sessions:{},projects:{}},
+  const cid="11111111-1111-4111-8111-111111111111",home="https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project";
+  const chat={id:cid,project:"P",account:"a",status:"active",spaceName:"managed",spaceId:7,profileId:"P1",page:"p1",url:home.replace(/project$/,"c/"+cid)};
+  const binding={spaceName:"managed",spaceId:7,profileId:"P1",projectUrl:home};
+  const f={detach:true,chat,binding,runtime:{tasks:{T:{taskId:"T",project:"P",account:"a",sessionId:cid,status:"RESULT_RECORDED",updatedAt:"2020-01-01T00:00:00Z"}},sessions:{},projects:{}},
     raw:{approvalRequired:true,generating:false,composerText:"",composerCount:1,composerRawText:""}};
-  const api=await harness(f), reg={chats:{C:chat}};
+  const api=await harness(f), reg={accounts:{a:{identity:"login-a"}},projects:{P:{bindings:{a:binding}}},chats:{[cid]:chat}};
   assert.deepEqual(await api.detachTerminalTaskPages(reg),[]);
   assert.equal(chat.page,"p1");
   assert.equal(f.calls.includes("close"),false);

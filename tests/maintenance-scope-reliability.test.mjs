@@ -5,12 +5,13 @@ const source=await readFile(new URL("../src/main.js",import.meta.url),"utf8");
 const begin=source.indexOf("async function pruneManagedOrphanTabs");
 const end=source.indexOf("\nasync function watchOnce",begin);
 const code=source.slice(begin,end);
+const projectHomeId=new Function(source.slice(source.indexOf("function projectHomeId("),source.indexOf("\nfunction projectKey("))+";return projectHomeId;")();
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 async function fixture(reg,spaces,account="a") {
  const visited=[];
- const prune=await new AsyncFunction("listTaskSpaces","loadRuntime","taskSpace","pagesOf","spaceProtection","samePhysicalSpace","state",code+";return pruneManagedOrphanTabs;")(
-   async()=>spaces,async()=>({tasks:{}}),async id=>{visited.push(id);return {tabs:async()=>[]};},
-   async()=>[],()=>({labels:new Set()}),()=>false,async()=>({generating:false,composerText:""}));
+ const prune=await new AsyncFunction("listTaskSpaces","loadRuntime","openBoundTask","pagesOf","spaceProtection","samePhysicalSpace","state","reclaimOrphanManagedPage","projectHomeId",code+";return pruneManagedOrphanTabs;")(
+   async()=>spaces,async()=>({tasks:{}}),async(_r,_p,_a,options)=>{visited.push(options.spaceOverride.spaceId);return {binding:options.spaceOverride,task:{spaceId:options.spaceOverride.spaceId,tabs:async()=>[]}};},
+   async()=>[],()=>({labels:new Set()}),()=>false,async()=>({generating:false,composerText:""}),async()=>null,projectHomeId);
  await prune(reg,null,account);return visited;
 }
 
