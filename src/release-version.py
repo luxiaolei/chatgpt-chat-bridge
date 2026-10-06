@@ -174,8 +174,8 @@ def source_release(root):
 
 
 def install_manifest(root, mapping, destination, expected):
-    source = source_release(root)
-    if source != json.loads(expected):
+    source_identity = source_release(root)
+    if source_identity != json.loads(expected):
         raise ValueError("INSTALL_SOURCE_CHANGED")
     files = []
     for line in pathlib.Path(mapping).read_text().splitlines():
@@ -190,9 +190,9 @@ def install_manifest(root, mapping, destination, expected):
     if not files or len({entry["destination"] for entry in files}) != len(files):
         raise ValueError("INSTALL_MAPPING_INVALID")
     manifest = {"schema": "chat-bridge.release.v1", "installedAt": datetime.now(timezone.utc).isoformat(),
-                "source": source,
+                "source": source_identity,
                 "files": files}
-    if source_release(root) != source:
+    if source_release(root) != source_identity:
         raise ValueError("INSTALL_SOURCE_CHANGED")
     atomic_json(destination, manifest)
 
