@@ -21,7 +21,7 @@ async function harness(f={}) {
     const reg={accounts:{a:{identity}},chats:{C:{url:f.snapshots[0]?.url||"https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/11111111-1111-4111-8111-111111111111",account:"a"}}};
     assertImagePageFree=async()=>{};
     detectWebRateLimit=async()=>{};
-    state=async(_page,mode,controlAction)=>{if(controlAction==="approval"){f.calls.push(["approval-state"]);return {approvalRequired:false,url:f.current?.url||f.snapshots[0]?.url||reg.chats.C.url};}if(mode===false){f.calls.push(['guard-state']);return f.current||f.snapshots[0];}f.calls.push(['state',mode]);if(f.stateErrorAt===f.calls.filter(([kind])=>kind==='state').length)throw f.stateError;return f.current=f.snapshots.shift()||f.latest||f.snapshots.at(-1);};
+    state=async(_page,mode,controlAction)=>{if(controlAction==="approval"){f.calls.push(["approval-state"]);return {approvalRequired:false,url:f.current?.url||f.snapshots[0]?.url||reg.chats.C.url};}if(mode===false||mode==="ids"&&f.current&&f.calls.at(-1)?.[0]==="guard-state"){f.calls.push(['guard-state']);return f.current||f.snapshots[0];}f.calls.push(['state',mode]);if(f.stateErrorAt===f.calls.filter(([kind])=>kind==='state').length)throw f.stateError;return f.current=f.snapshots.shift()||f.latest||f.snapshots.at(-1);};
     expandEvidenceMessages=async()=>{};
     nativeSubmissionWitness=async(_page,_request,_identity,capabilityOnly=false)=>{if(capabilityOnly){f.calls.push(['native-support']);if(f.supportError)throw f.supportError;if(f.afterSupport)f.current=f.afterSupport;return {supported:true};}if(f.witnessError)throw f.witnessError;return f.witness||null;};
     if(f.shortWait) waitForDelivery=async()=>f.latest;

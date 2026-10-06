@@ -13,7 +13,7 @@ test("the real World05 option order preserves the exact message before a model o
 });
 
 test("every supported boolean may precede valued flags without consuming them",()=>{
-  const flags=[...new Set([...source.matchAll(/args\.includes\("(--[^"\n]+)"/g)].map(m=>m[1]))];
+  const flags=[...new Set([...source.matchAll(/args\.includes\("(--[^"\n]+)"/g)].map(m=>m[1]))].filter(flag=>flag!=="--project"); // Valued option presence is not a boolean flag.
   for(const command of ["send","ask","stream","model","effort"]) for(const flag of flags)
     assert.deepEqual(parse([command,"worker",body,flag,"--project","P","--account","a"]),[body],`${command}:${flag}`);
 });
