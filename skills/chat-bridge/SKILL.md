@@ -304,6 +304,8 @@ Before successor ACK, `status EXACT_CID` or `read EXACT_CID` may inspect its exi
 
 Future `new` calls retain their confirmed native creation witness. Shared sends can reuse its temporary source mapping only with the same account/Project/CID/getter/serializer and an exact fresh BEFORE UID/full-body proof, followed by a fresh current UID and full native body. Absent historical creation proof stays absent; never backfill it from an equal current body or URL.
 
+Before filling a future existing-chat native send, the shared sender requires direct persistent source binding or the valid retained creation proof. A bound temporary source without that proof may use one standard same-CID reload, guarded by fresh login, empty raw composer/attachments, no generation/approval/context/recovery error, unchanged registry/current claim and RUNNING control without user pause/Image occupancy. Afterward the same prior UID/full bytes must bind directly to the persistent CID, native support is rechecked before input, and scoped user pause is synchronously reread after the final native source/UI sample. Failure is explicit PRE_SEND UNSUPPORTED with no fill/Send; it neither manufactures an alias nor settles an old UNKNOWN operation.
+
 ## Runtime task cache
 
 ```bash
@@ -472,6 +474,8 @@ External RPC extraction prefers the exact message-bound Markdown source where av
 Existing UNKNOWN recovery: see docs/architecture.md, "Recovery of an already created, unregistered rotation". Use operation-anchored queue observe for missing runtime tasks; rotation-recover defaults to preview. Never treat recovery binding as successor ACK.
 
 If that UNKNOWN observation cannot find the exact owned tab and the primary Space is full, it may reuse the existing verified identity/Profile overflow/previous pool. It searches for one exact agent-owned Project/CID tab, or opens the known CID once in one existing Space with available capacity. Duplicate/unowned targets, changed mappings/Profile, user-controlled Spaces and a full pool are explicit refusals. It never creates a Space, saves an attachment/mapping/capacity record, reclaims a page, clears a draft/pause, retries another target, sends or ACKs. Fresh login/Project/CID, target ownership, user pause and the original local anchor still govern the observation. The pending-successor status/read path still requires its one existing registered tab and does not use this capacity fallback.
+
+A successful observation may close only its own newly allocated page, once. After login/scope checks and the final strict idle, empty-composer/attachment UI sample, it rechecks ownership/Profile and unique CID, then synchronously rereads registry/runtime attachments, user pause and whole anchor before close. These checks do not provide cross-system atomicity. Existing worker/pending pages and failed or uncertain reads stay open. The allocated-page receipt reports `temporaryObservationPageClosed` and a bounded cleanup condition; a cleanup refusal/failure leaves the read successful and UNKNOWN unchanged. It is not proof of reduced process memory or restored business execution.
 
 
 ## Per-claim delivery evidence

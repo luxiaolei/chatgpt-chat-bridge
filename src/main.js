@@ -1115,13 +1115,12 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
      !info.name.startsWith("chat-bridge-agent-") || info.profileId!==binding.profileId)
     throw new Error("OPERATION_OBSERVATION_REQUIRES_MANAGED_SPACE");
   if(spaces.length!==1 || (pendingSession && Number(info.id)!==Number(binding.spaceId))) throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
-  const assertNotPaused=async()=>{
-    const runtime=await loadRuntime();
+  const assertNotPaused=runtime=>{
     if(runtime.sessions?.[scope.sessionRef]?.watchdogPausedForUserControl ||
        Object.values(runtime.tasks||{}).some(t=>t.sessionId===scope.sessionRef && t.watchdogPausedForUserControl))
       throw new Error("OPERATION_OBSERVATION_USER_CONTROL_PAUSED");
   };
-  await assertNotPaused();
+  assertNotPaused(await loadRuntime());
   await assertWebAvailable(scope.account);
   let task=await taskSpace(info.id);
   const tabs=await task.tabs();
@@ -1137,11 +1136,10 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
   if(pendingSession && (matching.length!==1 || tabs.filter(x=>sameConversationUrl(x.url,scope.url)).length!==1))
     throw new Error("OPERATION_OBSERVATION_PENDING_TAB_UNVERIFIED");
   let page=matching.length?task.page(matching[0].label):null;
-  let overflowTarget=null, observationPool=null;
+  let overflowTarget=null, observationPool=null, allocated=false;
   if(!page) {
     // Only open the already identified conversation; never reclaim existing pages.
-    let allocated=false;
-    await assertNotPaused();
+    assertNotPaused(await loadRuntime());
     try { page=await task.newPage(); allocated=true; }
     catch(error) {
       if(pendingSession || !pageBudgetError(error)) throw error;
@@ -1161,7 +1159,7 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
       overflowTarget=candidates[0]?.entry||inventory.find(entry=>entry.tabs.length<budget);
       if(!overflowTarget) throw error;
       if(coordinated("observation-context",query).anchor!==scope.anchor) throw new Error("OPERATION_CHANGED_DURING_OBSERVATION");
-      await assertNotPaused();
+      assertNotPaused(await loadRuntime());
       const current=(await listTaskSpaces()).filter(x=>x.name===overflowTarget.spaceName);
       if(current.length!==1 || Number(current[0].id)!==Number(overflowTarget.task.spaceId) || current[0].profileId!==binding.profileId ||
          current[0].ownership!=="agent" || current[0].createdBy!=="agent") throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
@@ -1174,7 +1172,7 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
       } else {
         if(freshTargets.length) throw new Error("OPERATION_OBSERVATION_TAB_UNVERIFIED");
         if(freshTabs.length>=budget) throw error;
-        await assertNotPaused();
+        assertNotPaused(await loadRuntime());
         page=await task.newPage(); allocated=true; // One selected target; capacity races do not retry another Space.
       }
     }
@@ -1186,21 +1184,21 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
   ),undefined,{timeout:15000});
   if(!sameConversationUrl(await page.url(),scope.url) || projectKey(await page.url())!==scope.projectId)
     throw new Error("OPERATION_OBSERVATION_CONVERSATION_MISMATCH");
-  const login=await page.evaluate(async()=>{
+  const readLogin=()=>page.evaluate(async()=>{
     if(location.origin!=="https://chatgpt.com") throw new Error("OPERATION_OBSERVATION_ORIGIN_MISMATCH");
     const response=await fetch("/api/auth/session",{credentials:"same-origin",signal:AbortSignal.timeout(5000)});
     if(!response.ok) throw new Error("OPERATION_OBSERVATION_LOGIN_UNAVAILABLE");
     return (await response.json())?.user?.id||null;
   });
-  if(login!==identity) throw new Error("OPERATION_OBSERVATION_LOGIN_MISMATCH");
+  if(await readLogin()!==identity) throw new Error("OPERATION_OBSERVATION_LOGIN_MISMATCH");
   // Native source text does not require expanding or clicking a rendered message.
-  await assertNotPaused();
+  assertNotPaused(await loadRuntime());
   const snapshot=await state(page,pendingSession?"ids":true);
   if(!sameConversationUrl(snapshot.url,scope.url) || projectKey(snapshot.url)!==scope.projectId)
     throw new Error("OPERATION_OBSERVATION_CONVERSATION_CHANGED");
-  if(overflowTarget) {
+  const assertUniquePage=async()=>{
     const current=await listTaskSpaces(), targets=[];
-    for(const entry of observationPool) {
+    for(const entry of observationPool||[{task,spaceName:binding.spaceName}]) {
       const spaces=current.filter(x=>x.name===entry.spaceName);
       if(spaces.length!==1 || Number(spaces[0].id)!==Number(entry.task.spaceId) || spaces[0].profileId!==binding.profileId ||
          spaces[0].ownership!=="agent" || spaces[0].createdBy!=="agent") throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
@@ -1208,10 +1206,34 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
     }
     if(targets.length!==1 || targets[0].spaceId!==task.spaceId || targets[0].tab.label!==page.label || targets[0].tab.openedBy!=="agent")
       throw new Error("OPERATION_OBSERVATION_TAB_UNVERIFIED");
-  }
+  };
+  if(overflowTarget || allocated) await assertUniquePage();
   if(coordinated("observation-context",query).anchor!==scope.anchor)
     throw new Error("OPERATION_CHANGED_DURING_OBSERVATION");
-  await assertNotPaused();
+  assertNotPaused(await loadRuntime());
+  let temporaryObservationPageClosed=false;
+  let temporaryObservationPageCleanupCondition="UNSAFE_OBSERVATION";
+  if(allocated && snapshot.generating===false && snapshot.approvalRequired===false && composerIsEmpty(snapshot) &&
+     snapshot.online===true && snapshot.pageWasDiscarded===false && !contextExhausted(snapshot) && !recoveryRequired(snapshot)) try {
+    temporaryObservationPageCleanupCondition="UNSAFE_CLEANUP_PAGE";
+    const closed=await closeEmptyPage(page,scope.url,async afterSample=>{
+      if(!afterSample && await readLogin()!==identity) throw new Error("OPERATION_OBSERVATION_CLEANUP_SCOPE_CHANGED");
+      await assertUniquePage();
+      const runtime=normalizeRuntime(stored("peek","runtime")), currentRegistry=stored("peek","registry");
+      const spaceName=overflowTarget?.spaceName||binding.spaceName;
+      const attached=entry=>entry?.page===page.label &&
+        (!(entry.pageSpaceId||entry.spaceId||entry.spaceName) || Number(entry.pageSpaceId||entry.spaceId)===Number(task.spaceId) || entry.spaceName===spaceName);
+      if([...Object.values(currentRegistry.chats||{}),...Object.values(runtime.sessions||{}),...Object.values(runtime.tasks||{})].some(attached))
+        throw new Error("OPERATION_OBSERVATION_PAGE_ATTACHED");
+      assertNotPaused(runtime);
+      if(coordinated("observation-context",query).anchor!==scope.anchor)
+        throw new Error("OPERATION_OBSERVATION_CLEANUP_SCOPE_CHANGED");
+    });
+    temporaryObservationPageClosed=closed && !(await task.tabs()).some(tab=>tab.label===page.label);
+    if(closed) temporaryObservationPageCleanupCondition=temporaryObservationPageClosed?"CLOSED":"CLOSE_NOT_CONFIRMED";
+  } catch(error) {
+    temporaryObservationPageCleanupCondition=String(error.code||error.message||"CLEANUP_ERROR").slice(0,160);
+  } // Retain this new page on uncertain cleanup; never close an existing worker/pending page.
   return {...(pendingSession?{...snapshot,role:reg.chats[pendingSession].role,status:"pending-rotation"}:{}),
     ok:true,format:"operation-native-observation-v1",operationId:scope.operationId,taskId:scope.taskId,
     project:scope.project,account:scope.account,accountId:scope.accountId,sessionRef:scope.sessionRef,
@@ -1222,7 +1244,7 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
     freshness:"LOCAL_UI_SAMPLE_NOT_SERVER_DELIVERY_TIME",
     lastAssistantId:snapshot.lastAssistantId,lastAssistant:snapshot.lastAssistant,
     lastAssistantTextSource:snapshot.lastAssistantTextSource,
-    messageCount:snapshot.messageCount,readOnly:true};
+    messageCount:snapshot.messageCount,readOnly:true,...(allocated?{temporaryObservationPageClosed,temporaryObservationPageCleanupCondition}:{})};
 }
 
 async function ensurePage(reg, chat, options={}) {
@@ -2022,10 +2044,21 @@ async function assertInputSafe(page, expectedIdentity=null, targetUrl=null, opti
   return identity;
 }
 
-async function closeEmptyPage(page) {
-  const snapshot=await state(page,false,null,true).catch(()=>null);
-  if(!snapshot || snapshot.approvalRequired===true || snapshot.generating || !composerIsEmpty(snapshot)) return false;
-  return page.close().then(()=>true).catch(()=>false);
+async function closeEmptyPage(page,expectedUrl=null,verify=null) {
+  const safe=async()=>{
+    const snapshot=await state(page,false,null,true).catch(()=>null);
+    return !!snapshot && snapshot.approvalRequired===false && snapshot.generating===false && composerIsEmpty(snapshot) &&
+      (!expectedUrl || snapshot.url===expectedUrl && snapshot.online===true && snapshot.pageWasDiscarded===false &&
+        !contextExhausted(snapshot) && !recoveryRequired(snapshot));
+  };
+  if(!await safe()) return false;
+  if(verify) {
+    await verify();
+    if(!await safe()) throw new Error("OPERATION_OBSERVATION_CLEANUP_UI_CHANGED");
+    await verify(true); // Recheck scope changed while the final UI sample was in flight; no repeated Auth.
+  }
+  try { await page.close(); return true; }
+  catch { if(verify) throw new Error("OPERATION_OBSERVATION_CLOSE_FAILED"); return false; }
 }
 
 async function nativeSubmissionWitness(page, request, expectedIdentity, capabilityOnly=false) {
@@ -2124,7 +2157,10 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
         editor.dictation.document!==cleared || cleared.textBetween(0,cleared.content.size,'\n')!=='') throw new Error('DRAFT_DISCARD_UNCONFIRMED');
       return {discarded:true};
     }
-    if(capabilityOnly===true) return {supported:true};
+    if(capabilityOnly===true) {
+      const editor=[...candidates][0];
+      return {supported:true,getterSource:String(editor.getText),serializerSource:String(editor.markdownEditor.serialize)};
+    }
     if(doc.textBetween(0,doc.content.size,'\n').replace(/\s+/g,' ').trim()!==request.replace(/\s+/g,' ').trim()) return fail();
     const editor=[...candidates][0], body=editor.getText();
     if(typeof body!=='string' || !body || editor.view.state.doc!==doc ||
@@ -2144,12 +2180,68 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
     const inputTarget=before.url;
     const identity=await assertInputSafe(page,expectedIdentity,inputTarget,{discardDraft:true});
     before=await state(page,"ids"); assertComposerSafe(before); assertInputTarget(before,inputTarget);
-    if(await nativeSubmissionWitness(page,null,identity,true)) await assertInputSafe(page,identity,inputTarget);
+    const support=await nativeSubmissionWitness(page,null,identity,true);
+    if(support) await assertInputSafe(page,identity,inputTarget);
     else {
       const current=await state(page,false,null,true);
       assertComposerSafe(current); assertInputTarget(current,inputTarget);
     }
     before.expectedMessage=msg; before.targetUrl=targetUrl||before.url;
+    before.expectedIdentity=identity;
+    const registered=reg.chats?.[convId(before.url)];
+    before.nativeSourceChat=registered?structuredClone(registered):null;
+    before.nativeWitness=support;
+    if(support && sameConversationUrl(before.url,before.url) &&
+       !(before.lastUserSourceCondition==="BOUND_SOURCE" && before.lastUserSource?.messageId===before.lastUserId &&
+         before.lastUserSource.conversationId===convId(before.url)) &&
+       !registeredSourceContinuity(before,before,true)) {
+      const fail=()=>{const error=new Error("NATIVE_EXISTING_SOURCE_UNVERIFIED");error.code=error.message;
+        error.nativeAdapter={formatVersion:"chatgpt-native-adapter-v1",phase:"EXISTING_SOURCE",status:"UNSUPPORTED"};throw error;};
+      const original=before, source=before.lastUserSource;
+      if(!registered || registered.status!=="active" || registered.id!==convId(inputTarget) ||
+         reg.accounts?.[registered.account]?.identity!==identity ||
+         projectKey(reg.projects?.[registered.project]?.bindings?.[registered.account]?.projectUrl)!==projectKey(inputTarget) ||
+         before.lastUserSourceCondition!=="BOUND_SOURCE" || !/^local-chatgpt:/.test(source?.conversationId||"") ||
+         source.messageId!==before.lastUserId || typeof source.text!=="string" ||
+         !before.userMessageIds?.includes(before.lastUserId)) fail();
+      const anchor=JSON.stringify(stored("peek","registry"));
+      const base=stateBaselines.get(reg);
+      if(base && JSON.stringify(base)!==anchor) fail();
+      const guard=async()=>{
+        await assertInputSafe(page,identity,inputTarget);
+        await loadRuntime();
+        const fresh=await state(page,"ids",null,true);
+        assertComposerSafe(fresh);
+        if(fresh.url!==inputTarget || fresh.generating!==false || fresh.approvalRequired!==false || fresh.online!==true ||
+           fresh.pageWasDiscarded!==false || contextExhausted(fresh) || recoveryRequired(fresh) ||
+           fresh.lastUserId!==original.lastUserId || fresh.lastUserSourceCondition!=="BOUND_SOURCE" ||
+           fresh.lastUserSource?.messageId!==source.messageId || fresh.lastUserSource.text!==source.text) fail();
+        if(JSON.stringify(stored("peek","registry"))!==anchor) fail();
+        const runtime=normalizeRuntime(stored("peek","runtime"));
+        if(runtime.sessions?.[registered.id]?.watchdogPausedForUserControl ||
+           Object.values(runtime.tasks||{}).some(t=>t.sessionId===registered.id&&t.watchdogPausedForUserControl)) fail();
+        const control=coordinated("admission-check",null,[registered.project,...(registered.workgroupId?["--workgroup",registered.workgroupId]:[])]);
+        if(control.ok!==true || control.control?.mode!=="RUNNING") fail();
+        if(globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__) coordinated("delivery-admission",globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__);
+        assertImageSessionFree(reg,registered);
+        return fresh;
+      };
+      const fresh=await guard();
+      if(fresh.lastUserSource.conversationId!==source.conversationId) fail();
+      await recordDeliveryStage("OBSERVED",{stage:"SOURCE_SETTLING_RELOAD_INTENT",snapshot:deliveryStageSnapshot(fresh,page)},msg);
+      if((await guard()).lastUserSource.conversationId!==source.conversationId) fail();
+      await page.reload({waitUntil:"load",timeout:20000});
+      await page.waitForFunction(uid=>[...document.querySelectorAll('[data-chatgpt-search-message-ids], [data-message-id]')]
+        .some(node=>(node.getAttribute('data-chatgpt-search-message-ids')||'').split(/\s+/).includes(uid)||node.getAttribute('data-message-id')===uid),
+        original.lastUserId,{timeout:15000});
+      before=await guard();
+      await recordDeliveryStage("OBSERVED",{stage:"SOURCE_SETTLING_RELOAD_RETURNED",snapshot:deliveryStageSnapshot(before,page)});
+      if(before.lastUserSource.conversationId!==convId(inputTarget)) fail();
+      if(!await nativeSubmissionWitness(page,null,identity,true)) fail();
+      before=await guard();
+      if(before.lastUserSource.conversationId!==convId(inputTarget)) fail();
+      Object.assign(before,{expectedMessage:msg,targetUrl:targetUrl||before.url,expectedIdentity:identity,nativeSourceChat:structuredClone(registered)});
+    }
     await recordDeliveryStage("BEFORE_INPUT",{snapshot:deliveryStageSnapshot(before,page),targetUrl:before.targetUrl},msg);
     try { await page.fill(COMPOSER_SELECTOR,msg); }
     catch {
@@ -2165,9 +2257,6 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
     }
     await page.waitForTimeout(80);
 
-    before.expectedIdentity=identity;
-    const registered=reg.chats?.[convId(before.url)];
-    before.nativeSourceChat=registered?structuredClone(registered):null;
     witness=await nativeSubmissionWitness(page,msg,identity);
     if(witness && !sameConversationUrl(witness.url,before.url) && witness.url!==before.url)
       throw new Error('NATIVE_SUBMISSION_TARGET_MISMATCH');

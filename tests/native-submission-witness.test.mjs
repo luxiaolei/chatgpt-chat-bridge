@@ -182,7 +182,7 @@ test('captured WM rS submit retains the exact M getter for support inspection an
  const witness=await inspect(configureWmAlias);
  assert.equal(witness.body,fixture.body);
  assert.equal(witness.getterSource,currentFormat.getter);
- assert.deepEqual(await inspect(configureWmAlias,true),{supported:true});
+ assert.deepEqual(await inspect(configureWmAlias,true),{supported:true,getterSource:witness.getterSource,serializerSource:witness.serializerSource});
  for(const submit of ['e=>up(OTHER.getText(),e)','e=>uh(rS.getText(),e)','e=>up(rS.getText().trim(),e)'])
   await assert.rejects(inspect(context=>{
    configureWmAlias(context);
@@ -233,7 +233,8 @@ test('native support can be checked before input without reading a body and reta
   context.doc.textBetween=()=>{throw new Error('body must not be read');};
   context.editor.getText=new Function('T','return {'+getter+'};')({g:()=>{throw new Error('getter must not be invoked');}}).getText;
  };
- assert.deepEqual(await inspect(empty,true),{supported:true});
+ const support=await inspect(empty,true);
+ assert.equal(support.supported,true);assert.equal(support.getterSource,getter);assert.equal(typeof support.serializerSource,'string');
  for(const change of [
   ({host})=>host.__reactFiber$fixture.memoizedProps.onSubmit=()=>{},
   ({editor})=>editor.getText=()=>'',
