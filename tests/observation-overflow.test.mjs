@@ -44,7 +44,8 @@ async function fixture(change={}){
     taskSpace:async target=>{
       assert.equal(typeof target,'number','observation must open only an existing Space by verified ID');
       calls.spaces.push(target);const info=available.find(x=>x.id===target);assert.ok(info,'must not create a Space');
-      return {spaceId:target,tabs:async()=>inventories.get(target),
+      if(change.overflowIdRace && target===42){info.id=99;inventories.set(99,inventories.get(42));target=99;}
+      return {spaceId:target,name:change.taskNameWrong&&target===42?'foreign-name':info.name,tabs:async()=>inventories.get(target),
         page:label=>pages.get(target+':'+label)||page(target,label,inventories.get(target).find(x=>x.label===label)?.url),
         newPage:async()=>{calls.newPages.push(target);if(inventories.get(target).length>=8||change.allocationRace===target)throw Error('Page budget reached (8/8) in space');
           const label='created-'+target;inventories.get(target).push(tab(label,'about:blank'));calls.created.push(target);return page(target,label,'about:blank');}};
@@ -111,6 +112,13 @@ test('existing-only UNKNOWN observation rejects the normal legacy foreign-Profil
   }});
   await assert.rejects(f.run(),/OVERFLOW_MAPPING_CHANGED/);
   assert.deepEqual(f.calls.created,[]);assert.deepEqual(f.calls.gotos,[]);f.unchanged();
+});
+
+test('existing-only observer checks returned Space ID and name against the original mapping',async()=>{
+  for(const change of [{overflowIdRace:true},{taskNameWrong:true}]){
+    const f=await fixture(change);await assert.rejects(f.run(),/OVERFLOW_SPACE_VERIFICATION_FAILED/);
+    assert.deepEqual(f.calls.created,[]);assert.deepEqual(f.calls.gotos,[]);f.unchanged();
+  }
 });
 
 test('UNKNOWN observation stops when the whole pool is full or the single selected allocation races',async()=>{

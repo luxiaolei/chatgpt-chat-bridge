@@ -783,15 +783,17 @@ async function overflowManagedTask(reg, project, account, binding, options={}) {
     name=previousSpaces[0].spaceName; existing=find(available);
     if(!existing || existing.profileId!==plan.profileId || Number(existing.id)!==Number(previousSpaces[0].spaceId)) throw new Error("OVERFLOW_MAPPING_CHANGED");
   }
+  const mapped=options.previous?previousSpaces?.[0]:remembered;
   if(options.existingOnly) {
-    const mapped=options.previous?previousSpaces?.[0]:remembered;
     if(!options.preview || options.advance || !mapped || !existing || name!==mapped.spaceName || !Number.isSafeInteger(mapped.spaceId) || mapped.spaceId<=0 ||
        !String(mapped.spaceName||"").startsWith("chat-bridge-agent-") || typeof mapped.createdAt!=="string" ||
        Number(existing.id)!==mapped.spaceId) throw new Error("OVERFLOW_MAPPING_CHANGED");
   }
   const task=await taskSpace(options.existingOnly?existing.id:name,!existing?{profileId:plan.profileId}:undefined);
   const verified=find(await listTaskSpaces());
-  if(!verified || verified.profileId!==plan.profileId || Number(verified.id)!==Number(task.spaceId))
+  if(!verified || verified.profileId!==plan.profileId || Number(verified.id)!==Number(task.spaceId) ||
+     (options.existingOnly && (Number(task.spaceId)!==mapped.spaceId || task.name!==mapped.spaceName ||
+       Number(verified.id)!==mapped.spaceId || verified.name!==mapped.spaceName)))
     throw new Error("OVERFLOW_SPACE_VERIFICATION_FAILED");
   const prior=taskAccounts.get(Number(task.spaceId));
   if(prior&&accountScope(reg,prior)!==accountScope(reg,account)) throw new Error("Space is bound to conflicting ChatGPT accounts");
