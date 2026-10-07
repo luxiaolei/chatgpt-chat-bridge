@@ -7,6 +7,44 @@ import {spawnSync} from "node:child_process";
 
 const coordinator=path.resolve("src/coordinator.py");
 
+test("normal allocation reuses the verified mapped pool before the expansion delay with real state storage",async()=>{
+  const source=await readFile(process.env.CHAT_BRIDGE_CAPACITY_TEST_MAIN||path.resolve("src/main.js"),"utf8"),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  const section=(a,z)=>source.slice(source.indexOf(a),source.indexOf(z,source.indexOf(a)));
+  const code=section("function stored(","\nfunction coordinated")+section("function normalizeRuntime(","\nfunction runtimeCacheLock")+
+    section("function managedSpacePlan(","\nasync function accountManagedTask")+section("async function overflowManagedTask(","\nasync function controlPage");
+  for(const mode of ["free head","free previous","full pool","missing mapping","missing Space","wrong Profile","user owned","UNKNOWN owner"]){
+    const root=await mkdtemp(path.join(tmpdir(),"bridge-mapped-pool-")),config=path.join(root,"config"),state=path.join(root,"state");
+    try{
+      await mkdir(config);await mkdir(state);await writeFile(path.join(config,"registry.json"),"{}");
+      await writeFile(path.join(state,"runtime.json"),JSON.stringify({tasks:{protected:{status:"RUNNING"}},sessions:{paused:{watchdogPausedForUserControl:true}}}));
+      const name="chat-bridge-agent-a",binding={spaceName:name,spaceId:2,profileId:"P1"},head={spaceName:name+"-overflow-2",spaceId:41,profileId:"P1",identity:"login-a",account:"a",createdAt:"2026-01-01T00:00:00Z"},
+        previous={...head,spaceName:name+"-overflow",spaceId:32},reg={accounts:{a:{identity:"login-a"}},projects:{P:{lifecycle:{maxOverflowSpaces:2}}},spaces:{primary:{name,spaceId:2,profileId:"P1",identity:"login-a",ownership:"agent"}},capacityOverflow:{"login-a|P1":{...head,previousSpaces:[previous]}}};
+      const available=[binding,head,previous].map(b=>({id:b.spaceId,name:b.spaceName,profileId:"P1",ownership:"agent",createdBy:"agent"})),counts={2:8,41:mode==="free head"?6:8,32:mode==="free previous"?6:8};
+      if(mode==="missing mapping")reg.capacityOverflow={};
+      if(mode==="missing Space")available.splice(1,1);
+      if(mode==="wrong Profile")available[1].profileId="P2";
+      if(mode==="user owned")available[1].ownership="user";
+      if(mode==="UNKNOWN owner")available[1].ownership="unknown";
+      let creates=0,saves=0,allocated=0;
+      const tasks=new Map(available.map(s=>[s.id,{spaceId:s.id,name:s.name,newPage:async()=>{if(counts[s.id]>=8)throw Error("page budget reached (8/8)");counts[s.id]++;allocated++;return {label:"new-"+s.id};}}]));
+      const api=await new AsyncFunction("childProcess","CONFIG_DIR","STATE_DIR","STORE_PATH","stateBaselines","Date","crypto","slug","listTaskSpaces","taskSpace","taskAccounts","accountScope","saveRegistry","reclaimIdlePageSlot","reclaimOrphanManagedPage",code+";return {stored,loadRuntime,recordCapacityWait,newManagedPage};")(
+        await import("node:child_process"),config,state,process.env.CHAT_BRIDGE_CAPACITY_TEST_STORE||path.resolve("src/state-store.py"),new WeakMap(),class extends Date{static now(){return 100000;}},
+        await import("node:crypto"),x=>x,async()=>available,async id=>{const task=tasks.get(id)||[...tasks.values()].find(t=>t.name===id);if(!task){creates++;throw Error("unexpected Space creation");}return task;},new Map(),(r,a)=>r.accounts[a].identity,async()=>{saves++;},async()=>null,async()=>null);
+      api.stored("get","runtime");
+      const before=await api.loadRuntime(),mapping=structuredClone(reg.capacityOverflow);
+      if(mode==="free head"||mode==="free previous"){
+        const result=await api.newManagedPage(reg,"P","a",tasks.get(2),binding,null,{allowOverflow:true});
+        assert.equal(result.task.spaceId,mode==="free head"?41:32,mode);assert.equal(result.overflow,true);assert.equal(allocated,1);
+      }else{
+        await assert.rejects(()=>api.newManagedPage(reg,"P","a",tasks.get(2),binding,null,{allowOverflow:true}),e=>e.code==="CAPACITY_WAIT",mode);
+        assert.equal(allocated,0,mode);
+      }
+      const after=await api.loadRuntime();assert.deepEqual(after.tasks,before.tasks);assert.deepEqual(after.sessions,before.sessions);
+      assert.deepEqual(reg.capacityOverflow,mapping,mode);assert.equal(creates,0,mode);assert.equal(saves,0,mode);
+    }finally{await rm(root,{recursive:true,force:true});}
+  }
+});
+
 test("an explicitly budgeted second overflow is used only after safe reclaim fails",async()=>{
   const source=await readFile(path.resolve("src/main.js"),"utf8");
   const code=source.slice(source.indexOf("async function newManagedPage"),source.indexOf("\nasync function controlPage"));

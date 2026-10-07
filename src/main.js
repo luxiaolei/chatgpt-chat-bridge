@@ -825,7 +825,8 @@ async function newManagedPage(reg, project, account, task, binding, excludeChatI
     const wait=await recordCapacityWait(reg,project,account,binding,
       `PAGE_BUDGET_NO_SAFE_RECLAIM:${binding.spaceName}`);
     const elapsedSec=(Date.now()-Number(wait.firstAt||Date.now()))/1000;
-    if(options.allowOverflow && elapsedSec>=CAPACITY_OVERFLOW_AFTER_SEC) {
+    const canExpandOverflow=elapsedSec>=CAPACITY_OVERFLOW_AFTER_SEC;
+    if(options.allowOverflow && (canExpandOverflow || reg.capacityOverflow?.[capacityScope(reg,account,binding)])) {
       try {
         const allocate=async overflow=>{
           try { return await overflow.task.newPage(); }
@@ -838,14 +839,16 @@ async function newManagedPage(reg, project, account, task, binding, excludeChatI
           }
           return null;
         };
-        let overflow=await overflowManagedTask(reg,project,account,binding);
+        const overflowOptions=canExpandOverflow?{}:{preview:true,existingOnly:true};
+        let overflow=await overflowManagedTask(reg,project,account,binding,overflowOptions);
         const created=overflow.created===true;
         let page=Number(overflow.task.spaceId)===Number(task.spaceId)?null:await allocate(overflow);
         if(!page && overflow.mapping?.previousSpaces?.length) {
-          overflow=await overflowManagedTask(reg,project,account,binding,{previous:true});
+          overflow=await overflowManagedTask(reg,project,account,binding,{...overflowOptions,previous:true});
           page=Number(overflow.task.spaceId)===Number(task.spaceId)?null:await allocate(overflow);
         }
         if(!page) {
+          if(!canExpandOverflow) throw new Error("OVERFLOW_SPACE_LIMIT");
           if(created) throw new Error("OVERFLOW_NEW_SPACE_FULL");
           overflow=await overflowManagedTask(reg,project,account,binding,{advance:true});
           page=await overflow.task.newPage();
