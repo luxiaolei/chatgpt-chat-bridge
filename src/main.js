@@ -2101,12 +2101,13 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     const apply=Reflect.apply,toSource=Function.prototype.toString;
     const fail=()=>{throw new Error('NATIVE_SUBMISSION_UNVERIFIED');};
     const property=(object,key)=>{
-      for(let value=object,depth=0;value&&depth<8;value=Object.getPrototypeOf(value),depth++) {
+      let value=object;
+      for(let depth=0;value&&depth<8;value=Object.getPrototypeOf(value),depth++) {
         const descriptor=Object.getOwnPropertyDescriptor(value,key);
         if(descriptor) return Object.hasOwn(descriptor,'value')?
           {kind:'data',value:descriptor.value}:{kind:'accessor'};
       }
-      return {kind:'missing'};
+      return {kind:value?'truncated':'missing'};
     };
     const value=(object,key)=>property(object,key).value;
     const encoder=new TextEncoder(),bytes=text=>encoder.encode(text).byteLength;
@@ -2134,7 +2135,7 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     }
     const firstFiber=fiber;
     const candidates=new Map(),composerEditors=new Set();
-    let formatRecognized=false,admissionTruncated=false;
+    let formatRecognized=false,admissionTruncated=false,ancestryIncomplete=false;
     // Pin the characterized native submit format; an unsupported format fails before Send.
     const formats=[
       {submit:"e=>{eg(j.getText(),e)}",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,T.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}"},
@@ -2146,6 +2147,8 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     const characterizedShape={getter:formats[1].getter,serializer:"(n,a)=>{var r;let i,l=((r=new C.m((0,s.b)(n)).removeMark(0,n.content.size,n.type.schema.marks.literalPaste).doc).descendants((e,t,n,a)=>{if(!e.isText||null==n)return;let l=e.marks.find(T.g);if(null==l)return;let s=0===a?void 0:n.child(a-1).marks.find(T.g);if(null!=s&&l.eq(s))return;let c=e.text??\"\",d=t+e.nodeSize;for(let e=a+1;e<n.childCount;e++){let t=n.child(e),a=t.marks.find(T.g);if(!t.isText||null==a||!l.eq(a))break;c+=t.text??\"\",d+=t.nodeSize}let u=(0,o.b)(c);(d!==t+e.nodeSize||null==u)&&(null==i&&(i=new C.m(r)),null==u?i.removeMark(t,d,l):i.addMark(t,d,l.type.create({...l.attrs,href:u})))}),i?.doc??r);return!a?.preserveParagraphSpacing&&l.childCount>0&&l.content.content.every(e=>\"paragraph\"===e.type.name)?Array.from({length:l.childCount},(n,a)=>{let r=l.child(a),o=t.get(r);return null==o&&(o=e.serialize(r).replace(/\\n$/,\"\"),t.set(r,o)),o}).join(\"\\n\"):e.serialize(l).replace(/\\n$/,\"\")}"};
     const submitShape=/^([A-Za-z_$][\w$]*)=>([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\.getText\(\),\1\)$/;
     for(let i=0;fiber&&i<16;i++,fiber=value(fiber,'return')) {
+      const parent=property(fiber,'return');
+      if(parent.kind==='accessor' || parent.kind==='truncated') ancestryIncomplete=true;
       const submit=describe(value(fiber,'memoizedProps'),'onSubmit').source;
       const identifiers=submit?.match(submitShape);
       const format=formats.find(value=>submit===value.submit ||
@@ -2185,7 +2188,9 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
       }
       if(hook) {admissionTruncated=true;break;}
     }
-    if(admissionTruncated) {
+    // An unvisited ancestor, opaque link or exhausted prototype lookup cannot prove uniqueness.
+    if(fiber) ancestryIncomplete=true;
+    if(admissionTruncated || (formatRecognized && ancestryIncomplete)) {
       if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
       return fail();
     }
@@ -2229,6 +2234,7 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
           }
         }
       }
+      if(ancestryIncomplete) refuse('FIBER_SCAN_INCOMPLETE');
       return {unsupportedFormat:evidence};
     }
     if(composerEditors.size!==1 || candidates.size!==1 || typeof doc.textBetween!=='function') {
@@ -2281,7 +2287,8 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     if(capabilityOnly===true) return {supported:true,getterSource,serializerSource};
     if(doc.textBetween(0,doc.content.size,'\n').replace(/\s+/g,' ').trim()!==request.replace(/\s+/g,' ').trim() ||
       !sameBinding()) return fail();
-    const body=apply(getText,editor,[]);
+    // Every admitted getter accepts this document argument; do not re-read an accessor default (ABA).
+    const body=apply(getText,editor,[doc]);
     if(typeof body!=='string' || !body || !sameBinding()) return fail();
     return {format:'chatgpt-native-getText-v1',body,url:location.href,accountIdentity:expectedIdentity,
       getterSource,serializerSource,observedAt:new Date().toISOString()};

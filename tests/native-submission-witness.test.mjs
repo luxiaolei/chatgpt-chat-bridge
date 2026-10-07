@@ -250,6 +250,84 @@ test('dictation accessors follow the native getter path without treating an unsa
  }),/NATIVE_SUBMISSION_UNVERIFIED/);
 });
 
+// Root NSV2-R1/R2 are offline counterexamples built from the characterized getter
+// and synthetic dependencies. No private DOM or body is copied into these cases.
+test('NSV2-R1 native execution cannot consume a foreign default document hidden by accessor ABA',async t=>{
+ const observations=[];
+ for(const foreignAt of [null,4,5,'after-getter']) {
+  let reads=0,getterCalls=0,foreignGetterCalls=0;
+  const outcome=await inspectCharacterized(context=>{
+   const {doc,editor}=context,foreign={syntheticBody:'FOREIGN SYNTHETIC BODY'};
+   const serializer=editor.markdownEditor.serialize;
+   editor.getText=new Function('M','return {'+characterizedShape.getter+'};')({g:(actualDoc,actualSerializer)=>{
+    getterCalls++;
+    assert.equal(actualSerializer,serializer);
+    if(actualDoc!==doc) {foreignGetterCalls++;assert.equal(actualDoc,foreign);return foreign.syntheticBody;}
+    return fixture.body;
+   }}).getText;
+   Object.defineProperty(editor.dictation,'document',{get(){
+    reads++;
+    return (foreignAt==='after-getter'?getterCalls>0:reads===foreignAt)?foreign:doc;
+   }});
+  }).then(witness=>({status:'ACCEPTED',bodyIsOriginal:witness.body===fixture.body}),
+   error=>({status:'REJECTED',error:error.message}));
+  observations.push({foreignAt,reads,getterCalls,foreignGetterCalls,...outcome});
+ }
+ t.diagnostic(JSON.stringify(observations));
+ for(const row of observations) {
+  assert.equal(row.foreignGetterCalls,0,'the actual native getter must consume only the verified document');
+  if(row.status==='ACCEPTED') assert.equal(row.bodyIsOriginal,true,'foreign body must never become a witness');
+  else assert.match(row.error,/NATIVE_SUBMISSION_UNVERIFIED/);
+  if(row.foreignAt===null) assert.equal(row.status,'ACCEPTED');
+  if(row.foreignAt==='after-getter') assert.equal(row.status,'REJECTED','post-getter document conflicts still reject');
+ }
+});
+
+test('NSV2-R2 capability and body require a complete bounded ancestor scan before editor uniqueness',async t=>{
+ const observations=[];
+ for(const capabilityOnly of [true,false]) for(const mode of [
+  'second-at-15','second-at-16','complete-16','incomplete-17','cycle','opaque-return','prototype-limit'
+ ]) {
+  let native,returnGetterCalls=0;
+  const outcome=await inspectCharacterized(context=>{
+   native=context.native;
+   const first=context.host.__reactFiber$fixture;
+   const lastAncestor=mode==='second-at-16'||mode==='incomplete-17'?16:15;
+   let current=first;
+   for(let ancestor=1;ancestor<=lastAncestor;ancestor++) {
+    current.return={};
+    current=current.return;
+   }
+   current.return=mode==='cycle'?first:null;
+   if(mode==='opaque-return') Object.defineProperty(current,'return',{get(){returnGetterCalls++;return first;}});
+   if(mode==='prototype-limit') {
+    delete current.return;
+    let owner=current;
+    for(let depth=0;depth<8;depth++) {const parent={};Object.setPrototypeOf(owner,parent);owner=parent;}
+    owner.return=first;
+   }
+   if(mode.startsWith('second-at-')) {
+    current.memoizedProps=first.memoizedProps;
+    current.memoizedState={memoizedState:{deps:[{...context.editor}]}};
+   }
+  },capabilityOnly).then(witness=>({status:'ACCEPTED',valid:capabilityOnly?witness.supported:witness.body===fixture.body}),
+   error=>({status:'REJECTED',error:error.message}));
+  observations.push({capabilityOnly,mode,returnGetterCalls,getterCalls:native.getterCalls,serializerCalls:native.serializerCalls,...outcome});
+ }
+ t.diagnostic(JSON.stringify(observations));
+ for(const row of observations) {
+  const expected=row.mode==='complete-16'?'ACCEPTED':'REJECTED';
+  assert.equal(row.returnGetterCalls,0,'opaque ancestor links must never be invoked');
+  assert.equal(row.status,expected,JSON.stringify({capabilityOnly:row.capabilityOnly,mode:row.mode}));
+  if(row.status==='ACCEPTED') assert.equal(row.valid,true);
+  else {
+   assert.match(row.error,/NATIVE_SUBMISSION_UNVERIFIED/);
+   assert.equal(row.getterCalls,0);assert.equal(row.serializerCalls,0);
+  }
+  if(row.capabilityOnly) {assert.equal(row.getterCalls,0);assert.equal(row.serializerCalls,0);}
+ }
+});
+
 test('admission refuses truncated editor dependencies, hooks and serializer source',async()=>{
  for(const mode of ['dependencies','hooks']) {
   let native;
@@ -538,6 +616,10 @@ test('FORMAT sampling does not invoke accessors or custom function/object toStri
   },true),/NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED/);
   assert.equal(calls,0,field);
   assert.equal(captured.retained.directory,'native-format-evidence');
+  if(field==='return') {
+   assert.equal(captured.retained.backup.truncated,true);
+   assert.equal(captured.retained.backup.limit,'FIBER_SCAN_INCOMPLETE');
+  }
  }
 });
 
