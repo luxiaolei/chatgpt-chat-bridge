@@ -5013,7 +5013,31 @@ def main():
                 current = claim["id"]
             # ponytail: snapshot relies on the account mutex; reserve slots if independent writers need atomic allocation.
             sessions, unbound, any_unbound = set(), set(), False
+            candidate = payload.get("candidate")
+            if candidate is not None:
+                if not isinstance(candidate, dict) or not isinstance(candidate.get("id"), str) or not candidate["id"]:
+                    raise ValueError("PAGE_RECLAIM_CANDIDATE_INVALID")
+                actual = (reg.get("chats") or {}).get(candidate["id"]) or {}
+                if any(actual.get(key) != value for key, value in candidate.items()):
+                    sessions.add(candidate["id"])
             rt = runtime(db)
+            # ponytail: scan linked tasks per account chat; index if this read becomes a bottleneck.
+            for session_ref, chat in (reg.get("chats") or {}).items():
+                project = chat.get("project")
+                if not project or (reg.get("accounts", {}).get(chat.get("account")) or {}).get("identity") != identity:
+                    continue
+                linked = [task for task in (rt.get("tasks") or {}).values() if task.get("sessionId") == session_ref or
+                          (not task.get("sessionId") and task.get("project") == project and task.get("role") == chat.get("role") and
+                           (not task.get("account") or (reg.get("accounts", {}).get(task["account"]) or {}).get("identity") == identity))]
+                if (candidate is not None and candidate["id"] == session_ref and not any(task.get("sessionId") == session_ref for task in linked) or
+                        management_mode(db, project, task_workgroup(chat))["mode"] in {"PAUSED", "DRAINING"} or
+                        rt.get("projects", {}).get(project, {}).get("watchdogPausedForUserControl") or
+                        rt.get("sessions", {}).get(session_ref, {}).get("watchdogPausedForUserControl") or
+                        any(task.get("project") != project or task.get("account") != chat.get("account") or
+                            str(task.get("status") or "").upper() not in TERMINAL - {"BLOCKED"} or
+                            any(task.get(flag) for flag in ("watchdogPendingNotification", "externalResponsePending", "watchdogPausedForUserControl"))
+                            for task in linked)):
+                    sessions.add(session_ref)
             has_operations = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='operations'").fetchone()
             if has_operations:
                 rows = db.execute("""SELECT * FROM operations o

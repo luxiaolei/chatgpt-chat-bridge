@@ -398,7 +398,7 @@ chat-bridge recover AGENT_ALIAS --project "PROJECT NAME"
 
 `recover` uses the same conservative recovery policy. It does not re-send the original user task unless `--aggressive` is explicitly supplied. A hard context limit is never handled by Retry/Continue; it requires the checkpointed rotation flow above.
 
-Running tasks stay attached by default. Once a task has a durable `RESULT_RECORDED` or terminal status, is past the configured grace window, has no generating UI/draft/user ownership, and the page is Bridge-managed/inactive, watchdog may close that Tab and leave the conversation registered for lazy reattach. Closing a running Tab is not assumed safe; detached-running remains experimental and is not the default policy.
+Running tasks stay attached by default. Once a task has a durable `RESULT_RECORDED` or terminal status, is past the configured grace window, passes the generation/draft/ownership and exact Project/conversation guards, and the page is Bridge-managed, watchdog may close that Tab and leave the conversation registered for lazy reattach. Tab selection alone does not protect a proven terminal registered page; selected orphan/user-owned Tabs stay protected. Authorized text-only drafts still need complete private backup before the shared guarded discard. Closing a running Tab is not assumed safe; detached-running remains experimental and is not the default policy.
 
 ## Management control plane
 

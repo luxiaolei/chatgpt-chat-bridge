@@ -589,9 +589,8 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
   if(!targetProject) return null;
   const rt=await loadRuntime();
   const tabs=await task.tabs().catch(()=>[]);
-  const activeLabels=tabs.filter(t=>t.active&&t.label).map(t=>t.label);
   const protection=spaceProtection(reg,rt,binding,task,tabs);
-  for(const label of activeLabels) protection.labels.add(label);
+  // Tab selection does not imply execution; terminal ownership and fresh guards decide.
   const chats=Object.values(reg.chats||{}).filter(chat=>(!onlyChatId || chat.id===onlyChatId) && samePhysicalSpace(chat,binding,task));
   const candidates=pageDetachCandidates(
     chats,
@@ -604,7 +603,7 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
   );
   for(const candidate of candidates.filter(chat=>{
     const linked=Object.values(rt.tasks||{}).filter(t=>t.sessionId===chat.id);
-    return linked.length && linked.every(t=>["COMPLETE","FAILED","CANCELLED","RESULT_RECORDED"].includes(String(t.status).toUpperCase()) &&
+    return linked.length && linked.every(t=>t.project===chat.project && t.account===chat.account && ["COMPLETE","FAILED","CANCELLED","RESULT_RECORDED"].includes(String(t.status).toUpperCase()) &&
       !t.watchdogPendingNotification && !t.externalResponsePending && !t.watchdogPausedForUserControl);
   }).filter(chat=>sameConversationUrl(tabs.find(t=>t.label===chat.page)?.url,chat.url,targetProject)).slice(0,1)) {
     let page=null;
@@ -617,7 +616,7 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
       continue;
     }
     const tab=tabs.find(item=>item.label===candidate.page);
-    if(!tab || tab.active || tab.openedBy!=="agent") continue;
+    if(!tab || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
     if(!snapshot || snapshot.approvalRequired!==false || snapshot.generating!==false) continue;
     const discard=!composerIsEmpty(snapshot) && snapshot.composerCount===1 && typeof snapshot.composerRawText==="string" && snapshot.composerAttachmentsEmpty===true &&
@@ -626,19 +625,21 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     if(discard && Object.values(rt.tasks||{}).some(t=>t.sessionId===candidate.id &&
       (t.project!==candidate.project || t.account!==candidate.account))) continue;
     const oldPage=candidate.page;
+    const reclaimContext={account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null,candidate:Object.fromEntries(["id","project","account","role","status","url","page","spaceId","spaceName","profileId","attachmentEpoch","generation"].map(key=>[key,candidate[key]??null]))};
     if(imageSessionOccupancy(reg,candidate).occupied) continue;
     if(!sameConversationUrl(await page.url(),candidate.url,targetProject)) continue;
-    const context=coordinated("page-reclaim-context",{account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
-    if(context.sessionRefs.includes(candidate.id) || context.unboundAny || context.unboundProjectIds.includes(targetProject)) continue;
     const fresh=(await task.tabs()).find(t=>t.label===candidate.page);
-    if(!fresh || fresh.active || fresh.openedBy!=="agent" || !sameConversationUrl(fresh.url,candidate.url,targetProject)) continue;
-    if(discard) {
-      await assertInputSafe(page,reg.accounts[account].identity,candidate.url,{discardDraft:true,reclaim:true});
-      const guarded=coordinated("page-reclaim-context",{account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
-      const current=(await task.tabs()).find(t=>t.label===candidate.page);
-      if(guarded.sessionRefs.includes(candidate.id) || guarded.unboundAny || guarded.unboundProjectIds.includes(targetProject) ||
-        !current || current.active || current.openedBy!=="agent" || !sameConversationUrl(current.url,candidate.url,targetProject)) continue;
-    }
+    if(!fresh || fresh.openedBy!=="agent" || !sameConversationUrl(fresh.url,candidate.url,targetProject)) continue;
+    const context=coordinated("page-reclaim-context",reclaimContext);
+    if(context.sessionRefs.includes(candidate.id) || context.unboundAny || context.unboundProjectIds.includes(targetProject)) continue;
+    await assertInputSafe(page,reg.accounts[account].identity,candidate.url,{discardDraft:!!discard,reclaim:true});
+    const current=(await task.tabs()).find(t=>t.label===candidate.page);
+    const closing=await state(page,false,null,true).catch(()=>null);
+    if(!current || current.openedBy!=="agent" || !sameConversationUrl(current.url,candidate.url,targetProject) ||
+      !closing || closing.approvalRequired!==false || closing.generating!==false || !composerIsEmpty(closing) ||
+      !sameConversationUrl(closing.url,candidate.url,targetProject) || imageSessionOccupancy(reg,candidate).occupied) continue;
+    const guarded=coordinated("page-reclaim-context",reclaimContext);
+    if(guarded.sessionRefs.includes(candidate.id) || guarded.unboundAny || guarded.unboundProjectIds.includes(targetProject)) continue;
     await page.close(); // An uncertain close must not fall through to another candidate.
     candidate.page=null;
     candidate.detachedAt=new Date().toISOString();
@@ -1966,8 +1967,8 @@ function postSendObservation(before, after, witness, condition=null, observation
     sourceBodyHash:hash(after?.lastUserSource?.text),sourceBodyLength:length(after?.lastUserSource?.text)};
 }
 
-function assertInputTarget(snapshot, targetUrl) {
-  if(!targetUrl || (snapshot.url!==targetUrl && !sameConversationUrl(snapshot.url,targetUrl) &&
+function assertInputTarget(snapshot, targetUrl, reclaim=false) {
+  if(!targetUrl || (reclaim && (!projectKey(targetUrl) || !sameConversationUrl(snapshot.url,targetUrl,projectKey(targetUrl)))) || (snapshot.url!==targetUrl && !sameConversationUrl(snapshot.url,targetUrl) &&
     !(projectHomeId(snapshot.url) && projectHomeId(snapshot.url)===projectHomeId(targetUrl)))) {
     const error=new Error("DELIVERY_TARGET_MISMATCH");error.code=error.message;throw error;
   }
@@ -1993,7 +1994,7 @@ async function assertInputSafe(page, expectedIdentity=null, targetUrl=null, opti
   const project=options.discardDraft===true?draftDiscardProject(reg,identity,targetUrl):null;
   const discard=!!project && snapshot.composerCount===1 && typeof snapshot.composerRawText==="string" && snapshot.composerAttachmentsEmpty===true;
   assertComposerSafe(discard?{...snapshot,composerRawText:""}:snapshot);
-  assertInputTarget(snapshot,targetUrl);
+  assertInputTarget(snapshot,targetUrl,options.reclaim===true);
   if(!identity || !Object.values(reg.accounts||{}).some(account=>account.identity===identity))
     throw new Error("TARGET_IDENTITY_UNVERIFIED");
   if(routes.length && (routes.length!==1 || reg.accounts?.[routes[0].account]?.identity!==identity))
@@ -2009,7 +2010,7 @@ async function assertInputSafe(page, expectedIdentity=null, targetUrl=null, opti
   const current=await state(page,false,null,true);
   if(discard && current.composerRawText!==snapshot.composerRawText) throw new Error("USER_DRAFT_PRESENT");
   assertComposerSafe(discard?{...current,composerRawText:""}:current);
-  assertInputTarget(current,targetUrl);
+  assertInputTarget(current,targetUrl,options.reclaim===true);
   if(discard && snapshot.composerRawText!=="") {
     if(globalThis.__CHAT_BRIDGE_INPUT_RESUMED_USER_CONTROL__) throw new Error("DRAFT_DISCARD_USER_CONTROLLED");
     if(current.approvalRequired!==false || current.generating!==false) throw new Error("CHAT_BUSY");
@@ -2030,14 +2031,14 @@ async function assertInputSafe(page, expectedIdentity=null, targetUrl=null, opti
     coordinated("draft-discard-admission",admission);
     if(await readLogin()!==identity) throw new Error("INPUT_LOGIN_MISMATCH");
     const fresh=await state(page,false,null,true);
-    assertInputTarget(fresh,targetUrl);
+    assertInputTarget(fresh,targetUrl,options.reclaim===true);
     if(fresh.composerRawText!==snapshot.composerRawText) throw new Error("USER_DRAFT_PRESENT");
     if(fresh.approvalRequired!==false || fresh.generating!==false) throw new Error("CHAT_BUSY");
     assertComposerSafe({...fresh,composerRawText:""});
     await recordDeliveryStage("DRAFT_DISCARD_INTENT",{sha256:retained.sha256});
     await page.evaluate(nativeSubmissionProbe,{selector:COMPOSER_SELECTOR,expectedIdentity:identity,discardBackup:backup});
     const cleared=await state(page,false,null,true);
-    assertInputTarget(cleared,targetUrl); assertComposerSafe(cleared);
+    assertInputTarget(cleared,targetUrl,options.reclaim===true); assertComposerSafe(cleared);
     if(await readLogin()!==identity) throw new Error("INPUT_LOGIN_MISMATCH");
     await recordDeliveryStage("DRAFT_DISCARDED",{sha256:retained.sha256});
   }

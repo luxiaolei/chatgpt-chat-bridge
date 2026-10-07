@@ -42,7 +42,8 @@ async function withDom({buttons=[],errors=[],known=[],messages=[],files=[],previ
       selector.startsWith("main div")?known:
       selector.includes("data-message-author-role")||selector.includes("search-unit")?messages:[],
   };
-  const values={document,location:{href:url},
+  const values={document,location:{href:url,origin:new URL(url).origin},
+    fetch:async()=>({ok:true,json:async()=>({user:{id:"login-a"}})}),
     navigator:{onLine:true},getComputedStyle:()=>({visibility:"visible",display:"block",opacity:"1"}),
     __CHAT_BRIDGE_WATCH:{root,seq:0,lastMutationAt:Date.now(),startedAt:Date.now()},
   };
@@ -85,19 +86,20 @@ test("actual DOM attachment-only drafts protect shared reclaim, control reuse an
   ]) for(const entry of ["registered","orphan","reuse","close"]) await withDom(dom,async page=>{
     const binding={spaceName:"managed",spaceId:9,profileId:"P1",projectUrl:home,...(entry==="reuse"?{controlPage:"p9"}:{})};
     const url=entry==="registered"?home.replace(/project$/,"c/"+cid):home;
+    globalThis.location.href=url;
     const chat={id:cid,project:"P",account:"a",role:"worker",status:"active",spaceName:"managed",spaceId:9,page:"p9",url};
     const reg={accounts:{a:{identity:"login-a"}},projects:{P:{bindings:{a:binding}}},chats:entry==="registered"?{[cid]:chat}:{}};
     const rt={tasks:entry==="registered"?{t:{sessionId:cid,project:"P",account:"a",status:"COMPLETE"}}:{}};
     let closes=0,saves=0;
     Object.assign(page,{label:"p9",url:async()=>url,close:async()=>{closes++;}});
     const task={spaceId:9,page:()=>page,pages:async()=>[page],tabs:async()=>[{label:"p9",url,active:false,openedBy:"agent"}]};
-    const api=await new AsyncFunction("loadRuntime","state","saveRegistry","imageSessionOccupancy","activeTaskStatus","composerIsEmpty","pageDetachCandidates","orphanManagedPageCandidates","sameConversationUrl","projectHomeId","coordinated","openBoundTask",
-      "const {draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n"+section("function samePhysicalSpace","\nasync function overflowManagedTask")+
-      section("async function closeEmptyPage(","\nasync function nativeSubmissionWitness")+";return {reclaimIdlePageSlot,reclaimOrphanManagedPage,closeEmptyPage};")(
+    const api=await new AsyncFunction("loadRuntime","state","saveRegistry","imageSessionOccupancy","activeTaskStatus","composerIsEmpty","pageDetachCandidates","orphanManagedPageCandidates","sameConversationUrl","projectHomeId","coordinated","openBoundTask","registry","assertComposerSafe","projectKey",
+      "const reg=registry;const {draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n"+section("function samePhysicalSpace","\nasync function overflowManagedTask")+
+      section("function assertInputTarget(","\nasync function saveDraftBackup")+section("async function assertInputSafe(","\nasync function closeEmptyPage")+section("async function closeEmptyPage(","\nasync function nativeSubmissionWitness")+";return {reclaimIdlePageSlot,reclaimOrphanManagedPage,closeEmptyPage};")(
       async()=>rt,state,async()=>{saves++;},()=>({occupied:false}),activeTaskStatus,composerIsEmpty,
       globalThis.__CHAT_BRIDGE_PAGE_POOL__.pageDetachCandidates,globalThis.__CHAT_BRIDGE_PAGE_POOL__.orphanManagedPageCandidates,
       globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,projectHomeId,
-      ()=>({sessionRefs:[],unboundProjectIds:[],unboundAny:false}),async()=>({task,binding}));
+      ()=>({sessionRefs:[],unboundProjectIds:[],unboundAny:false}),async()=>({task,binding}),reg,assertComposerSafe,new Function(section("function projectKey(","\n")+";return projectKey;")());
     const result=entry==="registered"?await api.reclaimIdlePageSlot(reg,"P","a",task,binding):entry==="close"?await api.closeEmptyPage(page):
       await api.reclaimOrphanManagedPage(reg,task,binding,"a",entry==="reuse"?binding:null);
     assert.equal(closes,safe&&entry!=="reuse"?1:0,`${name}:${entry} closes`);
