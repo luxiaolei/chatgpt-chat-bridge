@@ -8,7 +8,7 @@ const fixture=JSON.parse(await readFile(new URL('./native-submission-fixture.jso
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const helper=source.slice(source.indexOf('async function nativeSubmissionWitness('),source.indexOf('\nasync function sendMessage('));
 const getter='getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,T.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}';
-const prepare=new AsyncFunction('crypto','COMPOSER_SELECTOR','normalizedEvidenceText',helper+';return nativeSubmissionWitness;')(crypto,'composer',v=>v.replace(/\s+/g,' ').trim());
+const prepare=new AsyncFunction('crypto','COMPOSER_SELECTOR','normalizedEvidenceText','saveDraftBackup',helper+';return nativeSubmissionWitness;');
 async function inspect(change=()=>{},capabilityOnly=false) {
  const doc={content:{size:fixture.request.length},textBetween:()=>fixture.request};
  const composer={pmViewDesc:{node:doc},parentElement:null};
@@ -22,7 +22,12 @@ async function inspect(change=()=>{},capabilityOnly=false) {
  Object.defineProperty(globalThis,'document',{configurable:true,value:{querySelectorAll:()=>env.composers}});
  Object.defineProperty(globalThis,'location',{configurable:true,value:{href:'https://chatgpt.com/c/11111111-1111-4111-8111-111111111111'}});
  Object.defineProperty(globalThis,'fetch',{configurable:true,value:async()=>({json:async()=>({user:{email:env.email,id:env.id}})})});
- return await (await prepare)({evaluate:async(fn,args)=>fn(args)},env.request,env.identity,capabilityOnly);
+ const save=async(backup,directory)=>{
+  if(env.retentionFailure) throw new Error('PRIVATE_RETENTION_FAILED');
+  env.retained={backup,directory};
+  return {path:'/private/native-format-evidence.json',sha256:'f'.repeat(64),bytes:JSON.stringify(backup).length};
+ };
+ return await (await prepare(crypto,'composer',v=>v.replace(/\s+/g,' ').trim(),save))({evaluate:async(fn,args)=>fn(args)},env.request,env.identity,capabilityOnly);
  } finally {for(const [k,d] of prior){if(d)Object.defineProperty(globalThis,k,d);else delete globalThis[k];}}
 }
 test('native getter requires unique composer/doc, verified account and exact characterized submit path',async()=>{
@@ -246,4 +251,72 @@ test('native support can be checked before input without reading a body and reta
   ({env})=>env.composers.push({}),
   ({host,editor})=>host.__reactFiber$fixture.memoizedState.memoizedState.deps.push({...editor}),
  ]) await assert.rejects(inspect(context=>{empty(context);change(context);},true),/NATIVE_SUBMISSION_UNVERIFIED/);
+});
+
+
+test('unsupported FORMAT retains private native shape and stays rejected without body or handler calls',async()=>{
+ let captured,calls=0;
+ const submit=new Function('return e=>changed(rN.getText(),e)')();
+ await assert.rejects(inspect(context=>{
+  captured=context.env;
+  context.host.__reactFiber$fixture.memoizedProps.onSubmit=submit;
+  context.doc.textBetween=()=>{throw new Error('no body read');};
+  context.editor.getText=()=>{calls++;throw new Error('no getter call');};
+  context.editor.markdownEditor.serialize=()=>{calls++;throw new Error('no serializer call');};
+ },true),error=>{
+  assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');
+  assert.deepEqual(error.nativeAdapter,{formatVersion:'chatgpt-native-adapter-v1',phase:'FORMAT',status:'UNSUPPORTED'});
+  assert.equal(error.nativeFormatEvidence.path,'/private/native-format-evidence.json');
+  assert.equal(JSON.stringify(error).includes('e=>changed'),false);
+  return true;
+ });
+ assert.equal(calls,0);
+ assert.equal(captured.retained.directory,'native-format-evidence');
+ const evidence=captured.retained.backup;
+ assert.equal(evidence.format,'chat-bridge-native-format-evidence-v1');
+ assert.equal(evidence.composerAncestor,1);
+ assert.equal(evidence.fibers[0].onSubmit.source,Function.prototype.toString.call(submit));
+ assert.equal(evidence.fibers[0].editors[0].viewDoc,true);
+ assert.equal(evidence.fibers[0].editors[0].dictationDoc,true);
+ for(const secret of [fixture.request,fixture.body,captured.identity]) assert.equal(JSON.stringify(evidence).includes(secret),false);
+});
+
+test('FORMAT sampling does not invoke accessors or custom function/object toString',async()=>{
+ for(const field of ['onSubmit','memoizedProps','view','return','objectToString','functionToString']) {
+  let captured,calls=0;
+  await assert.rejects(inspect(context=>{
+   captured=context.env;
+   const fiber=context.host.__reactFiber$fixture;
+   fiber.memoizedProps.onSubmit=()=>{};
+   const accessor=()=>{calls++;throw new Error('opaque accessor invoked');};
+   if(field==='onSubmit') Object.defineProperty(fiber.memoizedProps,'onSubmit',{get:accessor});
+   if(field==='memoizedProps') Object.defineProperty(fiber,'memoizedProps',{get:accessor});
+   if(field==='view') Object.defineProperty(context.editor,'view',{get:accessor});
+   if(field==='return') Object.defineProperty(fiber,'return',{get:accessor});
+   if(field==='objectToString') fiber.memoizedProps.onSubmit={toString:accessor};
+   if(field==='functionToString') fiber.memoizedProps.onSubmit.toString=accessor;
+  },true),/NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED/);
+  assert.equal(calls,0,field);
+  assert.equal(captured.retained.directory,'native-format-evidence');
+ }
+});
+
+test('wrong account produces no private native shape',async()=>{
+ let captured;
+ await assert.rejects(inspect(context=>{
+  captured=context.env;context.env.email='other@example.test';
+  context.host.__reactFiber$fixture.memoizedProps.onSubmit=()=>{};
+ },true),/NATIVE_SUBMISSION_UNVERIFIED/);
+ assert.equal(captured.retained,undefined);
+});
+
+test('private evidence write failure keeps the original strict FORMAT error',async()=>{
+ await assert.rejects(inspect(({host,env})=>{
+  env.retentionFailure=true;host.__reactFiber$fixture.memoizedProps.onSubmit=()=>{};
+ },true),error=>{
+  assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');
+  assert.deepEqual(error.nativeAdapter,{formatVersion:'chatgpt-native-adapter-v1',phase:'FORMAT',status:'UNSUPPORTED'});
+  assert.deepEqual(error.nativeFormatEvidence,{saved:false,code:'PRIVATE_RETENTION_FAILED'});
+  return true;
+ });
 });

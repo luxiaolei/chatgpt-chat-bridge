@@ -347,6 +347,8 @@ Orphan cleanup does not create an idle-browser wakeup or bypass a cooling accoun
 
 See `docs/local-reliability-20260929.md` for the repair evidence, limitations, and deployment gate.
 
+Unknown native submit formats remain explicit `PRE_SEND` / `FORMAT` / `UNSUPPORTED`. At that existing failure boundary, the shared probe reads bounded data descriptors and intrinsic function source without calling native getters, serializers or handlers. Complete captured source stays in a verified private `native-format-evidence` file (directory 0700, file 0600); public errors carry only its path, hash and byte count. Retention failure preserves the original strict rejection. This evidence does not admit an alias, create a session or prove delivery.
+
 ### Recovery of an already created, unregistered rotation
 
 Host-local commands (Root controls live use):

@@ -18,6 +18,15 @@ test('draft backup is complete, durable and private before any mutation',async()
     assert.equal((await fs.stat(receipt.path)).mode&0o777,0o600);assert.equal((await fs.stat(path.dirname(receipt.path))).mode&0o777,0o700);
     assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),receipt.sha256);
     for(const [key,value] of Object.entries(original))assert.deepEqual(backup[key],value);
+    const shape={format:'chat-bridge-native-format-evidence-v1',fibers:[{onSubmit:{source:'e=>changed(rN.getText(),e)'}}]};
+    const retained=await save(shape,'native-format-evidence'),privateBytes=await fs.readFile(retained.path);
+    assert.equal(path.basename(path.dirname(retained.path)),'native-format-evidence');
+    assert.equal((await fs.stat(retained.path)).mode&0o777,0o600);
+    assert.equal((await fs.stat(path.dirname(retained.path))).mode&0o777,0o700);
+    assert.equal(crypto.createHash('sha256').update(privateBytes).digest('hex'),retained.sha256);
+    assert.deepEqual(JSON.parse(privateBytes).fibers,shape.fibers);
+    await assert.rejects(()=>save(shape,'../outside'),/PRIVATE_BACKUP_DIRECTORY_UNSUPPORTED/);
+    await fs.chmod(path.dirname(retained.path),0o755);await assert.rejects(()=>save(shape,'native-format-evidence'),/DIRECTORY_UNSAFE/);
     await fs.chmod(path.dirname(receipt.path),0o755);await assert.rejects(()=>save(original),/DIRECTORY_UNSAFE/);
   } finally {await fs.rm(root,{recursive:true,force:true});}
 });
