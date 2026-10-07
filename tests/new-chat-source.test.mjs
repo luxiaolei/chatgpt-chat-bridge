@@ -77,10 +77,12 @@ function fixture(change=()=>{}){
     if(selector.includes('contenteditable="true"'))return [composer];
     if(selector==='[data-message-author-role]')return [];
     if(selector.includes('[data-chatgpt-search-unit-key')||selector.includes('[data-content-search-unit-key'))return f.sends||f.beforeUserId?[unit].filter(node=>node.matches(selector)):[];
-    if(selector==='button')return f.sends?[copy]:[send];
+    if(selector==='button')return [...(f.sends?[copy]:[send]),...(f.busy?[new Element('BUTTON',{'data-testid':'stop-button','aria-label':'Stop generating'})]:[])];
+    if(selector==='input[type="file"]'&&f.attachment)return [{files:[{name:'synthetic.pdf'}]}];
+    if(selector.includes('[role="alert"]')&&(f.approval||f.errorText))return [root.append(new Element('DIV',{},f.errorText||'Codex Tasks\nAllow ChatGPT to use Codex Tasks?'))];
     return [];
   }};
-  f.page={label:'p-test',spaceId:2,url:async()=>f.url,goto:async url=>{f.url=url;},waitForSelector:async()=>{},fill:async(_selector,text)=>{assert.equal(text,request);composer.innerText=composer.textContent=text;},
+  f.page={label:'p-test',spaceId:2,url:async()=>f.url,goto:async url=>{f.url=url;},waitForSelector:async()=>{},reload:async()=>{f.reloads=(f.reloads||0)+1;f.onReload?.(f);},waitForFunction:async()=>{},fill:async(_selector,text)=>{assert.equal(text,request);composer.innerText=composer.textContent=text;},
     waitForTimeout:async ms=>{f.now+=ms;if(f.sends&&ms>=150){f.polls++;f.url=f.skipTemporary||f.polls>=2?permanent:transient;f.onPoll?.(f);}},
     waitForURL:async re=>assert.match(f.url,re),close:async()=>{f.closed++;},
     click:async selector=>{assert.equal(selector,'button[data-testid="send-button"]');f.sends++;unit.attrs['data-chatgpt-search-message-ids']=messageId;composer.innerText=composer.textContent='';f.url=f.skipTemporary?permanent:transient;},
@@ -88,7 +90,7 @@ function fixture(change=()=>{}){
       assert.ok(args.length<=1,'evaluate has exactly zero or one JSON argument');
       const arg=args.length?JSON.parse(JSON.stringify(args[0])):undefined;
       const value=await fn(...(args.length?[arg]:[]));
-      if(value&&typeof value==='object'&&'lastUserSource'in value)f.trace.push(JSON.parse(JSON.stringify(value)));
+      if(value&&typeof value==='object'&&'lastUserSource'in value){f.trace.push(JSON.parse(JSON.stringify(value)));f.onStateReturn?.(f,value);}
       return value;
     }};
   change(f);if(f.beforeUserId)unit.attrs['data-chatgpt-search-message-ids']=f.beforeUserId;return f;
@@ -96,9 +98,9 @@ function fixture(change=()=>{}){
 
 async function inBrowser(f,fn){
   const globals={document:f.document,location:{get href(){return f.url;},get origin(){return new URL(f.url).origin;},get pathname(){return new URL(f.url).pathname;}},
-    navigator:{onLine:true},MutationObserver:class{observe(){}disconnect(){}},Node:{ELEMENT_NODE:1},
+    navigator:{get onLine(){return f.online!==false;}},MutationObserver:class{observe(){}disconnect(){}},Node:{ELEMENT_NODE:1},
     getComputedStyle:()=>({display:'block',visibility:'visible',opacity:'1'}),
-    fetch:async()=>({ok:true,json:async()=>({user:{id:'verified-user'}})}),
+    fetch:async()=>{f.authCalls=(f.authCalls||0)+1;f.onAuth?.(f,f.authCalls);return {ok:true,json:async()=>({user:{id:f.login||'verified-user'}})};},
     __CHAT_BRIDGE_ARGS__:['new','--project','P','--account','a','--role','canary','--name','canary','--message',request,'--strict-model'],
     ...(f.attempt?{__CHAT_BRIDGE_DELIVERY_ATTEMPT__:f.attempt.descriptor,
       __CHAT_BRIDGE_STATE_DIR__:f.attempt.state,
@@ -110,8 +112,10 @@ async function inBrowser(f,fn){
     delete globalThis.__CHAT_BRIDGE_WATCH;Date.now=()=>f.now;
     const setup=[
       'const reg=f.reg;',
-      'if(f.attempt)coordinated=(command,context)=>{if(command!=="delivery-admission"||context.operationId!==f.attempt.descriptor.operationId)throw new Error("TEST_UNEXPECTED_ADMISSION"); f.admissions=(f.admissions||0)+1;if(f.denyAdmission)throw new Error("DELIVERY_ATTEMPT_NO_LONGER_CURRENT");return {ok:true};};',
-      'assertImagePageFree=async()=>{};',
+      'stored=(command,kind)=>{if(command!=="peek"||!["registry","runtime"].includes(kind))throw Error("TEST_UNEXPECTED_STORE");return structuredClone(kind==="registry"?f.reg:f.runtime||{sessions:{},tasks:{}});};',
+      'loadRuntime=async()=>{f.onRuntime?.(f);return structuredClone(f.runtime||{sessions:{},tasks:{}});};',
+      'coordinated=(command,context)=>{if(command==="image-session-occupancy")return {occupied:!!f.imageOccupied};if(command==="admission-check")return {ok:true,control:{mode:f.paused?"PAUSED":"RUNNING"}};if(!f.attempt||command!=="delivery-admission"||context.operationId!==f.attempt.descriptor.operationId)throw new Error("TEST_UNEXPECTED_ADMISSION"); f.admissions=(f.admissions||0)+1;if(f.denyAdmission)throw new Error("DELIVERY_ATTEMPT_NO_LONGER_CURRENT");return {ok:true};};',
+      'assertImagePageFree=async()=>{if(f.imageOccupied)throw Error("IMAGE_SESSION_OCCUPIED_RECONCILE_ONLY");};',
       'detectWebRateLimit=async()=>{};',
       'openBoundTask=async()=>({task:{spaceId:2},binding:f.binding});',
       'newManagedPage=async()=>f.page;',
@@ -212,7 +216,7 @@ test('persistent-start alias rejects absent or changed creation, scope, prior UI
       await runNew();f.skipTemporary=true;change(f);
       const saved=structuredClone(f.reg),click=f.page.click;
       f.page.click=async selector=>{await click(selector);f.source.messageId='55555555-5555-4555-8555-555555555555';f.unit.attrs['data-chatgpt-search-message-ids']=f.source.messageId;};
-      await assert.rejects(sendMessage(f.page,request,permanent),/DELIVERY_UNCONFIRMED|TARGET_IDENTITY_UNVERIFIED/);
+      await assert.rejects(sendMessage(f.page,request,permanent),/DELIVERY_UNCONFIRMED|TARGET_IDENTITY_UNVERIFIED|NATIVE_EXISTING_SOURCE_UNVERIFIED/);
       assert.deepEqual(f.reg,saved,'rejection never manufactures or advances native proof');
     });
     assert.ok(f.sends<=2);
@@ -532,4 +536,120 @@ test('unconfirmed persistent URL with temporary source keeps full evidence witho
     assert.equal(saved.data.nativeWitness.postSend.sourceConversationId,temporary);
     assert.equal(saved.data.nativeWitness.postSend.missingCondition,'NATIVE_TEMPORARY_SOURCE_PROOF_MISSING');
   }finally{await rm(journal.state,{recursive:true,force:true});}
+});
+
+test('existing persistent temporary source recovers before input or stops before physical Send',async()=>{
+  for(const recovers of [true,false]){
+    const oldId='77777777-7777-4777-8777-777777777777';
+    const f=fixture(x=>{
+      x.skipTemporary=true;x.url=permanent;x.beforeUserId=oldId;x.source.messageId=oldId;
+      x.reg.chats[uuid]={id:uuid,status:'active',project:'P',account:'a',url:permanent};
+    });
+    const originalClick=f.page.click,originalFill=f.page.fill;
+    f.fills=0;f.reloads=0;
+    f.page.fill=async(...args)=>{f.fills++;await originalFill(...args);};
+    f.page.click=async selector=>{await originalClick(selector);f.source.messageId=messageId;};
+    f.page.reload=async()=>{
+      assert.equal(f.fills,0);assert.equal(f.sends,0);f.reloads++;
+      if(recovers){f.source.conversationId=uuid;f.frames[10].memoizedProps.conversationId=uuid;}
+    };
+    f.page.waitForFunction=async()=>{};
+    const saved=structuredClone(f.reg);
+    await inBrowser(f,async({sendMessage})=>{
+      if(recovers)assert.equal((await sendMessage(f.page,request,permanent)).delivered,true);
+      else await assert.rejects(sendMessage(f.page,request,permanent),e=>e.deliveryStage==='PRE_SEND'&&e.code==='NATIVE_EXISTING_SOURCE_UNVERIFIED');
+    });
+    assert.equal(f.reloads,1);assert.equal(f.sends,recovers?1:0);assert.equal(f.fills,recovers?1:0);
+    assert.equal(f.closed,0);assert.deepEqual(f.reg,saved);assert.equal(f.persisted.length,0);
+  }
+});
+
+function existingFixture(){
+  const oldId='77777777-7777-4777-8777-777777777777';
+  const f=fixture(x=>{x.skipTemporary=true;x.url=permanent;x.beforeUserId=oldId;x.source.messageId=oldId;
+    x.reg.chats[uuid]={id:uuid,status:'active',project:'P',account:'a',url:permanent};});
+  const fill=f.page.fill,click=f.page.click;f.fills=0;
+  f.page.fill=async(...args)=>{f.beforeInputStateCount=f.trace.length;f.fills++;await fill(...args);};
+  f.page.click=async selector=>{await click(selector);f.source.messageId=messageId;};
+  f.onReload=x=>{x.source.conversationId=uuid;x.frames[10].memoizedProps.conversationId=uuid;};
+  return f;
+}
+
+test('existing source recovery fails closed on missing proof, controls and changed after-reload scope/body/UI',async()=>{
+  const cases=[
+    [false,f=>{f.copy.__reactFiber$fixture=null;}],
+    [false,f=>{f.paused=true;}],
+    [false,f=>{f.runtime={sessions:{[uuid]:{watchdogPausedForUserControl:true}}};}],
+    [false,f=>{f.online=false;}],
+    [false,f=>{f.busy=true;}],
+    [false,f=>{f.approval=true;}],
+    [false,f=>{f.composer.textContent='protected draft';}],
+    [false,f=>{f.attachment=true;}],
+    [false,f=>{f.imageOccupied=true;}],
+    [false,f=>{f.errorText='Conversation reached maximum limit';}],
+    [true,f=>{f.login='foreign';}],
+    [true,f=>{f.url=permanent.replace(uuid,'88888888-8888-4888-8888-888888888888');}],
+    [true,f=>{for(const n of [10,13,14])f.frames[n].memoizedProps.message=request+' ';}],
+    [true,f=>{f.source.messageId='88888888-8888-4888-8888-888888888888';f.unit.attrs['data-chatgpt-search-message-ids']=f.source.messageId;}],
+    [true,f=>{f.source.conversationId='88888888-8888-4888-8888-888888888888';f.frames[10].memoizedProps.conversationId=f.source.conversationId;}],
+    [true,f=>{f.reg.chats[uuid].role='changed concurrently';}],
+    [true,f=>{f.busy=true;}],
+    [true,f=>{f.approval=true;}],
+    [true,f=>{f.composer.textContent='new draft';}],
+    [true,f=>{f.attachment=true;}],
+    [true,f=>{f.imageOccupied=true;}],
+    [true,f=>{f.errorText='Unable to load conversation';}],
+    [true,f=>{f.composer.closest('form').__reactFiber$editor.memoizedProps.onSubmit=()=>{};}],
+    [true,()=>{throw Error('synthetic reload failed');}]
+  ];
+  for(const [afterReload,change] of cases){
+    const f=existingFixture();if(afterReload){const settle=f.onReload;f.onReload=x=>{settle(x);change(x);};}else change(f);
+    await inBrowser(f,async({sendMessage})=>assert.rejects(sendMessage(f.page,request,permanent),e=>e.deliveryStage==='PRE_SEND',String(change)));
+    assert.equal(f.reloads||0,afterReload?1:0);assert.equal(f.fills,0);assert.equal(f.sends,0);
+    assert.equal(f.closed,0);assert.equal(f.persisted.length,0);
+  }
+});
+
+test('normal same-claim journal retains full source before reload and the fresh direct baseline before input',async()=>{
+  const journal=await journalFixture();
+  try{
+    const f=existingFixture();f.attempt=journal;
+    await inBrowser(f,async({sendMessage})=>assert.equal((await sendMessage(f.page,request,permanent)).delivered,true));
+    assert.equal(f.reloads,1);assert.equal(f.fills,1);assert.equal(f.sends,1);
+    const names=await readdir(journal.directory),samples=await Promise.all(names.filter(n=>n.includes('-OBSERVED-')).map(async n=>JSON.parse(await readFile(path.join(journal.directory,n)))));
+    const intent=samples.find(x=>x.data.stage==='SOURCE_SETTLING_RELOAD_INTENT'),settled=samples.find(x=>x.data.stage==='SOURCE_SETTLING_RELOAD_RETURNED');
+    assert.equal(intent.data.snapshot.lastUserSource.text,request);assert.equal(intent.data.snapshot.lastUserSource.conversationId,temporary);
+    assert.equal(settled.data.snapshot.lastUserSource.text,request);assert.equal(settled.data.snapshot.lastUserSource.conversationId,uuid);
+    const baseline=JSON.parse(await readFile(path.join(journal.directory,'20-BEFORE_INPUT.json')));
+    assert.equal(baseline.data.snapshot.lastUserId,intent.data.snapshot.lastUserId);
+    assert.equal(baseline.data.snapshot.lastUserSource.conversationId,uuid);assert.ok(!f.reg.chats[uuid].nativeCreationWitness);
+  }finally{await rm(journal.state,{recursive:true,force:true});}
+});
+
+test('existing source recovery rechecks control, user pause and registry after final Auth before reload or input',async()=>{
+  for(const authNumber of [5,8])for(const change of [f=>{f.paused=true;},f=>{f.runtime={sessions:{[uuid]:{watchdogPausedForUserControl:true}}};},
+    f=>{f.reg.chats[uuid].role='changed during Auth';}]){
+    const f=existingFixture();f.onAuth=(x,n)=>{if(n===authNumber)change(x);};
+    await inBrowser(f,async({sendMessage})=>assert.rejects(sendMessage(f.page,request,permanent),e=>e.deliveryStage==='PRE_SEND'));
+    assert.equal(f.reloads||0,authNumber===5?0:1);assert.equal(f.fills,0);assert.equal(f.sends,0);assert.equal(f.closed,0);assert.equal(f.persisted.length,0);
+  }
+});
+
+test('final source guard resamples draft, prior UID/body and Image after its runtime wait',async()=>{
+  for(const change of [f=>{f.composer.textContent='new draft';},f=>{for(const n of [10,13,14])f.frames[n].memoizedProps.message=request+' late body';},
+    f=>{f.source.messageId='88888888-8888-4888-8888-888888888888';f.unit.attrs['data-chatgpt-search-message-ids']=f.source.messageId;},f=>{f.imageOccupied=true;}]){
+    const f=existingFixture();let changed=false;f.onRuntime=x=>{if(!changed&&x.authCalls>=8){changed=true;change(x);}};
+    await inBrowser(f,async({sendMessage})=>assert.rejects(sendMessage(f.page,request,permanent),e=>e.deliveryStage==='PRE_SEND'));
+    assert.equal(changed,true);assert.equal(f.reloads,1);assert.equal(f.fills,0);assert.equal(f.sends,0);assert.equal(f.persisted.length,0);
+  }
+});
+
+test('final source/UI return rechecks a user pause before input using the actual healthy boundary',async()=>{
+  const probe=existingFixture();
+  await inBrowser(probe,async({sendMessage})=>assert.equal((await sendMessage(probe.page,request,permanent)).delivered,true));
+  const lastSample=probe.beforeInputStateCount;assert.ok(lastSample>0);
+  const f=existingFixture();let injected=false;
+  f.onStateReturn=x=>{if(x.trace.length===lastSample){x.runtime={sessions:{[uuid]:{watchdogPausedForUserControl:true}}};injected=true;}};
+  await inBrowser(f,async({sendMessage})=>assert.rejects(sendMessage(f.page,request,permanent),e=>e.deliveryStage==='PRE_SEND'));
+  assert.equal(injected,true);assert.equal(f.reloads,1);assert.equal(f.fills,0);assert.equal(f.sends,0);assert.equal(f.persisted.length,0);
 });

@@ -70,6 +70,8 @@ async function run(f,fn) {
     delete globalThis.__CHAT_BRIDGE_WATCH;
     const setup=[
       'const reg=f.reg, page=f.page, chat=f.chat;',
+      // This input-policy fixture mocks prior native source and delivery; binding has its own native-DOM tests.
+      'const sampleState=state;state=async(...args)=>{const snapshot=await sampleState(...args);if(snapshot.url===url)Object.assign(snapshot,{lastUserId:"22222222-2222-4222-8222-222222222222",userMessageIds:["22222222-2222-4222-8222-222222222222"],lastUserSourceCondition:"BOUND_SOURCE",lastUserSource:{messageId:"22222222-2222-4222-8222-222222222222",conversationId:chat.id,text:"Previous synthetic request"}});return snapshot;};',
       'assertImagePageFree=async()=>{};detectWebRateLimit=async()=>{};recordDeliveryStage=async()=>{};',
       'if(f.change.afterIntent)recordDeliveryStage=async phase=>{if(phase==="DRAFT_DISCARD_INTENT")f.change.afterIntent(f);};',
       "coordinated=()=>{if(f.change.paused)throw Error('DRAFT_DISCARD_ADMISSION_DENIED');return {ok:true};};",
