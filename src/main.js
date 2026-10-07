@@ -1107,10 +1107,13 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
      !info.name.startsWith("chat-bridge-agent-") || info.profileId!==binding.profileId)
     throw new Error("OPERATION_OBSERVATION_REQUIRES_MANAGED_SPACE");
   if(pendingSession && (spaces.length!==1 || Number(info.id)!==Number(binding.spaceId))) throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
-  const runtime=await loadRuntime();
-  if(runtime.sessions?.[scope.sessionRef]?.watchdogPausedForUserControl ||
-     Object.values(runtime.tasks||{}).some(t=>t.sessionId===scope.sessionRef && t.watchdogPausedForUserControl))
-    throw new Error("OPERATION_OBSERVATION_USER_CONTROL_PAUSED");
+  const assertNotPaused=async()=>{
+    const runtime=await loadRuntime();
+    if(runtime.sessions?.[scope.sessionRef]?.watchdogPausedForUserControl ||
+       Object.values(runtime.tasks||{}).some(t=>t.sessionId===scope.sessionRef && t.watchdogPausedForUserControl))
+      throw new Error("OPERATION_OBSERVATION_USER_CONTROL_PAUSED");
+  };
+  await assertNotPaused();
   await assertWebAvailable(scope.account);
   const task=await taskSpace(info.id), tabs=await task.tabs();
   if(pendingSession && Number(task.spaceId)!==Number(binding.spaceId)) throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
@@ -1140,11 +1143,13 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
   });
   if(login!==identity) throw new Error("OPERATION_OBSERVATION_LOGIN_MISMATCH");
   // Native source text does not require expanding or clicking a rendered message.
+  await assertNotPaused();
   const snapshot=await state(page,pendingSession?"ids":true);
   if(!sameConversationUrl(snapshot.url,scope.url) || projectKey(snapshot.url)!==scope.projectId)
     throw new Error("OPERATION_OBSERVATION_CONVERSATION_CHANGED");
   if(coordinated("observation-context",query).anchor!==scope.anchor)
     throw new Error("OPERATION_CHANGED_DURING_OBSERVATION");
+  await assertNotPaused();
   return {...(pendingSession?{...snapshot,role:reg.chats[pendingSession].role,status:"pending-rotation"}:{}),
     ok:true,format:"operation-native-observation-v1",operationId:scope.operationId,taskId:scope.taskId,
     project:scope.project,account:scope.account,accountId:scope.accountId,sessionRef:scope.sessionRef,
