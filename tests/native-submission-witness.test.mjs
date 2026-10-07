@@ -190,7 +190,7 @@ test('native witness uses one validated method snapshot and rejects changes befo
     const {editor,env}=context;
     if(field==='getText') editor.getText=()=>{calls++;return fixture.body;};
     if(field==='serialize') editor.markdownEditor.serialize=()=>{calls++;return fixture.body;};
-    if(field==='dictation') editor.dictation={document:context.doc};
+    if(field==='dictation') editor.dictation={document:{...context.doc}};
     if(field==='markdownEditor') editor.markdownEditor={...editor.markdownEditor};
     if(field==='view') editor.view={...editor.view};
     if(field==='composer') env.composers.push({});
@@ -227,6 +227,27 @@ test('document validation cannot swap an uncharacterized method into capability 
   }),/NATIVE_SUBMISSION_UNVERIFIED/);
   assert.equal(native.getterCalls,0);
  }
+});
+
+test('dictation accessors follow the native getter path without treating an unsampled descriptor as another document',async()=>{
+ let reads=0,native;
+ const witness=await inspectCharacterized(context=>{
+  native=context.native;
+  const dictation=context.editor.dictation;
+  Object.defineProperty(dictation,'document',{get(){reads++;return context.doc;}});
+  Object.defineProperty(context.editor,'dictation',{get(){reads++;return dictation;}});
+ });
+ assert.equal(witness.body,fixture.body);assert(reads>0);
+ assert.equal(native.getterCalls,1);assert.equal(native.serializerCalls,1);
+ let calls=0;
+ await assert.rejects(inspectCharacterized(({editor})=>{
+  editor.getText=()=>fixture.body;
+  Object.defineProperty(editor,'dictation',{get(){calls++;throw new Error('unknown shape must not read dictation');}});
+ },true),error=>{assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');return true;});
+ assert.equal(calls,0);
+ await assert.rejects(inspectCharacterized(({editor})=>{
+  Object.defineProperty(editor,'dictation',{get:()=>({document:{}})});
+ }),/NATIVE_SUBMISSION_UNVERIFIED/);
 });
 
 test('admission refuses truncated editor dependencies, hooks and serializer source',async()=>{

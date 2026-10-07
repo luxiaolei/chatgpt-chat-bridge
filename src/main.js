@@ -2164,7 +2164,7 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
           if(value(view,'dom')!==composer) continue;
           composerEditors.add(editor);
           if(composerEditors.size>128) {admissionTruncated=true;break;}
-          const dictation=value(editor,'dictation'),markdownEditor=value(editor,'markdownEditor');
+          const markdownEditor=value(editor,'markdownEditor');
           const getText=value(editor,'getText'),serialize=value(markdownEditor,'serialize');
           const getterSource=describe(editor,'getText').source,serializerSource=describe(markdownEditor,'serialize').source;
           if(getterSource!==format.getter || typeof getText!=='function' || typeof serialize!=='function' || serializerSource===null ||
@@ -2176,10 +2176,10 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
             for(const key of keys) methods.push([key,value(editor,key)]);
           }
           if(format.serializer) formatRecognized=true;
-          // document is a characterized accessor; descriptor-only diagnostics intentionally do not call it.
-          if(dictation?.document!==doc || value(value(view,'state'),'doc')!==doc ||
+          // Follow the verified getter's actual document path; diagnostics alone intentionally skip accessors.
+          if(editor.dictation?.document!==doc || value(value(view,'state'),'doc')!==doc ||
             value(editor,'plainTextMode')!==false) continue;
-          candidates.set(editor,{editor,view,dictation,markdownEditor,getText,serialize,getterSource,serializerSource,methods});
+          candidates.set(editor,{editor,view,markdownEditor,getText,serialize,getterSource,serializerSource,methods});
         }
         if(admissionTruncated) break;
       }
@@ -2235,13 +2235,13 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
       if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
       return fail();
     }
-    const {editor,view,dictation,markdownEditor,getText,serialize,getterSource,serializerSource,methods}=[...candidates.values()][0];
+    const {editor,view,markdownEditor,getText,serialize,getterSource,serializerSource,methods}=[...candidates.values()][0];
     const sameBinding=()=>{
-      if(dictation.document!==doc) return false;
+      if(editor.dictation?.document!==doc) return false;
       const current=[...document.querySelectorAll(selector)];
       return current.length===1 && current[0]===composer && value(editor,'view')===view && value(view,'dom')===composer &&
         value(value(view,'state'),'doc')===doc && value(value(composer,'pmViewDesc'),'node')===doc &&
-        value(editor,'dictation')===dictation && value(editor,'plainTextMode')===false &&
+        value(editor,'plainTextMode')===false &&
         value(editor,'markdownEditor')===markdownEditor && value(markdownEditor,'serialize')===serialize &&
         methods.every(([key,method])=>value(editor,key)===method);
     };
