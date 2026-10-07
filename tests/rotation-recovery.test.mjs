@@ -30,6 +30,30 @@ with tempfile.TemporaryDirectory() as root:
              "getterHash":"1"*64,"serializerHash":"2"*64,"observedAt":c.stamp(),"messageId":None}
     db.execute("UPDATE operations SET status='DELIVERY_UNKNOWN',attempts=6,result=? WHERE id=?",
                (json.dumps({"nativeWitness":witness,"worker":{"prior":"retained"}}),op));db.commit()
+    if case.startswith("scope-"):
+        db.execute("UPDATE operations SET kind='dispatch',session_ref=? WHERE id=?",(sid,op));db.commit()
+        reg["spaces"]={"primary":{"identity":"one","profileId":"Profile 1","name":"chat-bridge-agent-a","spaceId":1,"ownership":"agent","accountName":"a","projects":[]}}
+        reg["capacityOverflow"]={"one|Profile 1":{"identity":"one","profileId":"Profile 1","spaceName":"chat-bridge-agent-a-overflow","spaceId":2,"previousSpaces":[{"spaceId":3}]}}
+        db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(reg),));db.commit()
+    def change_registry():
+        latest=c.registry(db)
+        if case=="scope-unrelated-chat":latest["chats"]["other"]={"lastUsedAt":"later","page":"other-page"}
+        elif case=="scope-unrelated-project":latest["projects"]["Other"]={"bindings":{"a":{"verifiedAt":"later"}}}
+        elif case=="scope-unrelated-account":latest["accounts"]["other"]={"identity":"other"}
+        elif case=="scope-unrelated-overflow":latest["capacityOverflow"]["other|Profile 1"]={"spaceId":99}
+        elif case=="scope-catalog":latest["spaces"]["primary"]["projects"]=[{"id":"g-p-"+"f"*32}]
+        elif case=="scope-chat-attachment":latest["chats"][sid].update(page="new-page",spaceId=99,attachmentEpoch=2)
+        elif case=="scope-chat-model":latest["chats"][sid].update(requestedModel="requested",observedModel="changed")
+        elif case=="scope-chat-status":latest["chats"][sid]["status"]="retired"
+        elif case=="scope-binding":latest["projects"]["P"]["bindings"]["a"]["profileId"]="Profile 2"
+        elif case=="scope-project":latest["projects"]["P"]["rootController"]="other"
+        elif case=="scope-account":latest["accounts"]["a"]["identity"]="changed"
+        elif case.startswith("scope-space-"):latest["spaces"]["primary"][case.removeprefix("scope-space-")]="changed"
+        elif case=="scope-overflow":latest["capacityOverflow"]["one|Profile 1"]["spaceId"]=99
+        elif case=="scope-previous-overflow":latest["capacityOverflow"]["one|Profile 1"]["previousSpaces"][0]["spaceId"]=99
+        elif case=="scope-operation-hidden":return
+        else:latest["chats"]["other"]={"lastUsedAt":"concurrent-maintenance-"+str(len(calls))}
+        db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(latest),));db.commit()
     calls=[]
     def observe(command):
         calls.append(command)
@@ -58,6 +82,10 @@ with tempfile.TemporaryDirectory() as root:
         if case=="stale-observation":result["observedAt"]="2000-01-01T00:00:00Z"
         if case=="observation-race":
             db.execute("UPDATE operations SET attempts=attempts+1 WHERE id=?",(op,));db.commit()
+        if case.startswith("scope-"):change_registry()
+        if case=="scope-operation-hidden":
+            db.execute("UPDATE operations SET original_message='changed' WHERE id=?",(op,));db.commit()
+        if case=="registry-observation-race" and len(calls)>1:change_registry()
         return subprocess.CompletedProcess(command,0,json.dumps(result),"")
     c.run_bridge=observe
     if case=="wrong-predecessor-project":
@@ -110,6 +138,26 @@ with tempfile.TemporaryDirectory() as root:
         try:c.rotation_recover(db,payload);raise AssertionError("accepted changed operation")
         except ValueError as e:assert "CHANGED" in str(e)
         assert db.execute("SELECT status FROM operations").fetchone()[0]=="DELIVERY_UNKNOWN"
+    elif case.startswith("scope-"):
+        original=dict(db.execute("SELECT * FROM operations WHERE id=?",(op,)).fetchone())
+        original_runtime=db.execute("SELECT payload FROM documents WHERE kind='runtime'").fetchone()[0]
+        if case in {"scope-unrelated-chat","scope-unrelated-project","scope-unrelated-account","scope-unrelated-overflow","scope-catalog"}:
+            assert c.observe_operation(db,op)["sessionRef"]==sid
+        else:
+            try:c.observe_operation(db,op);raise AssertionError("accepted changed observation scope")
+            except ValueError as e:assert "CHANGED" in str(e) or "MISMATCH" in str(e),str(e)
+        if case=="scope-operation-hidden":original["original_message"]="changed"
+        assert dict(db.execute("SELECT * FROM operations WHERE id=?",(op,)).fetchone())==original
+        assert db.execute("SELECT payload FROM documents WHERE kind='runtime'").fetchone()[0]==original_runtime
+        assert all(command[1]=="operation-evidence" for command in calls)
+    elif case=="registry-observation-race":
+        original=dict(db.execute("SELECT * FROM operations WHERE id=?",(op,)).fetchone())
+        preview=c.rotation_recover(db,payload)
+        assert preview["state"]=="RECOVERY_PREVIEW"
+        try:c.rotation_recover(db,{**payload,"confirm":True,"expected":preview["expected"]});raise AssertionError("accepted registry change during observation")
+        except ValueError as e:assert "CAS_CHANGED" in str(e),str(e)
+        assert c.registry(db)["chats"]["other"]["lastUsedAt"].startswith("concurrent-maintenance-")
+        assert dict(db.execute("SELECT * FROM operations WHERE id=?",(op,)).fetchone())==original
     elif case=="missing-task-observe":
         db.execute("UPDATE operations SET kind='dispatch',session_ref=? WHERE id=?",(sid,op));db.commit()
         before="\n".join(db.iterdump())
@@ -122,8 +170,9 @@ with tempfile.TemporaryDirectory() as root:
         preview=c.rotation_recover(db,payload)
         assert preview["state"]=="RECOVERY_PREVIEW" and "\n".join(db.iterdump())==before
         assert preview["proof"]["historicalBeforeUserId"] is None
-        if case=="stale-preview":
-            db.execute("UPDATE operations SET attempts=attempts+1 WHERE id=?",(op,));db.commit()
+        if case in {"stale-preview","registry-stale-preview"}:
+            if case=="registry-stale-preview":change_registry()
+            else:db.execute("UPDATE operations SET attempts=attempts+1 WHERE id=?",(op,));db.commit()
             try:c.rotation_recover(db,{**payload,"confirm":True,"expected":preview["expected"]});raise AssertionError("accepted stale preview")
             except ValueError as e:assert "PREVIEW_CHANGED" in str(e)
         elif case in {"candidate-op-race","candidate-logical-race"}:
@@ -139,13 +188,17 @@ with tempfile.TemporaryDirectory() as root:
             try:c.rotation_recover(db,{**payload,"confirm":True,"expected":preview["expected"]});raise AssertionError("accepted occupied candidate race")
             except ValueError as e:assert "OCCUPIED" in str(e)
             assert db.execute("SELECT status FROM operations WHERE id=?",(op,)).fetchone()[0]=="DELIVERY_UNKNOWN"
-        elif case=="cas-race":
+        elif case in {"cas-race","registry-cas-race"}:
             original=c.begin_immediate
             def race(database):
-                database.execute("UPDATE logical_sessions SET epoch=epoch+1");database.commit();original(database)
+                if case=="registry-cas-race":change_registry()
+                else:database.execute("UPDATE logical_sessions SET epoch=epoch+1");database.commit()
+                original(database)
             c.begin_immediate=race
             try:c.rotation_recover(db,{**payload,"confirm":True,"expected":preview["expected"]});raise AssertionError("accepted CAS race")
             except ValueError as e:assert "CAS_CHANGED" in str(e)
+            if case=="registry-cas-race":assert c.registry(db)["chats"]["other"]["lastUsedAt"].startswith("concurrent-maintenance-")
+            assert db.execute("SELECT status FROM operations WHERE id=?",(op,)).fetchone()[0]=="DELIVERY_UNKNOWN"
         else:
             result=c.rotation_recover(db,{**payload,"confirm":True,"expected":preview["expected"]})
             assert result["state"]=="RECOVERED_PENDING_ACK"
@@ -173,7 +226,8 @@ with tempfile.TemporaryDirectory() as root:
     db.close()
 `;
 
-for(const name of ["success","draft","wrong-login","wrong-project","wrong-cid","wrong-uid","temporary","wrong-body","missing","duplicate","stale-observation","wrong-handoff","wrong-witness","wrong-epoch","occupied","pending","observation-race","stale-preview","cas-race","missing-task-observe","prior-cid","prior-user","wrong-predecessor-project","source-cid-conflict","historical-first-conflict","candidate-op-race","candidate-logical-race","offline","network-error","discarded","recovery-ui","pacing","identity-error","transport","timeout"]) {
+for(const name of ["success","draft","wrong-login","wrong-project","wrong-cid","wrong-uid","temporary","wrong-body","missing","duplicate","stale-observation","wrong-handoff","wrong-witness","wrong-epoch","occupied","pending","observation-race","stale-preview","cas-race","missing-task-observe","prior-cid","prior-user","wrong-predecessor-project","source-cid-conflict","historical-first-conflict","candidate-op-race","candidate-logical-race","offline","network-error","discarded","recovery-ui","pacing","identity-error","transport","timeout",
+  "scope-unrelated-chat","scope-unrelated-project","scope-unrelated-account","scope-unrelated-overflow","scope-catalog","scope-operation-hidden","scope-chat-attachment","scope-chat-model","scope-chat-status","scope-binding","scope-project","scope-account","scope-space-profileId","scope-space-name","scope-space-spaceId","scope-space-ownership","scope-space-accountName","scope-overflow","scope-previous-overflow","registry-observation-race","registry-cas-race","registry-stale-preview"]) {
   test("existing rotation / operation observation: "+name,()=>{
     const env={...process.env,PYTHONDONTWRITEBYTECODE:"1"};
     delete env.CHAT_BRIDGE_FROM_ACCOUNT_ID;delete env.CHAT_BRIDGE_FROM_SPACE;delete env.CODEX_THREAD_ID;

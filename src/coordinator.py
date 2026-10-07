@@ -3162,7 +3162,14 @@ def observation_context(db, operation_id, candidate=None, pending_session=None):
     if chat and (chat.get("project") != row["project"] or chat.get("account") != row["account_alias"]
                  or chat.get("id") != session):
         raise ValueError("OBSERVATION_REGISTRY_IDENTITY_MISMATCH")
-    anchor = recovery_digest({"operation":dict(row), "registry":reg})
+    # Read-only observations depend on their route, not unrelated registry maintenance.
+    anchor = recovery_digest({"operation":dict(row), "chat":chat,
+                              "caller":(reg.get("chats") or {}).get(row["caller_ref"]),
+                              "account":reg["accounts"][row["account_alias"]], "binding":binding,
+                              "project":{k:v for k,v in reg["projects"][row["project"]].items() if k != "bindings"},
+                              "spaces":{key:{k:space.get(k) for k in ("identity","profileId","name","spaceId","ownership","accountName")}
+                                        for key,space in (reg.get("spaces") or {}).items() if space.get("identity") == identity},
+                              "overflow":(reg.get("capacityOverflow") or {}).get(identity + "|" + str(binding.get("profileId")))})
     return {"operationId":row["id"], "kind":row["kind"], "taskId":row["task_id"],
             "project":row["project"], "account":row["account_alias"], "accountId":row["account_id"],
             "sessionRef":session, "projectId":project_id, "binding":binding, "accountIdentity":identity,
@@ -3252,6 +3259,7 @@ def rotation_recover(db, payload):
         raise ValueError("ROTATION_RECOVERY_ORIGINAL_REQUIRED")
     logical = logical[0]
     reg = registry(db)
+    registry_anchor = recovery_digest(reg)
     predecessor = (reg.get("chats") or {}).get(row["caller_ref"])
     if (logical["state"] != "ROTATING" or logical["pending_session_ref"]
             or logical["current_session_ref"] != row["caller_ref"]
@@ -3333,7 +3341,7 @@ def rotation_recover(db, payload):
              "accountId":row["account_id"], "projectId":context["projectId"], "url":evidence["url"],
              "historicalBeforeUserId":None, "serverMessageTimestamp":None,
              "uniquenessScope":"observed-candidate-message-and-local-registry"}
-    token = recovery_digest({"anchor":context["anchor"], "logical":dict(logical), "proof":proof})
+    token = recovery_digest({"anchor":context["anchor"], "registry":registry_anchor, "logical":dict(logical), "proof":proof})
     preview = {"operationId":operation_id, "rotationId":row["rotation_id"], "state":"RECOVERY_PREVIEW",
                "expected":token, "proof":proof, "observedAt":evidence["observedAt"],
                "readiness":{"generating":evidence.get("generating"),"draftChars":evidence.get("draftChars")},
@@ -3346,7 +3354,8 @@ def rotation_recover(db, payload):
     try:
         current_logical = db.execute("SELECT * FROM logical_sessions WHERE logical_ref=?", (logical["logical_ref"],)).fetchone()
         if (not current_logical or dict(current_logical) != dict(logical)
-                or observation_context(db, operation_id, candidate)["anchor"] != context["anchor"]):
+                or observation_context(db, operation_id, candidate)["anchor"] != context["anchor"]
+                or recovery_digest(registry(db)) != registry_anchor):
             raise ValueError("ROTATION_RECOVERY_CAS_CHANGED")
         # Recheck cross-row ownership under the same write lock as the binding.
         assert_rotation_candidate_free(db, row, candidate, registry(db))
