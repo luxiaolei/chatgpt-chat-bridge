@@ -785,7 +785,7 @@ async function overflowManagedTask(reg, project, account, binding, options={}) {
   }
   if(options.existingOnly) {
     const mapped=options.previous?previousSpaces?.[0]:remembered;
-    if(!options.preview || options.advance || !mapped || !existing || !Number.isSafeInteger(mapped.spaceId) || mapped.spaceId<=0 ||
+    if(!options.preview || options.advance || !mapped || !existing || name!==mapped.spaceName || !Number.isSafeInteger(mapped.spaceId) || mapped.spaceId<=0 ||
        !String(mapped.spaceName||"").startsWith("chat-bridge-agent-") || typeof mapped.createdAt!=="string" ||
        Number(existing.id)!==mapped.spaceId) throw new Error("OVERFLOW_MAPPING_CHANGED");
   }

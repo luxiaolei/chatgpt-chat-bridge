@@ -102,6 +102,17 @@ test('UNKNOWN observation refuses missing, changed, foreign or user-owned overfl
   for(const mutate of changes){const f=await fixture({mutate});await assert.rejects(f.run());assert.deepEqual(f.calls.created,[]);f.unchanged();}
 });
 
+test('existing-only UNKNOWN observation rejects the normal legacy foreign-Profile rename path',async()=>{
+  const f=await fixture({headTabs:[{label:'exact',url,openedBy:'agent'}],mutate:({reg,available})=>{
+    const legacy=primary+'-overflow',head=reg.capacityOverflow['login-a|'+profile];
+    head.spaceName=legacy;delete head.previousSpaces;
+    available[1].name=legacy+'-'+crypto.createHash('sha256').update(profile).digest('hex').slice(0,8);
+    available[2].id=16;available[2].profileId='foreign';
+  }});
+  await assert.rejects(f.run(),/OVERFLOW_MAPPING_CHANGED/);
+  assert.deepEqual(f.calls.created,[]);assert.deepEqual(f.calls.gotos,[]);f.unchanged();
+});
+
 test('UNKNOWN observation stops when the whole pool is full or the single selected allocation races',async()=>{
   const full=Array.from({length:8},(_,n)=>({label:'full-'+n,url:'about:blank',openedBy:'agent'}));
   for(const change of [{headTabs:full,previousTabs:full},{allocationRace:42,previousTabs:[]}]){
