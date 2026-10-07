@@ -58,6 +58,196 @@ test('persisted/error witness metadata never contains secret body, identity or n
 });
 
 const currentFormat=JSON.parse(await readFile(new URL('./native-submission-current-fixture.json',import.meta.url),'utf8'));
+const characterizedShape=JSON.parse(await readFile(new URL('./native-submission-characterized-shape-fixture.json',import.meta.url),'utf8'));
+function inspectCharacterized(change=()=>{},capabilityOnly=false) {
+ return inspect(context=>{
+  const {doc,editor,host}=context,native={body:fixture.body,getterCalls:0,serializerCalls:0};
+  doc.type={schema:{marks:{literalPaste:{}}}};
+  doc.content.content=[{type:{name:'paragraph'}}];doc.childCount=1;
+  doc.child=()=>doc.content.content[0];doc.descendants=()=>{};
+  const serialize=new Function('C','s','T','o','e','t','return ('+characterizedShape.serializerSource+');')(
+   {m:class{constructor(value){assert.equal(value,doc);}removeMark(){return {doc};}}},
+   {b:value=>value},{g:()=>false},{b:()=>null},
+   {serialize:()=>{native.serializerCalls++;return native.body+'\n';}},new Map());
+  editor.markdownEditor.serialize=serialize;
+  editor.getText=new Function('M','return {'+characterizedShape.getter+'};')({g:(value,serializer)=>{
+   native.getterCalls++;assert.equal(value,doc);if(native.error)throw native.error;
+   if(Object.hasOwn(native,'output'))return native.output;
+   return serializer(value);
+  }}).getText;
+  host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+characterizedShape.submit)();
+  change({...context,native});
+ },capabilityOnly);
+}
+
+test('complete observed FORMAT shape admits only its native getter/serializer with exact document binding',async()=>{
+ for(const key of ['submit','getter','serializerSource'])
+  assert.equal(crypto.createHash('sha256').update(characterizedShape[key]).digest('hex'),characterizedShape[key==='serializerSource'?'serializerSha256':key+'Sha256']);
+ let native;
+ const witness=await inspectCharacterized(context=>{
+  native=context.native;
+  Object.defineProperty(context.editor.dictation,'document',{get:()=>context.doc});
+ });
+ assert.equal(witness.body,fixture.body);
+ assert.equal(witness.getterSource,characterizedShape.getter);
+ assert.equal(witness.serializerSource,characterizedShape.serializerSource);
+ assert.equal(native.getterCalls,1);assert.equal(native.serializerCalls,1);
+ const support=await inspectCharacterized(context=>{
+  context.doc.textBetween=()=>{throw new Error('capability must not read body');};
+  context.native.error=new Error('capability must not call getter');
+ },true);
+ assert.equal(support.supported,true);
+});
+
+test('characterized submit shape tolerates identifier renaming without accepting a different expression',async()=>{
+ for(const submit of ['v=>submit(editor.getText(),v)','$e=>_send($editor.getText(),$e)'])
+  assert.equal((await inspectCharacterized(({host})=>{
+   host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+submit)();
+  })).body,fixture.body);
+ for(const submit of [
+  'e=>dh(rE.getText().trim(),e)','e=>dh(rE.getText(e),e)','e=>dh(rE.getText(),other)',
+  'e=>dh(rE.getText(),e,extra)','e=>dh(other.getText(),e)||extra()',
+  'e=>{dh(rE.getText(),e);extra()}','e=>e(rE.getText(),e)','e=>dh(e.getText(),e)',
+  'e=>rE(rE.getText(),e)',
+ ]) await assert.rejects(inspectCharacterized(({host})=>{
+  host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+submit)();
+ }),error=>{assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');return true;});
+});
+
+test('uncharacterized getter or serializer stays FORMAT UNSUPPORTED with zero native calls',async()=>{
+ for(const field of ['getter','serializer','getterToString','serializerToString']) {
+  let native,calls=0;
+  await assert.rejects(inspectCharacterized(context=>{
+   native=context.native;
+   const spoof=()=>{calls++;return fixture.body;};
+   if(field.startsWith('getter')) {context.editor.getText=spoof;if(field==='getterToString')spoof.toString=()=>characterizedShape.getter;}
+   else {context.editor.markdownEditor.serialize=spoof;if(field==='serializerToString')spoof.toString=()=>characterizedShape.serializerSource;}
+  }),error=>{assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');return true;});
+  assert.equal(calls,0);assert.equal(native.getterCalls,0);assert.equal(native.serializerCalls,0);
+ }
+});
+
+test('characterized implementations use intrinsic source and never custom toString or opaque method accessors',async()=>{
+ let calls=0;
+ const witness=await inspectCharacterized(({editor})=>{
+  editor.getText.toString=editor.markdownEditor.serialize.toString=()=>{calls++;throw new Error('custom toString');};
+  for(const fn of [editor.getText,editor.markdownEditor.serialize]) Object.defineProperty(fn,Symbol.toPrimitive,{get(){calls++;throw new Error('custom primitive');}});
+ });
+ assert.equal(witness.body,fixture.body);assert.equal(calls,0);
+ for(const field of ['getText','serialize']) {
+  await assert.rejects(inspectCharacterized(({editor})=>{
+   Object.defineProperty(field==='getText'?editor:editor.markdownEditor,field,{get(){calls++;throw new Error('opaque method');}});
+  },true),error=>{assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');return true;});
+  assert.equal(calls,0);
+ }
+});
+
+test('characterized shape rejects foreign/changed docs, account, full request and ambiguous editor binding',async()=>{
+ for(const change of [
+  ({editor})=>Object.defineProperty(editor.dictation,'document',{get:()=>({})}),
+  ({editor})=>editor.view.state.doc={},({editor})=>editor.view.dom={},
+  ({composer})=>composer.pmViewDesc.node={},({editor})=>editor.plainTextMode=true,
+  ({env})=>env.email='other@example.test',({env})=>env.request+=' changed footer',
+  ({host,editor})=>host.__reactFiber$fixture.memoizedState.memoizedState.deps.push({...editor}),
+  ({host,editor})=>host.__reactFiber$fixture.memoizedState.memoizedState.deps.push({...editor,getText:()=>fixture.body}),
+ ]) await assert.rejects(inspectCharacterized(change),/NATIVE_SUBMISSION_UNVERIFIED/);
+ for(const changeDoc of [({editor})=>editor.dictation.document={},({editor})=>editor.view.state.doc={},({composer})=>composer.pmViewDesc.node={}])
+  await assert.rejects(inspectCharacterized(context=>{
+   context.doc.descendants=()=>changeDoc(context);
+  }),/NATIVE_SUBMISSION_UNVERIFIED/);
+ for(const output of ['',42]) await assert.rejects(inspectCharacterized(({native})=>native.output=output),/NATIVE_SUBMISSION_UNVERIFIED/);
+ await assert.rejects(inspectCharacterized(({native})=>native.error=new Error('native getter failure')),/native getter failure/);
+ const witness=await inspectCharacterized(({host,editor})=>{
+  host.__reactFiber$fixture.memoizedState.next={memoizedState:{deps:[editor]}};
+ });
+ assert.equal(witness.body,fixture.body);
+});
+
+test('function source spoofing, proxies and bound functions cannot admit an unknown characterized method',async()=>{
+ for(const field of ['getText','serialize','onSubmit']) for(const kind of ['toPrimitive','accessorToString','proxy','bound']) {
+  let calls=0,native;
+  await assert.rejects(inspectCharacterized(context=>{
+   native=context.native;
+   const holder=field==='getText'?context.editor:field==='serialize'?context.editor.markdownEditor:context.host.__reactFiber$fixture.memoizedProps;
+   const original=holder[field],originalSource=Function.prototype.toString.call(original);
+   let spoof=()=>{calls++;throw new Error('unverified function invoked');};
+   if(kind==='toPrimitive') spoof[Symbol.toPrimitive]=()=>{calls++;return originalSource;};
+   if(kind==='accessorToString') Object.defineProperty(spoof,'toString',{get(){calls++;return ()=>originalSource;}});
+   if(kind==='proxy') spoof=new Proxy(original,{apply(){calls++;return fixture.body;}});
+   if(kind==='bound') spoof=original.bind(context.editor);
+   holder[field]=spoof;
+  },true),error=>{assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');return true;});
+  assert.equal(calls,0);assert.equal(native.getterCalls,0);assert.equal(native.serializerCalls,0);
+ }
+});
+
+test('native witness uses one validated method snapshot and rejects changes before or during the getter',async()=>{
+ for(const stage of ['before','during']) for(const field of ['getText','serialize','dictation','markdownEditor','view','composer']) {
+  let native,calls=0;
+  await assert.rejects(inspectCharacterized(context=>{
+   native=context.native;
+   const change=()=>{
+    const {editor,env}=context;
+    if(field==='getText') editor.getText=()=>{calls++;return fixture.body;};
+    if(field==='serialize') editor.markdownEditor.serialize=()=>{calls++;return fixture.body;};
+    if(field==='dictation') editor.dictation={document:context.doc};
+    if(field==='markdownEditor') editor.markdownEditor={...editor.markdownEditor};
+    if(field==='view') editor.view={...editor.view};
+    if(field==='composer') env.composers.push({});
+   };
+   if(stage==='before') context.doc.textBetween=()=>{change();return fixture.request;};
+   else context.doc.descendants=change;
+  }),/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(calls,0);assert.equal(native.getterCalls,stage==='before'?0:1);
+ }
+});
+
+test('document validation cannot swap an uncharacterized method into capability or body admission',async()=>{
+ for(const capabilityOnly of [true,false]) {
+  let native,calls=0;
+  await assert.rejects(inspectCharacterized(context=>{
+   native=context.native;
+   Object.defineProperty(context.editor.dictation,'document',{get(){
+    context.editor.getText=()=>{calls++;return fixture.body;};
+    return context.doc;
+   }});
+  },capabilityOnly),/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(calls,0);assert.equal(native.getterCalls,0);
+ }
+ for(const field of ['dictation','view','composer']) {
+  let native;
+  await assert.rejects(inspectCharacterized(context=>{
+   native=context.native;
+   context.doc.textBetween=()=>{
+    if(field==='dictation') context.editor.dictation.document={...context.doc};
+    if(field==='view') context.editor.view.state.doc={...context.doc};
+    if(field==='composer') context.composer.pmViewDesc.node={...context.doc};
+    return fixture.request;
+   };
+  }),/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(native.getterCalls,0);
+ }
+});
+
+test('admission refuses truncated editor dependencies, hooks and serializer source',async()=>{
+ for(const mode of ['dependencies','hooks']) {
+  let native;
+  await assert.rejects(inspectCharacterized(context=>{
+   native=context.native;
+   const fiber=context.host.__reactFiber$fixture;
+   if(mode==='dependencies') fiber.memoizedState.memoizedState.deps=[context.editor,...Array(63).fill(null),{...context.editor}];
+   else {
+    let hook=fiber.memoizedState;
+    for(let i=1;i<64;i++) {hook.next={memoizedState:{deps:[]}};hook=hook.next;}
+    hook.next={memoizedState:{deps:[{...context.editor}]}};
+   }
+  },true),/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(native.getterCalls,0);assert.equal(native.serializerCalls,0);
+ }
+ await assert.rejects(inspect(({editor})=>{
+  editor.markdownEditor.serialize=new Function('/*'+'x'.repeat(16*1024)+'*/');
+ },true),/NATIVE_SUBMISSION_UNVERIFIED/);
+});
 
 test('current native submit/getter pair is admitted exactly and mixed aliases fail closed',async()=>{
  const configure=({host,editor})=>{
@@ -221,6 +411,35 @@ test('observed submit alias rejects mixed methods, nonunique editors, wrong docs
   ({env})=>env.email='other@example.test',
  ]) for(const configure of [configureLiveAlias,configureWmAlias])
   await assert.rejects(inspect(context=>{configure(context);change(context);}),/NATIVE_SUBMISSION_UNVERIFIED/);
+});
+
+test('legacy and persisted format validation also ignores coercion and rejects forged method source',async()=>{
+ const inspections=[inspect,change=>inspect(context=>{configureLiveAlias(context);change(context);}),inspectPersisted];
+ for(const run of inspections) {
+  let calls=0;
+  const witness=await run(({editor})=>{
+   for(const key of ['getText','hasMarkdownFormatting','getPersistedText']) if(typeof editor[key]==='function')
+    editor[key].toString=()=>{calls++;throw new Error('custom method coercion');};
+   editor.markdownEditor.serialize.toString=()=>{calls++;throw new Error('custom serializer coercion');};
+  });
+  assert.equal(witness.body,fixture.body);assert.equal(calls,0);
+  await assert.rejects(run(({editor})=>{
+   const source=Function.prototype.toString.call(editor.getText);
+   const spoof=()=>{calls++;return fixture.body;};
+   spoof.toString=()=>source;spoof[Symbol.toPrimitive]=()=>source;
+   editor.getText=spoof;
+  }),/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(calls,0);
+ }
+ for(const key of ['hasMarkdownFormatting','getPersistedText']) {
+  let calls=0;
+  await assert.rejects(inspectPersisted(({editor})=>{
+   const source=Function.prototype.toString.call(editor[key]);
+   const spoof=()=>{calls++;return fixture.body;};spoof.toString=()=>source;
+   editor[key]=spoof;
+  }),/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(calls,0);
+ }
 });
 
 test('unknown UI format reports an explicit bounded adapter diagnostic before Send',async()=>{

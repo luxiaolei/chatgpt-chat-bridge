@@ -1,0 +1,17 @@
+{
+  "observedAt": "2026-10-07T12:43:34.919Z",
+  "evidenceBytes": 4861,
+  "evidenceSha256": "921daaa043d84dd7cd00efc6a389df6ef7e87c3ebadad06f3e326de7619a021a",
+  "submit": "e=>dh(rE.getText(),e)",
+  "getter": "getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,M.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}",
+  "serializerSource": "(n,a)=>{var r;let i,l=((r=new C.m((0,s.b)(n)).removeMark(0,n.content.size,n.type.schema.marks.literalPaste).doc).descendants((e,t,n,a)=>{if(!e.isText||null==n)return;let l=e.marks.find(T.g);if(null==l)return;let s=0===a?void 0:n.child(a-1).marks.find(T.g);if(null!=s&&l.eq(s))return;let c=e.text??\"\",d=t+e.nodeSize;for(let e=a+1;e<n.childCount;e++){let t=n.child(e),a=t.marks.find(T.g);if(!t.isText||null==a||!l.eq(a))break;c+=t.text??\"\",d+=t.nodeSize}let u=(0,o.b)(c);(d!==t+e.nodeSize||null==u)&&(null==i&&(i=new C.m(r)),null==u?i.removeMark(t,d,l):i.addMark(t,d,l.type.create({...l.attrs,href:u})))}),i?.doc??r);return!a?.preserveParagraphSpacing&&l.childCount>0&&l.content.content.every(e=>\"paragraph\"===e.type.name)?Array.from({length:l.childCount},(n,a)=>{let r=l.child(a),o=t.get(r);return null==o&&(o=e.serialize(r).replace(/\\n$/,\"\"),t.set(r,o)),o}).join(\"\\n\"):e.serialize(l).replace(/\\n$/,\"\")}",
+  "submitSha256": "59db9c8194ccc8081aa2f8d4e3c407666db5632f52668401bf9cdd229d73bbaf",
+  "getterSha256": "ce893debd58fa25e54f219f9114c4c43fa80cf58cdf016ab798329bf0e681ca5",
+  "serializerSha256": "3aba1deaa60d9e30e99bc203dc9a2d08df4aa68b30ccbd4b579131b9e11637f6",
+  "provenance": "Original WM job normal once on the loaded PR157 release; complete nontruncated capability-only FORMAT failure. No body, handler or serializer invocation in diagnostic capture. Bodies and dependencies in tests are synthetic.",
+  "documentObservation": {
+    "viewDoc": true,
+    "dictationDoc": false,
+    "note": "Descriptor-only sampling does not invoke accessors; false does not establish a different actual dictation document. Runtime still requires exact doc identity before and after the native getter."
+  }
+}

@@ -2098,6 +2098,7 @@ async function nativeSubmissionWitness(page, request, expectedIdentity, capabili
 
 // Volatile UI formats live in one closed browser probe; no generic alias matching.
 async function nativeSubmissionProbe({selector,request,expectedIdentity,capabilityOnly=false,discardBackup=null}) {
+    const apply=Reflect.apply,toSource=Function.prototype.toString;
     const fail=()=>{throw new Error('NATIVE_SUBMISSION_UNVERIFIED');};
     const property=(object,key)=>{
       for(let value=object,depth=0;value&&depth<8;value=Object.getPrototypeOf(value),depth++) {
@@ -2110,7 +2111,7 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     const value=(object,key)=>property(object,key).value;
     const encoder=new TextEncoder(),bytes=text=>encoder.encode(text).byteLength;
     const describe=(object,key)=>{
-      const field=property(object,key),source=typeof field.value==='function'?Function.prototype.toString.call(field.value):null;
+      const field=property(object,key),source=typeof field.value==='function'?apply(toSource,field.value,[]):null;
       const sourceTruncated=source!==null && (source.length>16*1024 || bytes(source)>16*1024);
       return {kind:field.kind,type:field.kind==='data'?typeof field.value:null,source:sourceTruncated?null:source,
         ...(sourceTruncated?{sourceTruncated:true,sourceCodeUnits:source.length}:{})};
@@ -2132,33 +2133,61 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
       if(fiber) composerAncestor=i;
     }
     const firstFiber=fiber;
-    const candidates=new Set();
-    let formatRecognized=false;
+    const candidates=new Map(),composerEditors=new Set();
+    let formatRecognized=false,admissionTruncated=false;
     // Pin the characterized native submit format; an unsupported format fails before Send.
     const formats=[
       {submit:"e=>{eg(j.getText(),e)}",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,T.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}"},
       {submit:"e=>up(rT.getText(),e)",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,M.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}"},
       {submit:"e=>{ev(H.getText(),e)}",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;if(null==this.markdownEditor||!this.hasMarkdownFormatting({document:e}))return(0,x.f)(e).content;let t=this.getPersistedText(e);return\"\"===t.replace(/&#(?:x[\\da-f]+|\\d+);/gi,\"\").trim()?(0,x.f)(e).content:e.lastChild?.textContent.endsWith(\" \")?t.replace(/&#x20;$/,\" \"):t}",hasMarkdownFormatting:"hasMarkdownFormatting(){let{document:e=this.dictation.document,includeLinks:t=!0}=arguments.length>0&&void 0!==arguments[0]?arguments[0]:{};if(null==this.markdownEditor||this.plainTextMode)return!1;let n=(0,x.d)(e,{includeLinks:t});return n||e.descendants(e=>!(n=n||null!=(0,x.b)(e)&&(t||\"richLink\"!==e.type.name)||t&&e.isTextblock&&(0,E.c)(e.textBetween(0,e.content.size,\"\\n\",\"\\n\")))),n}",getPersistedText:"getPersistedText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return null==this.markdownEditor||this.plainTextMode?(0,x.f)(e,{preserveTextLinkMarks:!0}).content:this.markdownEditor.serialize(e)}",persistedText:true},
     ];
+    // One closed expression grammar, with distinct renamed identifiers, and only this complete pair.
+    // Full intrinsic sources come from the retained normal FORMAT failure; no normalization or wildcard body.
+    const characterizedShape={getter:formats[1].getter,serializer:"(n,a)=>{var r;let i,l=((r=new C.m((0,s.b)(n)).removeMark(0,n.content.size,n.type.schema.marks.literalPaste).doc).descendants((e,t,n,a)=>{if(!e.isText||null==n)return;let l=e.marks.find(T.g);if(null==l)return;let s=0===a?void 0:n.child(a-1).marks.find(T.g);if(null!=s&&l.eq(s))return;let c=e.text??\"\",d=t+e.nodeSize;for(let e=a+1;e<n.childCount;e++){let t=n.child(e),a=t.marks.find(T.g);if(!t.isText||null==a||!l.eq(a))break;c+=t.text??\"\",d+=t.nodeSize}let u=(0,o.b)(c);(d!==t+e.nodeSize||null==u)&&(null==i&&(i=new C.m(r)),null==u?i.removeMark(t,d,l):i.addMark(t,d,l.type.create({...l.attrs,href:u})))}),i?.doc??r);return!a?.preserveParagraphSpacing&&l.childCount>0&&l.content.content.every(e=>\"paragraph\"===e.type.name)?Array.from({length:l.childCount},(n,a)=>{let r=l.child(a),o=t.get(r);return null==o&&(o=e.serialize(r).replace(/\\n$/,\"\"),t.set(r,o)),o}).join(\"\\n\"):e.serialize(l).replace(/\\n$/,\"\")}"};
+    const submitShape=/^([A-Za-z_$][\w$]*)=>([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\.getText\(\),\1\)$/;
     for(let i=0;fiber&&i<16;i++,fiber=value(fiber,'return')) {
       const submit=describe(value(fiber,'memoizedProps'),'onSubmit').source;
+      const identifiers=submit?.match(submitShape);
       const format=formats.find(value=>submit===value.submit ||
         (value.submit==='e=>up(rT.getText(),e)' && ['e=>uh(rE.getText(),e)','e=>up(rS.getText(),e)'].includes(submit)) ||
-        (value.persistedText && submit==='e=>{ev(F.getText(),e)}'));
+        (value.persistedText && submit==='e=>{ev(F.getText(),e)}')) ||
+        (identifiers && new Set(identifiers.slice(1)).size===3?characterizedShape:null);
       if(!format) continue;
-      formatRecognized=true;
-      for(let hook=fiber.memoizedState,n=0;hook&&n<64;n++,hook=hook.next) {
-        const deps=hook.memoizedState?.deps;
+      if(!format.serializer) formatRecognized=true;
+      let hook=value(fiber,'memoizedState');
+      for(let n=0;hook&&n<64;n++,hook=value(hook,'next')) {
+        const deps=value(value(hook,'memoizedState'),'deps');
         if(!Array.isArray(deps)) continue;
-        for(const editor of deps) if(editor?.view?.dom===composer &&
-          editor.view.state?.doc===doc && editor.dictation?.document===doc &&
-          typeof editor.getText==='function' && String(editor.getText)===format.getter &&
-          editor.plainTextMode===false && typeof editor.markdownEditor?.serialize==='function' &&
-          (!format.persistedText || (typeof editor.hasMarkdownFormatting==='function' &&
-            String(editor.hasMarkdownFormatting)===format.hasMarkdownFormatting &&
-            typeof editor.getPersistedText==='function' &&
-            String(editor.getPersistedText)===format.getPersistedText))) candidates.add(editor);
+        if(deps.length>64) {admissionTruncated=true;break;}
+        for(let index=0;index<deps.length;index++) {
+          const editor=value(deps,String(index)),view=value(editor,'view');
+          if(value(view,'dom')!==composer) continue;
+          composerEditors.add(editor);
+          if(composerEditors.size>128) {admissionTruncated=true;break;}
+          const dictation=value(editor,'dictation'),markdownEditor=value(editor,'markdownEditor');
+          const getText=value(editor,'getText'),serialize=value(markdownEditor,'serialize');
+          const getterSource=describe(editor,'getText').source,serializerSource=describe(markdownEditor,'serialize').source;
+          if(getterSource!==format.getter || typeof getText!=='function' || typeof serialize!=='function' || serializerSource===null ||
+            (format.serializer && serializerSource!==format.serializer)) continue;
+          const methods=[['getText',getText]];
+          if(format.persistedText) {
+            const keys=['hasMarkdownFormatting','getPersistedText'];
+            if(keys.some(key=>describe(editor,key).source!==format[key])) continue;
+            for(const key of keys) methods.push([key,value(editor,key)]);
+          }
+          if(format.serializer) formatRecognized=true;
+          // document is a characterized accessor; descriptor-only diagnostics intentionally do not call it.
+          if(dictation?.document!==doc || value(value(view,'state'),'doc')!==doc ||
+            value(editor,'plainTextMode')!==false) continue;
+          candidates.set(editor,{editor,view,dictation,markdownEditor,getText,serialize,getterSource,serializerSource,methods});
+        }
+        if(admissionTruncated) break;
       }
+      if(hook) {admissionTruncated=true;break;}
+    }
+    if(admissionTruncated) {
+      if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
+      return fail();
     }
     if(!formatRecognized) {
       if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
@@ -2202,12 +2231,26 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
       }
       return {unsupportedFormat:evidence};
     }
-    if(candidates.size!==1 || typeof doc.textBetween!=='function') {
+    if(composerEditors.size!==1 || candidates.size!==1 || typeof doc.textBetween!=='function') {
+      if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
+      return fail();
+    }
+    const {editor,view,dictation,markdownEditor,getText,serialize,getterSource,serializerSource,methods}=[...candidates.values()][0];
+    const sameBinding=()=>{
+      if(dictation.document!==doc) return false;
+      const current=[...document.querySelectorAll(selector)];
+      return current.length===1 && current[0]===composer && value(editor,'view')===view && value(view,'dom')===composer &&
+        value(value(view,'state'),'doc')===doc && value(value(composer,'pmViewDesc'),'node')===doc &&
+        value(editor,'dictation')===dictation && value(editor,'plainTextMode')===false &&
+        value(editor,'markdownEditor')===markdownEditor && value(markdownEditor,'serialize')===serialize &&
+        methods.every(([key,method])=>value(editor,key)===method);
+    };
+    if(!sameBinding()) {
       if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
       return fail();
     }
     if(discardBackup) {
-      const editor=[...candidates][0],view=editor.view,editorState=view.state,transaction=editorState.tr;
+      const editorState=view.state,transaction=editorState.tr;
       if(!discardBackup.document || typeof doc.toJSON!=='function' || view.composing!==false || view.isDestroyed===true ||
         typeof view.dispatch!=='function' || typeof transaction?.delete!=='function') throw new Error('DRAFT_DISCARD_UNSUPPORTED');
       transaction.delete(0,doc.content.size);
@@ -2235,16 +2278,13 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
         editor.dictation.document!==cleared || cleared.textBetween(0,cleared.content.size,'\n')!=='') throw new Error('DRAFT_DISCARD_UNCONFIRMED');
       return {discarded:true};
     }
-    if(capabilityOnly===true) {
-      const editor=[...candidates][0];
-      return {supported:true,getterSource:String(editor.getText),serializerSource:String(editor.markdownEditor.serialize)};
-    }
-    if(doc.textBetween(0,doc.content.size,'\n').replace(/\s+/g,' ').trim()!==request.replace(/\s+/g,' ').trim()) return fail();
-    const editor=[...candidates][0], body=editor.getText();
-    if(typeof body!=='string' || !body || editor.view.state.doc!==doc ||
-      editor.dictation.document!==doc || composer.pmViewDesc.node!==doc) return fail();
+    if(capabilityOnly===true) return {supported:true,getterSource,serializerSource};
+    if(doc.textBetween(0,doc.content.size,'\n').replace(/\s+/g,' ').trim()!==request.replace(/\s+/g,' ').trim() ||
+      !sameBinding()) return fail();
+    const body=apply(getText,editor,[]);
+    if(typeof body!=='string' || !body || !sameBinding()) return fail();
     return {format:'chatgpt-native-getText-v1',body,url:location.href,accountIdentity:expectedIdentity,
-      getterSource:String(editor.getText),serializerSource:String(editor.markdownEditor.serialize),observedAt:new Date().toISOString()};
+      getterSource,serializerSource,observedAt:new Date().toISOString()};
 }
 
 async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
