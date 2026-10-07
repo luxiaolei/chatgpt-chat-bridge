@@ -3163,7 +3163,8 @@ def observation_context(db, operation_id, candidate=None, pending_session=None):
                  or chat.get("id") != session):
         raise ValueError("OBSERVATION_REGISTRY_IDENTITY_MISMATCH")
     # Read-only observations depend on their route, not unrelated registry maintenance.
-    anchor = recovery_digest({"operation":dict(row), "chat":chat,
+    url = "https://chatgpt.com/g/" + project_id + "/c/" + session
+    anchor = recovery_digest({"operation":dict(row), "sessionRef":session, "url":url, "chat":chat,
                               "caller":(reg.get("chats") or {}).get(row["caller_ref"]),
                               "account":reg["accounts"][row["account_alias"]], "binding":binding,
                               "project":{k:v for k,v in reg["projects"][row["project"]].items() if k != "bindings"},
@@ -3173,7 +3174,7 @@ def observation_context(db, operation_id, candidate=None, pending_session=None):
     return {"operationId":row["id"], "kind":row["kind"], "taskId":row["task_id"],
             "project":row["project"], "account":row["account_alias"], "accountId":row["account_id"],
             "sessionRef":session, "projectId":project_id, "binding":binding, "accountIdentity":identity,
-            "url":"https://chatgpt.com/g/" + project_id + "/c/" + session, "anchor":anchor}
+            "url":url, "anchor":anchor}
 
 
 

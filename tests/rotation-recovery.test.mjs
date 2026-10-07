@@ -158,6 +158,12 @@ with tempfile.TemporaryDirectory() as root:
         except ValueError as e:assert "CAS_CHANGED" in str(e),str(e)
         assert c.registry(db)["chats"]["other"]["lastUsedAt"].startswith("concurrent-maintenance-")
         assert dict(db.execute("SELECT * FROM operations WHERE id=?",(op,)).fetchone())==original
+    elif case=="candidate-anchor":
+        first=c.observation_context(db,op,candidate)
+        second=c.observation_context(db,op,"dddddddd-dddd-dddd-dddd-dddddddddddd")
+        assert first["sessionRef"]!=second["sessionRef"] and first["url"]!=second["url"]
+        assert first["anchor"]!=second["anchor"],"selected candidate CID/URL missing from observation anchor"
+        assert "\n".join(db.iterdump())==before
     elif case=="missing-task-observe":
         db.execute("UPDATE operations SET kind='dispatch',session_ref=? WHERE id=?",(sid,op));db.commit()
         before="\n".join(db.iterdump())
@@ -227,7 +233,7 @@ with tempfile.TemporaryDirectory() as root:
 `;
 
 for(const name of ["success","draft","wrong-login","wrong-project","wrong-cid","wrong-uid","temporary","wrong-body","missing","duplicate","stale-observation","wrong-handoff","wrong-witness","wrong-epoch","occupied","pending","observation-race","stale-preview","cas-race","missing-task-observe","prior-cid","prior-user","wrong-predecessor-project","source-cid-conflict","historical-first-conflict","candidate-op-race","candidate-logical-race","offline","network-error","discarded","recovery-ui","pacing","identity-error","transport","timeout",
-  "scope-unrelated-chat","scope-unrelated-project","scope-unrelated-account","scope-unrelated-overflow","scope-catalog","scope-operation-hidden","scope-chat-attachment","scope-chat-model","scope-chat-status","scope-binding","scope-project","scope-account","scope-space-profileId","scope-space-name","scope-space-spaceId","scope-space-ownership","scope-space-accountName","scope-overflow","scope-previous-overflow","registry-observation-race","registry-cas-race","registry-stale-preview"]) {
+  "scope-unrelated-chat","scope-unrelated-project","scope-unrelated-account","scope-unrelated-overflow","scope-catalog","scope-operation-hidden","scope-chat-attachment","scope-chat-model","scope-chat-status","scope-binding","scope-project","scope-account","scope-space-profileId","scope-space-name","scope-space-spaceId","scope-space-ownership","scope-space-accountName","scope-overflow","scope-previous-overflow","registry-observation-race","registry-cas-race","registry-stale-preview","candidate-anchor"]) {
   test("existing rotation / operation observation: "+name,()=>{
     const env={...process.env,PYTHONDONTWRITEBYTECODE:"1"};
     delete env.CHAT_BRIDGE_FROM_ACCOUNT_ID;delete env.CHAT_BRIDGE_FROM_SPACE;delete env.CODEX_THREAD_ID;
