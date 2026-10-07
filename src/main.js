@@ -632,7 +632,7 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     if(!fresh || fresh.openedBy!=="agent" || !sameConversationUrl(fresh.url,candidate.url,targetProject)) continue;
     const context=coordinated("page-reclaim-context",reclaimContext);
     if(context.sessionRefs.includes(candidate.id) || context.unboundAny || context.unboundProjectIds.includes(targetProject)) continue;
-    await assertInputSafe(page,reg.accounts[account].identity,candidate.url,{discardDraft:discard,reclaim:true});
+    await assertInputSafe(page,reg.accounts[account].identity,candidate.url,{discardDraft:!!discard,reclaim:true});
     const current=(await task.tabs()).find(t=>t.label===candidate.page);
     const closing=await state(page,false,null,true).catch(()=>null);
     if(!current || current.openedBy!=="agent" || !sameConversationUrl(current.url,candidate.url,targetProject) ||

@@ -5029,7 +5029,8 @@ def main():
                 linked = [task for task in (rt.get("tasks") or {}).values() if task.get("sessionId") == session_ref or
                           (not task.get("sessionId") and task.get("project") == project and task.get("role") == chat.get("role") and
                            (not task.get("account") or (reg.get("accounts", {}).get(task["account"]) or {}).get("identity") == identity))]
-                if (management_mode(db, project, task_workgroup(chat))["mode"] in {"PAUSED", "DRAINING"} or
+                if (candidate is not None and candidate["id"] == session_ref and not any(task.get("sessionId") == session_ref for task in linked) or
+                        management_mode(db, project, task_workgroup(chat))["mode"] in {"PAUSED", "DRAINING"} or
                         rt.get("projects", {}).get(project, {}).get("watchdogPausedForUserControl") or
                         rt.get("sessions", {}).get(session_ref, {}).get("watchdogPausedForUserControl") or
                         any(task.get("project") != project or task.get("account") != chat.get("account") or

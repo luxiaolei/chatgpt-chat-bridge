@@ -74,18 +74,19 @@ async function run(f,fn) {
       'const sampleState=state;state=async(...args)=>{const snapshot=await sampleState(...args);if(snapshot.url===url)Object.assign(snapshot,{lastUserId:"22222222-2222-4222-8222-222222222222",userMessageIds:["22222222-2222-4222-8222-222222222222"],lastUserSourceCondition:"BOUND_SOURCE",lastUserSource:{messageId:"22222222-2222-4222-8222-222222222222",conversationId:chat.id,text:"Previous synthetic request"}});return snapshot;};',
       'assertImagePageFree=async()=>{};detectWebRateLimit=async()=>{};recordDeliveryStage=async()=>{};',
       'if(f.change.afterIntent)recordDeliveryStage=async phase=>{if(phase==="DRAFT_DISCARD_INTENT")f.change.afterIntent(f);};',
-      "coordinated=()=>{if(f.change.paused)throw Error('DRAFT_DISCARD_ADMISSION_DENIED');return {ok:true};};",
+      "coordinated=command=>{if(f.change.paused)throw Error('DRAFT_DISCARD_ADMISSION_DENIED');return command==='page-reclaim-context'?{sessionRefs:[],unboundProjectIds:[],unboundAny:false}:{ok:true};};",
       "saveDraftBackup=async backup=>{f.backup=backup;return {sha256:'synthetic',bytes:1};};",
       "applyModelSpec=async()=>{f.calls.push('model');return {model:'Latest',effort:'High'};};",
       "setEffort=async()=>{f.calls.push('effort');return true;};saveRegistry=async()=>{};touchRuntime=async()=>{};print=()=>{};",
       'openBoundTask=async()=>({task:{spaceId:2},binding:f.reg.projects.P.bindings.a});',
+      'if(f.change.reclaim){loadRuntime=async()=>({tasks:{t:{taskId:"t",sessionId:chat.id,project:"P",account:"a",status:"CANCELLED"}}});imageSessionOccupancy=()=>({occupied:false});}',
       'newManagedPage=async()=>page;openProjectPage=async()=>{f.currentUrl=home;};',
       "waitForDelivery=async()=>({url:f.currentUrl,lastUser:message,lastUserId:'33333333-3333-4333-8333-333333333333',lastUserSource:{text:message,messageId:'33333333-3333-4333-8333-333333333333',conversationId:chat.id},lastUserSourceCondition:'BOUND_SOURCE',observedAt:new Date().toISOString(),messageCount:1,composerText:''});",
       'return {state,prepare:()=>assertInputSafe(page,"verified-user",url,{discardDraft:true}),send:()=>sendMessage(page,message,url),dispatch:()=>applyDispatchModel(page,chat,"Latest","High"),',
       "model:async()=>{const positionals=()=>['Latest'],opt=()=>null;"+modelBody+'},',
       "effort:async()=>{const positionals=()=>['High'];"+effortBody+'},',
       "new:async()=>{const project='P',accountArg='a';"+newBody+'},',
-      'loader:()=>recoverConversationLoadError(page)};'
+      'reclaim:()=>reclaimIdlePageSlot(reg,"P","a",{spaceId:2,page:()=>page,tabs:async()=>[{label:page.label,url:f.currentUrl,active:true,openedBy:"agent"}]},reg.projects.P.bindings.a),loader:()=>recoverConversationLoadError(page)};'
     ].join('\n');
     const api=await new AsyncFunction('f','message','url','home',prefix+setup)(f,message,url,home);
     return await fn(api);
@@ -115,6 +116,16 @@ test('authorized Project draft discard backs up raw text and enters the normal s
       assert.equal(f.calls.filter(x=>x==='discard').length,1,entry);assert.equal(f.calls.filter(x=>x==='fill').length,entry==='dispatch'?0:1,entry);
     }
   }
+});
+test('selected terminal reclaim reaches the actual input guard and native draft discard',async()=>{
+  const raw='保留第一段\n第二段 🧪',f=fixture({raw,discard:true,reclaim:true});
+  Object.assign(f.chat,{status:'active',spaceId:2,spaceName:'managed',profileId:'P1',page:f.page.label});
+  Object.assign(f.reg.projects.P.bindings.a,{spaceId:2,spaceName:'managed',profileId:'P1'});
+  await run(f,api=>api.reclaim());
+  assert.equal(f.backup?.rawText,raw);assert.equal(f.backup?.document?.type,'doc');
+  assert.equal(f.calls.filter(x=>x==='discard').length,1);assert.ok(f.calls.filter(x=>x==='auth').length>=4);
+  assert.equal(f.closed,1);assert.equal(f.chat.page,null);assert.equal(f.chat.attachmentEpoch,1);
+  assert.deepEqual(f.calls.filter(x=>/^(fill|key:|insert|send|model|effort)/.test(x)),[]);
 });
 test('authorized discard still preserves a changed draft, paused owner and partial Bridge input',async()=>{
   for(const change of [{draftDuringLogin:true},{paused:true},{resumedUserControl:true},{fillFails:true,partialFill:true}]) {

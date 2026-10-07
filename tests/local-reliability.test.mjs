@@ -42,7 +42,7 @@ async function harness(f={}) {
       listTaskSpaces=async()=>[{id:7,name:"managed",profileId:"P1",ownership:"agent"}];
       imageSessionOccupancy=()=>({occupied:false});
       coordinated=command=>{if(command!=="page-reclaim-context")throw Error(command);return {sessionRefs:[],unboundProjectIds:[],unboundAny:false};};
-      openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,page:()=>({url:async()=>f.chat.url,close:async()=>f.calls.push("close")}),tabs:async()=>[{label:"p1",url:f.chat.url,active:false,openedBy:"agent"}]}});
+      openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,page:()=>({url:async()=>f.chat.url,evaluate:async()=>"login-a",close:async()=>f.calls.push("close")}),tabs:async()=>[{label:"p1",url:f.chat.url,active:false,openedBy:"agent"}]}});
     }
     return {classifySnapshot,gradedRecover,ensurePage,state,nativeRetry,watchOnce,detachTerminalTaskPages};
   `)(f);
@@ -190,8 +190,8 @@ test("terminal detach keeps an approval page attached and resumes normal cleanup
   const chat={id:cid,project:"P",account:"a",status:"active",spaceName:"managed",spaceId:7,profileId:"P1",page:"p1",url:home.replace(/project$/,"c/"+cid)};
   const binding={spaceName:"managed",spaceId:7,profileId:"P1",projectUrl:home};
   const f={detach:true,chat,binding,runtime:{tasks:{T:{taskId:"T",project:"P",account:"a",sessionId:cid,status:"RESULT_RECORDED",updatedAt:"2020-01-01T00:00:00Z"}},sessions:{},projects:{}},
-    raw:{approvalRequired:true,generating:false,composerText:"",composerCount:1,composerAttachmentsEmpty:true,composerRawText:""}};
-  const api=await harness(f), reg={accounts:{a:{identity:"login-a"}},projects:{P:{bindings:{a:binding}}},chats:{[cid]:chat}};
+    raw:{url:chat.url,inputReady:true,approvalRequired:true,generating:false,composerText:"",composerCount:1,composerAttachmentsEmpty:true,composerRawText:""}};
+  const reg=f.reg={accounts:{a:{identity:"login-a"}},projects:{P:{bindings:{a:binding}}},chats:{[cid]:chat}},api=await harness(f);
   assert.deepEqual(await api.detachTerminalTaskPages(reg),[]);
   assert.equal(chat.page,"p1");
   assert.equal(f.calls.includes("close"),false);

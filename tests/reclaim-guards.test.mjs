@@ -32,7 +32,7 @@ async function fixture(orphan=false,change=()=>{}) {
   const api=await new AsyncFunction("loadRuntime","state","saveRegistry","imageSessionOccupancy","pageDetachCandidates","orphanManagedPageCandidates","activeTaskStatus","composerIsEmpty","sameConversationUrl","projectHomeId","coordinated",
     "activeAccount","openBoundTask","projectRecord","bindingObserved","accountManagedTask","openProjectPage","bindingExecutionReadiness","pageBudgetError","clearCapacityWait","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError",
     "listTaskSpaces","process","assertInputSafe",code+";return {reclaimIdlePageSlot,reclaimOrphanManagedPage,newManagedPage,pruneProjectSpace,ensureProjectLocation,detachTerminalTaskPages};")(
-    async()=>rt,async()=>{f.states++;const sample=f.states>1&&f.closingSnapshot?f.closingSnapshot:f.snapshot;return sample?{...sample,url:f.pageUrl??sample.url}:sample;},async()=>{},()=>({occupied:!!f.image}),
+    async()=>rt,async()=>{f.states++;const sample=f.states>1&&f.closingSnapshot?f.closingSnapshot:f.snapshot;if(f.afterState)await f.afterState();return sample?{...sample,url:f.pageUrl??sample.url}:sample;},async()=>{},()=>({occupied:!!f.image}),
     globalThis.__CHAT_BRIDGE_PAGE_POOL__.pageDetachCandidates,globalThis.__CHAT_BRIDGE_PAGE_POOL__.orphanManagedPageCandidates,
     globalThis.__CHAT_BRIDGE_TASK_POLICY__.activeTaskStatus,globalThis.__CHAT_BRIDGE_TASK_POLICY__.composerIsEmpty,
     globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,
@@ -47,7 +47,7 @@ async function fixture(orphan=false,change=()=>{}) {
     error=>error.message==="page budget reached",async()=>{},async()=>({firstAt:Date.now()}),120,
     async()=>{throw Error("unexpected overflow");},()=>Object.assign(Error("capacity waiting"),{code:"CAPACITY_WAIT"}),
     async()=>f.available||[{id:9,name:f.terminalOverflow?"overflow":"managed",profileId:"P1",ownership:"agent",createdBy:"agent"}],{env:{}},
-    async(_page,_identity,_url,options)=>{f.inputChecks=(f.inputChecks||0)+1;if(f.inputError)throw Error(f.inputError);if(options.discardDraft){f.discards=(f.discards||0)+1;if(f.discardError)throw Error("discard unconfirmed");f.snapshot.composerRawText="";}}
+    async(_page,_identity,_url,options)=>{f.inputChecks=(f.inputChecks||0)+1;if(f.inputError)throw Error(f.inputError);if(options.discardDraft===true){f.discards=(f.discards||0)+1;if(f.discardError)throw Error("discard unconfirmed");f.snapshot.composerRawText="";}}
   );
   f.result=f.entry==="allocate"?await api.newManagedPage(reg,"P","a",task,binding):f.entry==="terminal"?await api.detachTerminalTaskPages(reg,"P","a"):f.entry==="prune"?await api.pruneProjectSpace(reg,"P","a"):f.entry==="ensure"?await api.ensureProjectLocation(reg,"P","a",{create:true,confirm:true}):
     orphan?await api.reclaimOrphanManagedPage(reg,task,binding,"a"):await api.reclaimIdlePageSlot(reg,"P","a",task,binding);
@@ -286,7 +286,8 @@ test("selected terminal reclaim reads real management and user-control pauses ev
     ["other Project pause","project:other","PAUSED",null,1],
     ["other workgroup pause","workgroup:P:other","PAUSED",null,1],
     ["RUNNING","project:P","RUNNING",null,1],
-    ...["RUNNING","watchdogPendingNotification","externalResponsePending","watchdogPausedForUserControl","projectPause","sessionPause","project","account","registry:page","registry:url","registry:account","registry:profileId","registry:attachmentEpoch","registry:generation"].map(field=>["changed during final native tabs: "+field,null,null,"race:"+field,0])
+    ...["RUNNING","watchdogPendingNotification","externalResponsePending","watchdogPausedForUserControl","projectPause","sessionPause","project","account","registry:page","registry:url","registry:account","registry:profileId","registry:attachmentEpoch","registry:generation"].map(field=>["changed during final native tabs: "+field,null,null,"race:"+field,0]),
+    ...["deleted task","role fallback"].map(field=>["changed during final UI sample: "+field,null,null,"final:"+field,0])
   ]) {
     const root=await mkdtemp(path.join(tmpdir(),"bridge-selected-terminal-")),config=path.join(root,"config"),stateDir=path.join(root,"state");
     try {
@@ -302,9 +303,12 @@ test("selected terminal reclaim reads real management and user-control pauses ev
         if(scope){
           const sql=spawnSync("python3",["-c","import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);d.execute('INSERT INTO control_state(scope,mode,epoch,reason,updated_at) VALUES(?,?,1,?,?)',(sys.argv[2],sys.argv[3],'test pause','now'));d.commit()",path.join(stateDir,"bridge.sqlite3"),scope,mode],{encoding:"utf8",env});assert.equal(sql.status,0,sql.stderr);
         }
-        if(userPause?.startsWith("race:"))f.beforeFreshTabs=()=>{
-          f.beforeFreshTabs=null;
-          const changed=JSON.parse(JSON.stringify(f.rt)),field=userPause.slice(5);
+        if(userPause?.startsWith("race:")||userPause?.startsWith("final:")){
+          const hook=userPause.startsWith("final:")?"afterState":"beforeFreshTabs";
+          f[hook]=()=>{
+          if(hook==="afterState"&&f.states<2)return;
+          f[hook]=null;
+          const changed=JSON.parse(JSON.stringify(f.rt)),field=userPause.slice(userPause.indexOf(":")+1);
           if(field==="projectPause"){
             const sql=spawnSync("python3",["-c","import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);d.execute('INSERT INTO control_state(scope,mode,epoch,reason,updated_at) VALUES(?,?,1,?,?)',('project:P','PAUSED','race','now'));d.commit()",path.join(stateDir,"bridge.sqlite3")],{encoding:"utf8",env});assert.equal(sql.status,0,sql.stderr);return;
           }
@@ -312,10 +316,13 @@ test("selected terminal reclaim reads real management and user-control pauses ev
             const next=JSON.parse(JSON.stringify(f.reg)),key=field.slice(9),value={page:"p10",url:url.replace(cid,"22222222-2222-4222-8222-222222222222"),account:"other",profileId:"P2",attachmentEpoch:2,generation:2}[key];next.chats[cid][key]=value;
             const sql=spawnSync("python3",["-c","import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);d.execute(\"UPDATE documents SET payload=? WHERE kind='registry'\",(sys.argv[2],));d.commit()",path.join(stateDir,"bridge.sqlite3"),JSON.stringify(next)],{encoding:"utf8",env});assert.equal(sql.status,0,sql.stderr);return;
           }
-          if(field==="sessionPause")changed.sessions={[cid]:{watchdogPausedForUserControl:true}};
+          if(field==="deleted task")changed.tasks={};
+          else if(field==="role fallback")changed.tasks={fallback:{...changed.tasks.t,taskId:"fallback",sessionId:null,role:"worker"}};
+          else if(field==="sessionPause")changed.sessions={[cid]:{watchdogPausedForUserControl:true}};
           else if(field==="RUNNING")changed.tasks.t.status="RUNNING";else changed.tasks.t[field]=field==="project"||field==="account"?"other":true;
           const sql=spawnSync("python3",["-c","import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);d.execute(\"UPDATE documents SET payload=? WHERE kind='runtime'\",(sys.argv[2],));d.commit()",path.join(stateDir,"bridge.sqlite3"),JSON.stringify(changed)],{encoding:"utf8",env});assert.equal(sql.status,0,sql.stderr);
-        };
+          };
+        }
         f.readContext=payload=>{
           const before=readFileSync(path.join(stateDir,"bridge.sqlite3")),r=call("page-reclaim-context",payload);
           assert.equal(r.status,0,r.stderr);assert.deepEqual(readFileSync(path.join(stateDir,"bridge.sqlite3")),before,"read-only context changed SQLite");
