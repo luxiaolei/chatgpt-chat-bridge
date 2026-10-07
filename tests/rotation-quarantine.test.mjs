@@ -143,7 +143,44 @@ with tempfile.TemporaryDirectory(prefix="bridge-quarantine-") as root:
      assert c.registry(db)["chats"][candidate]["status"]=="pending-rotation"
      fenced(put(late,base=reg));c.finish(db,row,"SENT",session_ref=candidate)
      ack={"rotationId":fresh["rotationId"],"callerRef":candidate,"message":"skills/tools/host/model verified"}
-     if case=="ack-wrong-caller":
+     if case=="pending-observation":
+      attached=c.registry(db);attached["chats"][candidate].update(spaceName="chat-bridge-agent-a-overflow",spaceId=42,profileId="Profile 1",page="p4")
+      db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(attached),));db.commit()
+      before=dump();projection=(config/"registry.json").read_bytes()
+      reader=c.connection(config,state,initialize=False);reader.execute("PRAGMA query_only=ON")
+      context=c.observation_context(reader,None,pending_session=candidate)
+      assert context["sessionRef"]==candidate and context["operationId"]==row["id"]
+      assert dump()==before and (config/"registry.json").read_bytes()==projection
+      reader.close()
+      result=subprocess.run([sys.executable,"src/coordinator.py","observation-context",str(config),str(state)],input=json.dumps({"pendingSession":candidate}),text=True,capture_output=True)
+      assert result.returncode==0,result.stderr
+      assert json.loads(result.stdout)["anchor"]==context["anchor"] and dump()==before
+      rejected(lambda:c.observation_context(db,row["id"]),"UNKNOWN_BROWSER")
+      changes=[
+       "UPDATE operations SET status='DELIVERY_UNKNOWN' WHERE id='"+row["id"]+"'",
+       "UPDATE operations SET kind='dispatch' WHERE id='"+row["id"]+"'",
+       "UPDATE operations SET force_new=0 WHERE id='"+row["id"]+"'",
+       "UPDATE operations SET caller_ref='foreign' WHERE id='"+row["id"]+"'",
+       "UPDATE operations SET account_id='foreign' WHERE id='"+row["id"]+"'",
+       "UPDATE operations SET session_ref='foreign' WHERE id='"+row["id"]+"'",
+       "UPDATE operations SET payload_hash='foreign' WHERE id='"+row["id"]+"'",
+       "UPDATE operations SET workgroup_id='foreign' WHERE id='"+row["id"]+"'",
+       "UPDATE logical_sessions SET state='ACTIVE'",
+       "UPDATE logical_sessions SET pending_session_ref=NULL",
+       "UPDATE logical_sessions SET epoch=epoch+1",
+       "UPDATE logical_sessions SET current_session_ref='foreign'"
+      ]
+      for change in changes:
+       db.execute("SAVEPOINT invalid_observation");db.execute(change)
+       rejected(lambda:c.observation_context(db,None,pending_session=candidate),"OBSERVATION")
+       db.execute("ROLLBACK TO invalid_observation");db.execute("RELEASE invalid_observation")
+      for field,value in [("status","active"),("account","alias"),("project","foreign"),("role","foreign"),("workgroupId","foreign"),("url",url(late))]:
+       changed=c.registry(db);changed["chats"][candidate][field]=value
+       db.execute("SAVEPOINT invalid_observation");db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(changed),))
+       rejected(lambda:c.observation_context(db,None,pending_session=candidate),"OBSERVATION")
+       db.execute("ROLLBACK TO invalid_observation");db.execute("RELEASE invalid_observation")
+      assert dump()==before and (config/"registry.json").read_bytes()==projection
+     elif case=="ack-wrong-caller":
       os.environ["CHAT_BRIDGE_FROM_ACCOUNT_ID"]=c.account_id("one")
       rejected(lambda:c.rotation_ack(db,{**ack,"callerRef":owner},config,state),"ACK")
      elif case=="ack-empty-verification":
@@ -202,7 +239,7 @@ with tempfile.TemporaryDirectory(prefix="bridge-quarantine-") as root:
 print("PASS",case)
 `;
 
-for(const name of ["positive-chain","readonly-preview","quarantine-race","legacy-before-prepare","stale-checkpoint","wrong-logical-ref","prepare-race","finish-unknown","finish-stale-claim","stale-attempt","stale-claimed-at","wrong-epoch","wrong-event","wrong-owner","forged-descriptor","wrong-body","wrong-origin","missing-descriptor","ack-no-origin","ack-extra-active","unauthorized-quarantine","wrong-prepare-event","wrong-handoff","unauthorized-prepare","old-unknown-descriptor","unbounded-descriptor","wrong-project-url","wrong-cid-url","wrong-registration-account","wrong-role","ack-wrong-caller","ack-empty-verification","ack-wrong-operation","public-readonly-preview","finish-stale-management","finish-stale-callback","candidate-already-registered","generated-public-ack"]) {
+for(const name of ["positive-chain","readonly-preview","quarantine-race","legacy-before-prepare","stale-checkpoint","wrong-logical-ref","prepare-race","finish-unknown","finish-stale-claim","stale-attempt","stale-claimed-at","wrong-epoch","wrong-event","wrong-owner","forged-descriptor","wrong-body","wrong-origin","missing-descriptor","ack-no-origin","ack-extra-active","unauthorized-quarantine","wrong-prepare-event","wrong-handoff","unauthorized-prepare","old-unknown-descriptor","unbounded-descriptor","wrong-project-url","wrong-cid-url","wrong-registration-account","wrong-role","ack-wrong-caller","ack-empty-verification","ack-wrong-operation","public-readonly-preview","finish-stale-management","finish-stale-callback","candidate-already-registered","generated-public-ack","pending-observation"]) {
   test("actual SQLite rotation quarantine: "+name,()=>{
     const env={...process.env,PYTHONDONTWRITEBYTECODE:"1"};
     // Only the private fixture child loses inherited origin; the parent stays unchanged.
