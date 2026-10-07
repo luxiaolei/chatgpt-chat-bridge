@@ -2073,8 +2073,10 @@ async function nativeSubmissionWitness(page, request, expectedIdentity, capabili
     if(witness?.unsupportedFormat) {
       const error=new Error('NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED:chatgpt-native-adapter-v1:FORMAT');
       try {
-        error.nativeFormatEvidence=await saveDraftBackup({...witness.unsupportedFormat,capabilityOnly,
-          accountIdentityHash:crypto.createHash('sha256').update(expectedIdentity).digest('hex'),page:{spaceId:page.spaceId??null,label:page.label??null,targetId:page.targetId??null}},'native-format-evidence');
+        const evidence={...witness.unsupportedFormat,capabilityOnly,
+          accountIdentityHash:crypto.createHash('sha256').update(expectedIdentity).digest('hex'),page:{spaceId:page.spaceId??null,label:page.label??null,targetId:page.targetId??null}};
+        if(Buffer.byteLength(JSON.stringify(evidence),'utf8')+128>256*1024) throw new Error('NATIVE_FORMAT_EVIDENCE_SIZE_LIMIT');
+        error.nativeFormatEvidence=await saveDraftBackup(evidence,'native-format-evidence');
       } catch(retention) {
         error.nativeFormatEvidence={saved:false,code:String(retention.code||retention.message||'PRIVATE_RETENTION_FAILED').slice(0,200)};
       }
@@ -2106,10 +2108,12 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
       return {kind:'missing'};
     };
     const value=(object,key)=>property(object,key).value;
+    const encoder=new TextEncoder(),bytes=text=>encoder.encode(text).byteLength;
     const describe=(object,key)=>{
-      const field=property(object,key);
-      return {kind:field.kind,type:field.kind==='data'?typeof field.value:null,
-        source:typeof field.value==='function'?Function.prototype.toString.call(field.value):null};
+      const field=property(object,key),source=typeof field.value==='function'?Function.prototype.toString.call(field.value):null;
+      const sourceTruncated=source!==null && (source.length>16*1024 || bytes(source)>16*1024);
+      return {kind:field.kind,type:field.kind==='data'?typeof field.value:null,source:sourceTruncated?null:source,
+        ...(sourceTruncated?{sourceTruncated:true,sourceCodeUnits:source.length}:{})};
     };
     const composers=[...document.querySelectorAll(selector)];
     if(composers.length!==1) return fail();
@@ -2158,29 +2162,45 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     }
     if(!formatRecognized) {
       if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
-      const fibers=[];
-      for(let current=firstFiber,ancestor=0;current&&ancestor<16;current=value(current,'return'),ancestor++) {
-        const editors=[],seen=new Set(),opaque=[],props=property(current,'memoizedProps');
-        for(let hook=value(current,'memoizedState'),index=0;hook&&index<64;hook=value(hook,'next'),index++) {
+      const seen=new Set(),fibers=[],limits={fibers:16,hooks:64,dependencies:64,prototype:8,
+        editorCandidates:128,functionSourceBytes:16*1024,evidenceBytes:256*1024};
+      const evidence={format:'chat-bridge-native-format-evidence-v1',observedAt:new Date().toISOString(),
+        url:location.href.length<=4096?location.href:null,composerAncestor,limits,truncated:false,limit:null,fibers};
+      const refuse=limit=>{evidence.truncated=true;evidence.limit||=limit;};
+      // ponytail: fixed diagnostic budgets; increase only for a measured characterization need.
+      let remaining=limits.evidenceBytes-1024-bytes(JSON.stringify(evidence));
+      const keep=(list,item)=>{
+        const size=bytes(JSON.stringify(item))+2;
+        if(size>remaining) {refuse('EVIDENCE_BYTES_LIMIT');return false;}
+        remaining-=size;list.push(item);return true;
+      };
+      if(evidence.url===null) refuse('EVIDENCE_BYTES_LIMIT');
+      for(let current=firstFiber,ancestor=0;current&&ancestor<16&&!evidence.truncated;current=value(current,'return'),ancestor++) {
+        const props=property(current,'memoizedProps'),row={ancestor,propsKind:props.kind,
+          onSubmit:describe(props.value,'onSubmit'),returnKind:property(current,'return').kind,editors:[],opaque:[]};
+        if(!keep(fibers,row)) break;
+        if(row.onSubmit.sourceTruncated) {refuse('FUNCTION_SOURCE_LIMIT');break;}
+        for(let hook=value(current,'memoizedState'),index=0;hook&&index<64&&!evidence.truncated;hook=value(hook,'next'),index++) {
           const deps=value(value(hook,'memoizedState'),'deps');
           if(!Array.isArray(deps)) continue;
-          for(let dep=0;dep<Math.min(value(deps,'length'),64);dep++) {
-            const editor=value(deps,String(dep)),view=property(editor,'view');
-            if(view.kind==='accessor') {opaque.push({hook:index,dep,field:'view'});continue;}
-            if(value(view.value,'dom')!==composer || seen.has(editor)) continue;
+          for(let dep=0;dep<Math.min(value(deps,'length'),64)&&!evidence.truncated;dep++) {
+            const editor=value(deps,String(dep));
+            if(seen.has(editor)) continue;
+            const view=property(editor,'view');
+            if(view.kind!=='accessor' && value(view.value,'dom')!==composer) continue;
+            if(seen.size>=limits.editorCandidates) {refuse('EDITOR_CANDIDATE_LIMIT');break;}
             seen.add(editor);
-            const plain=value(editor,'plainTextMode');
-            editors.push({hook:index,dep,viewDoc:value(value(view.value,'state'),'doc')===doc,
+            if(view.kind==='accessor') {keep(row.opaque,{hook:index,dep,field:'view'});continue;}
+            const plain=value(editor,'plainTextMode'),item={hook:index,dep,viewDoc:value(value(view.value,'state'),'doc')===doc,
               dictationDoc:value(value(editor,'dictation'),'document')===doc,plainTextMode:typeof plain==='boolean'?plain:null,
               methods:Object.fromEntries(['getText','getHtml','getJson','hasMarkdownFormatting','getPersistedText'].map(key=>[key,describe(editor,key)])),
-              serializer:describe(value(editor,'markdownEditor'),'serialize')});
+              serializer:describe(value(editor,'markdownEditor'),'serialize')};
+            keep(row.editors,item);
+            if(Object.values(item.methods).some(field=>field.sourceTruncated) || item.serializer.sourceTruncated) refuse('FUNCTION_SOURCE_LIMIT');
           }
         }
-        fibers.push({ancestor,propsKind:props.kind,onSubmit:describe(props.value,'onSubmit'),
-          returnKind:property(current,'return').kind,editors,opaque});
       }
-      return {unsupportedFormat:{format:'chat-bridge-native-format-evidence-v1',observedAt:new Date().toISOString(),
-        url:location.href,composerAncestor,limits:{fibers:16,hooks:64,dependencies:64,prototype:8},fibers}};
+      return {unsupportedFormat:evidence};
     }
     if(candidates.size!==1 || typeof doc.textBetween!=='function') {
       if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
