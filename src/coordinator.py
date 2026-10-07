@@ -3083,10 +3083,63 @@ def recovery_digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
-def observation_context(db, operation_id, candidate=None):
+def pending_rotation_context(db, session):
+    """A SENT successor may be observed while its self-ACK is still pending."""
+    reg = registry(db)
+    chat = reg.get("chats", {}).get(session)
+    if (not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", session)
+            or not chat or chat.get("id") != session or chat.get("status") != "pending-rotation"):
+        raise ValueError("OBSERVATION_PENDING_SESSION_REQUIRED")
+    rows = db.execute("SELECT * FROM logical_sessions WHERE pending_session_ref=?", (session,)).fetchall()
+    logical = rows[0] if len(rows) == 1 else None
+    if (not logical or logical["state"] != "ROTATING" or not logical["rotation_id"]
+            or (chat.get("project"), chat.get("role"), chat.get("workgroupId") or None) !=
+               (logical["project"], logical["role"], logical["workgroup_id"])):
+        raise ValueError("OBSERVATION_PENDING_LOGICAL_MISMATCH")
+    operations = db.execute("SELECT * FROM operations WHERE rotation_id=?", (logical["rotation_id"],)).fetchall()
+    op = operations[0] if len(operations) == 1 else None
+    identity = reg.get("accounts", {}).get(chat.get("account"), {}).get("identity")
+    binding = reg.get("projects", {}).get(chat.get("project"), {}).get("bindings", {}).get(chat.get("account"))
+    project_id = (re.search(r"g-p-[0-9a-f]{32}", (binding or {}).get("projectUrl") or "") or [None])[0]
+    header = "\n".join(["[CHATBRIDGE ROLE HANDOFF v1]", "rotation_id: " + logical["rotation_id"],
+                        "logical_ref: " + logical["logical_ref"], "role: " + logical["role"],
+                        "next_epoch: " + str(logical["epoch"] + 1), ""])
+    predecessor = reg.get("chats", {}).get(logical["current_session_ref"], {})
+    scope = (logical["project"], logical["role"], logical["workgroup_id"])
+    active = [cid for cid, c in reg.get("chats", {}).items() if c.get("status") == "active" and
+              (c.get("project"), c.get("role"), c.get("workgroupId") or None) == scope]
+    pending = [cid for cid, c in reg.get("chats", {}).items() if c.get("status") == "pending-rotation" and
+               (c.get("project"), c.get("role"), c.get("workgroupId") or None) == scope]
+    if (not identity or not binding or not project_id or not op or op["status"] != "SENT"
+            or op["kind"] != "rotation" or not op["force_new"] or op["native_target"]
+            or op["session_ref"] != session or op["caller_ref"] != logical["current_session_ref"]
+            or (op["project"], op["role"], op["workgroup_id"]) != scope
+            or op["account_alias"] != chat.get("account") or op["account_id"] != account_id(identity)
+            or predecessor.get("account") != chat.get("account") or predecessor.get("id") != logical["current_session_ref"]
+            or chat.get("profileId") != binding.get("profileId")
+            or op["payload_hash"] != logical["handoff_hash"] or not op["message"].startswith(header)
+            or active != [logical["current_session_ref"]] or pending != [session]
+            or not re.fullmatch(r"https://chatgpt\.com/g/" + project_id + r"(?:-[^/?#]+)?/c/" + session + r"/?", chat.get("url") or "")):
+        raise ValueError("OBSERVATION_PENDING_ROTATION_PROOF_MISMATCH")
+    binding = {**binding, **{key:chat.get(key) for key in ("spaceName", "spaceId", "profileId")}}
+    if (not str(binding.get("spaceName") or "").startswith("chat-bridge-agent-")
+            or not binding.get("profileId") or not isinstance(binding.get("spaceId"), int) or binding["spaceId"] <= 0):
+        raise ValueError("OBSERVATION_PENDING_ATTACHMENT_UNVERIFIED")
+    anchor = recovery_digest({"operation":dict(op), "logical":dict(logical), "chat":chat,
+                              "binding":binding, "accountIdentity":identity})
+    return {"operationId":op["id"], "kind":"rotation", "taskId":op["task_id"], "project":op["project"],
+            "account":op["account_alias"], "accountId":op["account_id"], "sessionRef":session,
+            "projectId":project_id, "binding":binding, "accountIdentity":identity, "url":chat["url"], "anchor":anchor}
+
+
+def observation_context(db, operation_id, candidate=None, pending_session=None):
     """Local identity anchor only. No runtime fabrication or delivery decision."""
     if os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID") or os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
         raise ValueError("OBSERVATION_HOST_LOCAL_REQUIRED")
+    if pending_session:
+        if operation_id or candidate:
+            raise ValueError("OBSERVATION_PENDING_QUERY_CONFLICT")
+        return pending_rotation_context(db, pending_session)
     row = db.execute("SELECT * FROM operations WHERE id=?", (operation_id,)).fetchone()
     if not row or row["status"] != "DELIVERY_UNKNOWN" or row["native_target"]:
         raise ValueError("OBSERVATION_REQUIRES_UNKNOWN_BROWSER_OPERATION")
@@ -4702,7 +4755,7 @@ def main():
             value = result_ack(db, payload)
         elif command == "observation-context":
             payload = json.load(sys.stdin)
-            value = observation_context(db, payload.get("operationId"), payload.get("candidate"))
+            value = observation_context(db, payload.get("operationId"), payload.get("candidate"), payload.get("pendingSession"))
         elif command == "observe":
             opts = dict(zip(args[::2], args[1::2]))
             if len(args) % 2 or set(opts) - {"--operation", "--candidate"} or not opts.get("--operation"):

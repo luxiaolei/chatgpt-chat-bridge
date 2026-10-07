@@ -1095,26 +1095,34 @@ async function reattachTask(reg, chat, taskId, options={}) {
 }
 
 
-async function observeOperation(reg, operationId, candidate=null) {
-  const query={operationId,candidate};
+async function observeOperation(reg, operationId, candidate=null, pendingSession=null) {
+  const query=pendingSession?{pendingSession}:{operationId,candidate};
   const scope=coordinated("observation-context",query);
-  if(opt("project",null)!==scope.project || opt("account",null)!==scope.account)
+  if(pendingSession ? (opt("project",null)&&opt("project")!==scope.project)||(opt("account",null)&&opt("account")!==scope.account) :
+    opt("project",null)!==scope.project || opt("account",null)!==scope.account)
     throw new Error("OPERATION_OBSERVATION_ROUTE_MISMATCH");
   const binding=scope.binding, identity=scope.accountIdentity;
-  const info=(await listTaskSpaces()).find(x=>x.name===binding.spaceName);
+  const spaces=(await listTaskSpaces()).filter(x=>x.name===binding.spaceName), info=spaces[0];
   if(!info || info.ownership!=="agent" || info.createdBy!=="agent" ||
      !info.name.startsWith("chat-bridge-agent-") || info.profileId!==binding.profileId)
     throw new Error("OPERATION_OBSERVATION_REQUIRES_MANAGED_SPACE");
-  const runtime=await loadRuntime();
-  if(runtime.sessions?.[scope.sessionRef]?.watchdogPausedForUserControl ||
-     Object.values(runtime.tasks||{}).some(t=>t.sessionId===scope.sessionRef && t.watchdogPausedForUserControl))
-    throw new Error("OPERATION_OBSERVATION_USER_CONTROL_PAUSED");
+  if(pendingSession && (spaces.length!==1 || Number(info.id)!==Number(binding.spaceId))) throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
+  const assertNotPaused=async()=>{
+    const runtime=await loadRuntime();
+    if(runtime.sessions?.[scope.sessionRef]?.watchdogPausedForUserControl ||
+       Object.values(runtime.tasks||{}).some(t=>t.sessionId===scope.sessionRef && t.watchdogPausedForUserControl))
+      throw new Error("OPERATION_OBSERVATION_USER_CONTROL_PAUSED");
+  };
+  await assertNotPaused();
   await assertWebAvailable(scope.account);
   const task=await taskSpace(info.id), tabs=await task.tabs();
+  if(pendingSession && Number(task.spaceId)!==Number(binding.spaceId)) throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
   const prior=taskAccounts.get(Number(task.spaceId));
   if(prior && accountScope(reg,prior)!==scope.accountId) throw new Error("OPERATION_OBSERVATION_ACCOUNT_CONFLICT");
   taskAccounts.set(Number(task.spaceId),scope.account);
   const matching=tabs.filter(x=>x.openedBy==="agent" && sameConversationUrl(x.url,scope.url));
+  if(pendingSession && (matching.length!==1 || tabs.filter(x=>sameConversationUrl(x.url,scope.url)).length!==1))
+    throw new Error("OPERATION_OBSERVATION_PENDING_TAB_UNVERIFIED");
   let page=matching.length?task.page(matching[0].label):null;
   if(!page) {
     // Only open the already identified conversation; never reclaim existing pages.
@@ -1135,12 +1143,15 @@ async function observeOperation(reg, operationId, candidate=null) {
   });
   if(login!==identity) throw new Error("OPERATION_OBSERVATION_LOGIN_MISMATCH");
   // Native source text does not require expanding or clicking a rendered message.
-  const snapshot=await state(page,true);
+  await assertNotPaused();
+  const snapshot=await state(page,pendingSession?"ids":true);
   if(!sameConversationUrl(snapshot.url,scope.url) || projectKey(snapshot.url)!==scope.projectId)
     throw new Error("OPERATION_OBSERVATION_CONVERSATION_CHANGED");
   if(coordinated("observation-context",query).anchor!==scope.anchor)
     throw new Error("OPERATION_CHANGED_DURING_OBSERVATION");
-  return {ok:true,format:"operation-native-observation-v1",operationId,taskId:scope.taskId,
+  await assertNotPaused();
+  return {...(pendingSession?{...snapshot,role:reg.chats[pendingSession].role,status:"pending-rotation"}:{}),
+    ok:true,format:"operation-native-observation-v1",operationId:scope.operationId,taskId:scope.taskId,
     project:scope.project,account:scope.account,accountId:scope.accountId,sessionRef:scope.sessionRef,
     anchor:scope.anchor,url:snapshot.url,observedAt:snapshot.observedAt,messageSent:false,
     userMessages:snapshot.userMessages,generating:snapshot.generating,draftChars:snapshot.composerText.length,
@@ -1587,6 +1598,17 @@ function newConversationProjectMatches(before, after) {
   } catch { return false; }
 }
 function captureNewConversationSource(before, after) {
+  if(registeredSourceContinuity(before,before,true)) {
+    const source=after?.lastUserSource, alias=before.nativeSourceChat.nativeCreationWitness.sourceConversationId;
+    const fresh=after?.lastUserId && after.lastUserId!==before.lastUserId && !before.userMessageIds.includes(after.lastUserId);
+    const condition=after?.lastUserSourceCondition;
+    const conflict=!sameConversationUrl(before.url,after?.url) || projectKey(before.url)!==projectKey(after?.url) ? 'PERSISTENT_CONVERSATION_CHANGED' :
+      fresh && source && (source.messageId!==after.lastUserId || source.text!==before.nativeWitness.body ||
+        ![alias,convId(after.url)].includes(source.conversationId)) ? 'SOURCE_TUPLE_CHANGED' :
+      !source && ![null,undefined,'SOURCE_NOT_OBSERVED','SOURCE_OWNER_NOT_FOUND','UNOWNED_COPY_CONTROL'].includes(condition) ? 'SOURCE_UNVERIFIED' : null;
+    if(conflict && !before.nativeRegisteredSourceConflict) before.nativeRegisteredSourceConflict={reason:conflict,observedAt:after?.observedAt||null,sourceCondition:condition||null};
+    return;
+  }
   const rejection={};
   deliveryObserved(before,after,undefined,rejection);
   const prior=before.nativeSourceContinuity, source=after?.lastUserSource, witness=before.nativeWitness;
@@ -1634,13 +1656,56 @@ function captureNewConversationSource(before, after) {
 }
 function sourceContinuityReceipt(before, after) {
   const proof=before.nativeSourceContinuity;
-  if(!proof || proof.conflicted || proof.temporaryId!==after?.lastUserSource?.conversationId) return null;
+  if(!proof) return registeredSourceContinuity(before,after);
+  if(proof.conflicted || proof.temporaryId!==after?.lastUserSource?.conversationId) return null;
   const route=value=>{const url=new URL(value);return url.origin+url.pathname;};
   return {format:'same-send-temporary-conversation-v1',messageId:proof.messageId,
     sourceConversationId:proof.temporaryId,conversationId:convId(after.url),bodyHash:proof.bodyHash,
     temporaryUrl:route(proof.temporaryUrl),persistentUrl:route(after.url),
     witnessObservedAt:proof.witnessObservedAt,temporaryObservedAt:proof.observedAt,persistentObservedAt:after.observedAt,
     ...(proof.firstGap?{firstGap:proof.firstGap}:{})};
+}
+
+function registeredSourceContinuity(before, after, anchorOnly=false) {
+  const chat=before?.nativeSourceChat, creation=chat?.nativeCreationWitness;
+  const proof=creation?.sourceBinding, prior=chat?.nativeLastWitness||creation;
+  const witness=before?.nativeWitness, source=after?.lastUserSource, previous=before?.lastUserSource;
+  const sha=value=>typeof value==='string'?crypto.createHash('sha256').update(value).digest('hex'):null;
+  const project=projectKey(reg.projects?.[chat?.project]?.bindings?.[chat?.account]?.projectUrl);
+  const time=value=>Number.isFinite(Date.parse(value))?Date.parse(value):NaN;
+  if(!chat || chat.status!=='active' || chat.id!==convId(before.url) || !project ||
+    reg.accounts?.[chat.account]?.identity!==before.expectedIdentity ||
+    !sameConversationUrl(chat.url,before.url) || !sameConversationUrl(before.url,before.targetUrl||before.url) ||
+    !sameConversationUrl(before.url,after?.url) || projectKey(before.url)!==project || projectKey(after.url)!==project ||
+    creation?.format!=='chatgpt-native-getText-v1' || proof?.format!=='same-send-temporary-conversation-v1' ||
+    creation.project!==chat.project || creation.account!==chat.account ||
+    creation.conversationId!==chat.id || proof.conversationId!==chat.id ||
+    !sameConversationUrl(proof.persistentUrl,before.url) || projectKey(proof.persistentUrl)!==project ||
+    projectHomeId(creation.url)!==project || projectKey(proof.temporaryUrl)!==project ||
+    !proof.sourceConversationId || temporaryConversationId(proof.temporaryUrl)!==proof.sourceConversationId ||
+    creation.sourceConversationId!==proof.sourceConversationId || creation.messageId!==proof.messageId ||
+    creation.bodyHash!==proof.bodyHash || creation.observedAt!==proof.witnessObservedAt ||
+    !(time(proof.temporaryObservedAt)>=time(creation.observedAt)) ||
+    !(time(proof.persistentObservedAt)>=time(proof.temporaryObservedAt)) ||
+    prior?.format!==creation.format || prior.conversationId!==chat.id || prior.sourceConversationId!==proof.sourceConversationId ||
+    creation.accountIdentityHash!==sha(before.expectedIdentity) || prior.accountIdentityHash!==creation.accountIdentityHash ||
+    prior.getterHash!==creation.getterHash || prior.serializerHash!==creation.serializerHash ||
+    sha(witness?.getterSource)!==creation.getterHash || sha(witness?.serializerSource)!==creation.serializerHash ||
+    !/^[0-9a-f]{64}$/.test(creation.bodyHash||'') || !/^[0-9a-f]{64}$/.test(prior.bodyHash||'') ||
+    before.lastUserSourceCondition!=='BOUND_SOURCE' || !Array.isArray(before.userMessageIds) ||
+    !before.userMessageIds.includes(prior.messageId) || before.lastUserId!==prior.messageId ||
+    previous?.messageId!==prior.messageId || previous.conversationId!==proof.sourceConversationId || sha(previous.text)!==prior.bodyHash ||
+    !(time(before.observedAt)>=time(prior.observedAt)) || !(Date.now()-time(before.observedAt)<=15000) ||
+    time(before.observedAt)>Date.now()) return null;
+  if(anchorOnly) return true;
+  if(before.nativeRegisteredSourceConflict || after?.lastUserSourceCondition!=='BOUND_SOURCE' ||
+    source?.messageId!==after.lastUserId || source.conversationId!==proof.sourceConversationId || source.text!==witness?.body ||
+    source.messageId===before.lastUserId || before.userMessageIds.includes(source.messageId) ||
+    !(time(after.observedAt)>=time(witness?.observedAt)) || time(after.observedAt)>Date.now()) return null;
+  return {format:'registered-temporary-conversation-v1',conversationId:chat.id,sourceConversationId:proof.sourceConversationId,
+    creationMessageId:creation.messageId,creationBodyHash:creation.bodyHash,creationObservedAt:creation.observedAt,
+    beforeMessageId:prior.messageId,beforeBodyHash:prior.bodyHash,beforeObservedAt:before.observedAt,
+    messageId:source.messageId,bodyHash:witness.bodyHash,observedAt:after.observedAt};
 }
 
 // A bounded compatibility relation observed on two persistent-conversation sends.
@@ -1677,7 +1742,7 @@ function deliveryObserved(before, after, message=before?.expectedMessage, reject
     if(!before.expectedIdentity || witness.accountIdentity!==before.expectedIdentity) return reject('NATIVE_IDENTITY_MISMATCH');
     if(!witness.observedAt || !Number.isFinite(Date.parse(witness.observedAt))) return reject('NATIVE_WITNESS_TIME_INVALID');
     if(Date.now()-Date.parse(witness.observedAt)>15000 || Date.parse(witness.observedAt)>Date.now()) return reject('NATIVE_WITNESS_NOT_FRESH');
-    if(before.nativeSourceContinuity?.conflicted) return reject('NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT');
+    if(before.nativeSourceContinuity?.conflicted || before.nativeRegisteredSourceConflict) return reject('NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT');
     if(!after?.lastUserSource?.messageId) return reject('NATIVE_SOURCE_MESSAGE_ID_MISSING');
     if(after.lastUserSource.messageId!==after.lastUserId) return reject('NATIVE_SOURCE_MESSAGE_ID_MISMATCH');
     if(after.lastUserSource.conversationId!==convId(after.url)) {
@@ -1690,7 +1755,7 @@ function deliveryObserved(before, after, message=before?.expectedMessage, reject
         Number.isFinite(Date.parse(proof.observedAt)) && Date.parse(proof.observedAt)>=Date.parse(witness.observedAt) &&
         Date.parse(after.observedAt)>=Date.parse(proof.observedAt) && sameConversationUrl(after.url,after.url) &&
         newConversationProjectMatches(before,after);
-      if(!temporaryPending && !mapped) return reject(/^local-chatgpt:/.test(source.conversationId)?(proof?.conflicted?'NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT':'NATIVE_TEMPORARY_SOURCE_PROOF_MISSING'):'NATIVE_SOURCE_CONVERSATION_MISMATCH');
+      if(!temporaryPending && !mapped && !registeredSourceContinuity(before,after)) return reject(/^local-chatgpt:/.test(source.conversationId)?(proof?.conflicted?'NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT':'NATIVE_TEMPORARY_SOURCE_PROOF_MISSING'):'NATIVE_SOURCE_CONVERSATION_MISMATCH');
     }
     if(after.lastUserSource.text!==witness.body && !terminalLfBodyBinding(before,after)) return reject('NATIVE_SOURCE_BODY_MISMATCH');
   }
@@ -1808,7 +1873,7 @@ function postSendObservation(before, after, witness, condition=null, observation
     snapshotAvailable:!!after,observationFailed,
     sourceCondition:after?.lastUserSourceCondition||null,
     temporarySourceProof:sourceContinuityReceipt(before,after),
-    temporarySourceFirstConflict:before?.nativeSourceContinuity?.firstConflict||null,
+    temporarySourceFirstConflict:before?.nativeSourceContinuity?.firstConflict||before?.nativeRegisteredSourceConflict||null,
     temporarySourceFirstGap:before?.nativeSourceContinuity?.firstGap||null,
     beforeUrl:route(before?.url),targetUrl:route(before?.targetUrl||before?.url),afterUrl:route(after?.url),
     lastUserId:id(after?.lastUserId),sourceMessageId:id(after?.lastUserSource?.messageId),
@@ -2039,6 +2104,8 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
     await page.waitForTimeout(80);
 
     before.expectedIdentity=identity;
+    const registered=reg.chats?.[convId(before.url)];
+    before.nativeSourceChat=registered?structuredClone(registered):null;
     witness=await nativeSubmissionWitness(page,msg,identity);
     if(witness && !sameConversationUrl(witness.url,before.url) && witness.url!==before.url)
       throw new Error('NATIVE_SUBMISSION_TARGET_MISMATCH');
@@ -2061,6 +2128,11 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
       ...(terminalLfBodyBinding(before,after)?{bodyBinding:terminalLfBodyBinding(before,after)}:{})});
     const delivery={delivered:true,attempts,lastUserId:after.lastUserId,url:after.url,messageCount:after.messageCount,nativeWitness:nativeReceipt};
     await recordDeliveryStage("DELIVERY_CONFIRMED",delivery);
+    if(continuity?.format==='registered-temporary-conversation-v1') {
+      const {sourceBinding,...latest}=nativeReceipt;
+      registered.nativeLastWitness=latest;
+      await saveRegistry(reg);
+    }
     return delivery;
   } catch(error) {
     if(witness) {
@@ -4171,6 +4243,7 @@ else if(cmd==="watch"){
 else if(["archive","retire","delete","forget"].includes(cmd)){
   const key=args[1]; if(!key) throw new Error("chat key required");
   const chat=resolveChat(reg,key,project,accountArg,true);
+  if(chat.status==="pending-rotation") throw new Error("ROTATION_ACK_REQUIRED");
   assertImageSessionFree(reg,chat);
   if(cmd==="forget"){
     delete reg.chats[chat.id]; await saveRegistry(reg); print({ok:true,forgotten:chat.id,remoteConversationUntouched:true});
@@ -4182,6 +4255,10 @@ else if(["archive","retire","delete","forget"].includes(cmd)){
     await saveRegistry(reg); await touchRuntime(chat.project,{lastCommand:cmd,lastSession:chat.id});
     print({ok:true,chat:chat.name,id:chat.id,status:chat.status});
   }
+}
+else if(["read","status"].includes(cmd) && reg.chats[convId(args[1])]?.status==="pending-rotation"){
+  const observed=await observeOperation(reg,null,null,convId(args[1]));
+  print(cmd==="read"?observed.lastAssistant:observed);
 }
 else if(["read","evidence","status","send","ask","stream","model","effort","stop","retry","recover","resend"].includes(cmd)){
   const key=args[1]; if(!key) throw new Error("chat key required");
@@ -4400,6 +4477,7 @@ else if(cmd==="new"){
     const attempt=globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null;
     const rotation=attempt&&(await deliveryAttemptPromise).manifest.kind==="rotation";
     reg.chats[id]={id,url,name,role,title:name,project:p,account:a,status:rotation?"pending-rotation":"active",model,effort:requestedEffort||applied.effort||null,affinityKey,workgroupId,
+      ...(delivery.nativeWitness?.sourceBinding?.format==='same-send-temporary-conversation-v1'?{nativeCreationWitness:{...delivery.nativeWitness,project:p,account:a}}:{}),
       verifiedModel:applied.model||applied.observed?.model||null,verifiedEffort:applied.effort||applied.observed?.effort||null,
       resourceVerifiedAt:new Date().toISOString(),
       spaceName:binding.spaceName,spaceId:task.spaceId,pageSpaceId:task.spaceId,profileId:binding.profileId||null,page:page.label,attachmentEpoch:1,createdAt:new Date().toISOString()};

@@ -160,6 +160,89 @@ test('a permanent URL plus temporary source without a prior temporary-stage proo
   assert.equal(f.closed,0);
 });
 
+test('new retains real creation proof and shared send advances the same native alias through fresh user IDs',async()=>{
+  const f=fixture();
+  await inBrowser(f,async({runNew})=>{
+    await runNew();
+    assert.deepEqual(f.reg.chats[uuid].nativeCreationWitness,{...f.printed[0].delivery.nativeWitness,project:'P',account:'a'});
+  });
+  f.skipTemporary=true;
+  const click=f.page.click;
+  for(const nextId of ['55555555-5555-4555-8555-555555555555','66666666-6666-4666-8666-666666666666']){
+    f.reg=JSON.parse(JSON.stringify(f.persisted.at(-1)));
+    await inBrowser(f,async({sendMessage})=>{
+      f.page.click=async selector=>{await click(selector);f.source.messageId=nextId;f.unit.attrs['data-chatgpt-search-message-ids']=nextId;};
+      const delivery=await sendMessage(f.page,request,permanent);
+      assert.equal(delivery.nativeWitness.sourceBinding?.format,'registered-temporary-conversation-v1');
+      assert.equal(delivery.nativeWitness.sourceBinding.creationMessageId,messageId);
+      assert.equal(delivery.nativeWitness.messageId,nextId);
+      assert.equal(f.reg.chats[uuid].nativeLastWitness.messageId,nextId);
+    });
+  }
+  assert.equal(f.sends,3);
+});
+
+test('persistent-start alias rejects absent or changed creation, scope, prior UID, body, getter and fresh source',async()=>{
+  const variants=[
+    f=>delete f.reg.chats[uuid].nativeCreationWitness,
+    f=>f.reg.chats[uuid].nativeCreationWitness.sourceBinding.format='invented',
+    f=>f.reg.chats[uuid].nativeCreationWitness.sourceBinding.messageId='foreign',
+    f=>f.reg.chats[uuid].nativeCreationWitness.sourceBinding.bodyHash='f'.repeat(64),
+    f=>f.reg.chats[uuid].nativeCreationWitness.accountIdentityHash='f'.repeat(64),
+    f=>f.reg.chats[uuid].nativeCreationWitness.getterHash='f'.repeat(64),
+    f=>f.reg.chats[uuid].nativeCreationWitness.serializerHash='f'.repeat(64),
+    f=>{f.reg.accounts.alias={identity:'verified-user'};f.reg.projects.P.bindings.alias=f.binding;f.reg.chats[uuid].account='alias';},
+    f=>{f.reg.projects.alias={bindings:{a:f.binding}};f.reg.chats[uuid].project='alias';},
+    f=>f.reg.chats[uuid].nativeCreationWitness.sourceBinding.persistentUrl=permanent.replace(project,'g-p-'+'b'.repeat(32)),
+    f=>f.reg.chats[uuid].nativeCreationWitness.sourceBinding.temporaryUrl=transient.replace(encodeURIComponent(temporary),'local-chatgpt%3A44444444-4444-4444-8444-444444444444'),
+    f=>f.reg.chats[uuid].account='foreign',
+    f=>f.reg.chats[uuid].project='foreign',
+    f=>f.reg.chats[uuid].status='pending-rotation',
+    f=>{f.source.messageId='44444444-4444-4444-8444-444444444444';f.unit.attrs['data-chatgpt-search-message-ids']=f.source.messageId;},
+    f=>f.source.message=request+' changed prior full body',
+    f=>f.frames[15].memoizedProps={...f.source},
+    f=>f.onPoll=value=>{value.source.message=request+' changed current full body';},
+    f=>f.onPoll=value=>{value.source.conversationId='local-chatgpt:44444444-4444-4444-8444-444444444444';value.frames[10].memoizedProps.conversationId=value.source.conversationId;},
+    f=>f.onPoll=value=>{value.url=permanent.replace(uuid,'77777777-7777-4777-8777-777777777777');},
+    f=>f.onPoll=value=>{value.now+=16000;}
+  ];
+  for(const change of variants){
+    const f=fixture();
+    await inBrowser(f,async({runNew,sendMessage})=>{
+      await runNew();f.skipTemporary=true;change(f);
+      const saved=structuredClone(f.reg),click=f.page.click;
+      f.page.click=async selector=>{await click(selector);f.source.messageId='55555555-5555-4555-8555-555555555555';f.unit.attrs['data-chatgpt-search-message-ids']=f.source.messageId;};
+      await assert.rejects(sendMessage(f.page,request,permanent),/DELIVERY_UNCONFIRMED|TARGET_IDENTITY_UNVERIFIED/);
+      assert.deepEqual(f.reg,saved,'rejection never manufactures or advances native proof');
+    });
+    assert.ok(f.sends<=2);
+  }
+});
+
+test('registered native alias does not wash away a current source contradiction when the expected tuple returns',async()=>{
+  for(const fault of ['body','alias','owner','url']){
+    const f=fixture();
+    await inBrowser(f,async({runNew,sendMessage})=>{
+      await runNew();f.skipTemporary=true;
+      const click=f.page.click;
+      f.page.click=async selector=>{await click(selector);f.source.messageId='55555555-5555-4555-8555-555555555555';f.unit.attrs['data-chatgpt-search-message-ids']=f.source.messageId;};
+      f.onPoll=value=>{
+        const bad=value.polls===3;
+        value.source.message=bad&&fault==='body'?request+' foreign body':request;
+        value.source.conversationId=bad&&fault==='alias'?'local-chatgpt:44444444-4444-4444-8444-444444444444':temporary;
+        value.frames[10].memoizedProps.conversationId=value.source.conversationId;
+        value.frames[15].memoizedProps=bad&&fault==='owner'?{...value.source}:{};
+        value.url=bad&&fault==='url'?permanent.replace(uuid,'77777777-7777-4777-8777-777777777777'):permanent;
+      };
+      await assert.rejects(sendMessage(f.page,request,permanent),error=>{
+        assert.equal(error.nativeWitness.postSend.missingCondition,'NATIVE_TEMPORARY_SOURCE_PROOF_CONFLICT');return true;
+      });
+      assert.equal(f.reg.chats[uuid].nativeLastWitness,undefined);
+    });
+    assert.equal(f.sends,2);
+  }
+});
+
 test('owned source still rejects arbitrary controls, skipped content, foreign owner, split tuple and wrong body',async()=>{
   for(const change of [
     f=>f.copy.attrs['aria-label']='Run',

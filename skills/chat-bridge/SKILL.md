@@ -300,6 +300,10 @@ chat-bridge control rotation-ack --rotation NEW_ROTATION --caller-ref SUCCESSOR_
 
 The retained quarantine event permanently fences new/reactivated active registrations for that Project/role/workgroup across account aliases. A current owned rotation claim may register only pending-rotation; its exact SENT successor must ACK before ownership changes. Later normal ACTIVE rotations carry the event automatically and use the current owner/epoch. Rejected registrations retain bounded declared CID/URL evidence; they are not native delivery proof or authorization to replay. Existing same-CID metadata/attachments and unrelated roles retain normal behavior.
 
+Before successor ACK, `status EXACT_CID` or `read EXACT_CID` may inspect its existing managed tab. This read-only path verifies the exact SENT rotation/current logical pending scope and fresh login, then rechecks the same anchor. It does not ACK, clear pauses, attach another tab or permit mutations; `queue observe` still applies only to UNKNOWN operations.
+
+Future `new` calls retain their confirmed native creation witness. Shared sends can reuse its temporary source mapping only with the same account/Project/CID/getter/serializer and an exact fresh BEFORE UID/full-body proof, followed by a fresh current UID and full native body. Absent historical creation proof stays absent; never backfill it from an equal current body or URL.
+
 ## Runtime task cache
 
 ```bash
