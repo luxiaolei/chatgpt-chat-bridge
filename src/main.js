@@ -1977,8 +1977,9 @@ function assertInputTarget(snapshot, targetUrl, reclaim=false) {
   }
 }
 
-async function saveDraftBackup(backup) {
-  const directory=pathMod.join(STATE_DIR,"draft-backups");
+async function saveDraftBackup(backup, directoryName="draft-backups") {
+  if(!["draft-backups","native-format-evidence"].includes(directoryName)) throw new Error("PRIVATE_BACKUP_DIRECTORY_UNSUPPORTED");
+  const directory=pathMod.join(STATE_DIR,directoryName);
   await fs.mkdir(directory,{recursive:true,mode:0o700});
   const info=await fs.lstat(directory);
   if(!info.isDirectory() || (info.mode&0o077) || typeof process.getuid==="function" && info.uid!==process.getuid()) throw new Error("DRAFT_BACKUP_DIRECTORY_UNSAFE");
@@ -2069,6 +2070,18 @@ async function nativeSubmissionWitness(page, request, expectedIdentity, capabili
   let witness;
   try {
     witness=await page.evaluate(nativeSubmissionProbe,{selector:COMPOSER_SELECTOR,request,expectedIdentity,capabilityOnly});
+    if(witness?.unsupportedFormat) {
+      const error=new Error('NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED:chatgpt-native-adapter-v1:FORMAT');
+      try {
+        const evidence={...witness.unsupportedFormat,capabilityOnly,
+          accountIdentityHash:crypto.createHash('sha256').update(expectedIdentity).digest('hex'),page:{spaceId:page.spaceId??null,label:page.label??null,targetId:page.targetId??null}};
+        if(Buffer.byteLength(JSON.stringify(evidence),'utf8')+128>256*1024) throw new Error('NATIVE_FORMAT_EVIDENCE_SIZE_LIMIT');
+        error.nativeFormatEvidence=await saveDraftBackup(evidence,'native-format-evidence');
+      } catch(retention) {
+        error.nativeFormatEvidence={saved:false,code:String(retention.code||retention.message||'PRIVATE_RETENTION_FAILED').slice(0,200)};
+      }
+      throw error;
+    }
   } catch(error) {
     if(String(error?.message||error).includes('NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED:')) {
       error.code='NATIVE_SUBMISSION_UNSUPPORTED';
@@ -2086,9 +2099,26 @@ async function nativeSubmissionWitness(page, request, expectedIdentity, capabili
 // Volatile UI formats live in one closed browser probe; no generic alias matching.
 async function nativeSubmissionProbe({selector,request,expectedIdentity,capabilityOnly=false,discardBackup=null}) {
     const fail=()=>{throw new Error('NATIVE_SUBMISSION_UNVERIFIED');};
+    const property=(object,key)=>{
+      for(let value=object,depth=0;value&&depth<8;value=Object.getPrototypeOf(value),depth++) {
+        const descriptor=Object.getOwnPropertyDescriptor(value,key);
+        if(descriptor) return Object.hasOwn(descriptor,'value')?
+          {kind:'data',value:descriptor.value}:{kind:'accessor'};
+      }
+      return {kind:'missing'};
+    };
+    const value=(object,key)=>property(object,key).value;
+    const encoder=new TextEncoder(),bytes=text=>encoder.encode(text).byteLength;
+    const describe=(object,key)=>{
+      const field=property(object,key),source=typeof field.value==='function'?Function.prototype.toString.call(field.value):null;
+      const sourceTruncated=source!==null && (source.length>16*1024 || bytes(source)>16*1024);
+      return {kind:field.kind,type:field.kind==='data'?typeof field.value:null,source:sourceTruncated?null:source,
+        ...(sourceTruncated?{sourceTruncated:true,sourceCodeUnits:source.length}:{})};
+    };
     const composers=[...document.querySelectorAll(selector)];
     if(composers.length!==1) return fail();
-    const composer=composers[0], doc=composer.pmViewDesc?.node;
+    const composer=composers[0],viewDesc=property(composer,'pmViewDesc'),node=property(viewDesc.value,'node'),doc=node.value;
+    if(viewDesc.kind==='accessor' || node.kind==='accessor') return fail();
     if(!doc) {
       if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
       return null; // Legacy plain composer retains the existing exact-text path.
@@ -2096,9 +2126,12 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     if(!expectedIdentity) return fail();
     const session=await fetch('/api/auth/session',{credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(5000)}).then(r=>r.ok===false?null:r.json());
     if(session?.user?.id!==expectedIdentity && session?.user?.email!==expectedIdentity) return fail();
-    let host=composer, fiber=null;
-    for(let i=0;host&&i<3&&!fiber;i++,host=host.parentElement)
-      fiber=host[Object.keys(host).find(k=>k.startsWith('__reactFiber'))];
+    let host=composer, fiber=null,composerAncestor=null;
+    for(let i=0;host&&i<3&&!fiber;i++,host=host.parentElement) {
+      fiber=value(host,Object.keys(host).find(k=>k.startsWith('__reactFiber')));
+      if(fiber) composerAncestor=i;
+    }
+    const firstFiber=fiber;
     const candidates=new Set();
     let formatRecognized=false;
     // Pin the characterized native submit format; an unsupported format fails before Send.
@@ -2107,8 +2140,8 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
       {submit:"e=>up(rT.getText(),e)",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,M.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}"},
       {submit:"e=>{ev(H.getText(),e)}",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;if(null==this.markdownEditor||!this.hasMarkdownFormatting({document:e}))return(0,x.f)(e).content;let t=this.getPersistedText(e);return\"\"===t.replace(/&#(?:x[\\da-f]+|\\d+);/gi,\"\").trim()?(0,x.f)(e).content:e.lastChild?.textContent.endsWith(\" \")?t.replace(/&#x20;$/,\" \"):t}",hasMarkdownFormatting:"hasMarkdownFormatting(){let{document:e=this.dictation.document,includeLinks:t=!0}=arguments.length>0&&void 0!==arguments[0]?arguments[0]:{};if(null==this.markdownEditor||this.plainTextMode)return!1;let n=(0,x.d)(e,{includeLinks:t});return n||e.descendants(e=>!(n=n||null!=(0,x.b)(e)&&(t||\"richLink\"!==e.type.name)||t&&e.isTextblock&&(0,E.c)(e.textBetween(0,e.content.size,\"\\n\",\"\\n\")))),n}",getPersistedText:"getPersistedText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return null==this.markdownEditor||this.plainTextMode?(0,x.f)(e,{preserveTextLinkMarks:!0}).content:this.markdownEditor.serialize(e)}",persistedText:true},
     ];
-    for(let i=0;fiber&&i<16;i++,fiber=fiber.return) {
-      const submit=String(fiber.memoizedProps?.onSubmit);
+    for(let i=0;fiber&&i<16;i++,fiber=value(fiber,'return')) {
+      const submit=describe(value(fiber,'memoizedProps'),'onSubmit').source;
       const format=formats.find(value=>submit===value.submit ||
         (value.submit==='e=>up(rT.getText(),e)' && ['e=>uh(rE.getText(),e)','e=>up(rS.getText(),e)'].includes(submit)) ||
         (value.persistedText && submit==='e=>{ev(F.getText(),e)}'));
@@ -2127,7 +2160,48 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
             String(editor.getPersistedText)===format.getPersistedText))) candidates.add(editor);
       }
     }
-    if(!formatRecognized) throw new Error(discardBackup?'DRAFT_DISCARD_UNSUPPORTED':'NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED:chatgpt-native-adapter-v1:FORMAT');
+    if(!formatRecognized) {
+      if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
+      const seen=new Set(),fibers=[],limits={fibers:16,hooks:64,dependencies:64,prototype:8,
+        editorCandidates:128,functionSourceBytes:16*1024,evidenceBytes:256*1024};
+      const evidence={format:'chat-bridge-native-format-evidence-v1',observedAt:new Date().toISOString(),
+        url:location.href.length<=4096?location.href:null,composerAncestor,limits,truncated:false,limit:null,fibers};
+      const refuse=limit=>{evidence.truncated=true;evidence.limit||=limit;};
+      // ponytail: fixed diagnostic budgets; increase only for a measured characterization need.
+      let remaining=limits.evidenceBytes-1024-bytes(JSON.stringify(evidence));
+      const keep=(list,item)=>{
+        const size=bytes(JSON.stringify(item))+2;
+        if(size>remaining) {refuse('EVIDENCE_BYTES_LIMIT');return false;}
+        remaining-=size;list.push(item);return true;
+      };
+      if(evidence.url===null) refuse('EVIDENCE_BYTES_LIMIT');
+      for(let current=firstFiber,ancestor=0;current&&ancestor<16&&!evidence.truncated;current=value(current,'return'),ancestor++) {
+        const props=property(current,'memoizedProps'),row={ancestor,propsKind:props.kind,
+          onSubmit:describe(props.value,'onSubmit'),returnKind:property(current,'return').kind,editors:[],opaque:[]};
+        if(!keep(fibers,row)) break;
+        if(row.onSubmit.sourceTruncated) {refuse('FUNCTION_SOURCE_LIMIT');break;}
+        for(let hook=value(current,'memoizedState'),index=0;hook&&index<64&&!evidence.truncated;hook=value(hook,'next'),index++) {
+          const deps=value(value(hook,'memoizedState'),'deps');
+          if(!Array.isArray(deps)) continue;
+          for(let dep=0;dep<Math.min(value(deps,'length'),64)&&!evidence.truncated;dep++) {
+            const editor=value(deps,String(dep));
+            if(seen.has(editor)) continue;
+            const view=property(editor,'view');
+            if(view.kind!=='accessor' && value(view.value,'dom')!==composer) continue;
+            if(seen.size>=limits.editorCandidates) {refuse('EDITOR_CANDIDATE_LIMIT');break;}
+            seen.add(editor);
+            if(view.kind==='accessor') {keep(row.opaque,{hook:index,dep,field:'view'});continue;}
+            const plain=value(editor,'plainTextMode'),item={hook:index,dep,viewDoc:value(value(view.value,'state'),'doc')===doc,
+              dictationDoc:value(value(editor,'dictation'),'document')===doc,plainTextMode:typeof plain==='boolean'?plain:null,
+              methods:Object.fromEntries(['getText','getHtml','getJson','hasMarkdownFormatting','getPersistedText'].map(key=>[key,describe(editor,key)])),
+              serializer:describe(value(editor,'markdownEditor'),'serialize')};
+            keep(row.editors,item);
+            if(Object.values(item.methods).some(field=>field.sourceTruncated) || item.serializer.sourceTruncated) refuse('FUNCTION_SOURCE_LIMIT');
+          }
+        }
+      }
+      return {unsupportedFormat:evidence};
+    }
     if(candidates.size!==1 || typeof doc.textBetween!=='function') {
       if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
       return fail();
@@ -4665,6 +4739,7 @@ else throw new Error("Unknown command: "+cmd);
     code:String(error?.code||error?.message||"BRIDGE_ERROR").slice(0,200)};
   if(error?.nativeWitness) payload.nativeWitness=error.nativeWitness;
   if(error?.nativeAdapter) payload.nativeAdapter=error.nativeAdapter;
+  if(error?.nativeFormatEvidence) payload.nativeFormatEvidence=error.nativeFormatEvidence;
   if(error?.status) payload.status=error.status;
   if(error?.reason) payload.reason=String(error.reason).slice(0,500);
   if(error?.retryAfterSec!=null) payload.retryAfterSec=Number(error.retryAfterSec);

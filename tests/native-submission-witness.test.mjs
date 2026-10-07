@@ -8,7 +8,7 @@ const fixture=JSON.parse(await readFile(new URL('./native-submission-fixture.jso
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const helper=source.slice(source.indexOf('async function nativeSubmissionWitness('),source.indexOf('\nasync function sendMessage('));
 const getter='getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,T.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}';
-const prepare=new AsyncFunction('crypto','COMPOSER_SELECTOR','normalizedEvidenceText',helper+';return nativeSubmissionWitness;')(crypto,'composer',v=>v.replace(/\s+/g,' ').trim());
+const prepare=new AsyncFunction('crypto','COMPOSER_SELECTOR','normalizedEvidenceText','saveDraftBackup',helper+';return nativeSubmissionWitness;');
 async function inspect(change=()=>{},capabilityOnly=false) {
  const doc={content:{size:fixture.request.length},textBetween:()=>fixture.request};
  const composer={pmViewDesc:{node:doc},parentElement:null};
@@ -22,7 +22,12 @@ async function inspect(change=()=>{},capabilityOnly=false) {
  Object.defineProperty(globalThis,'document',{configurable:true,value:{querySelectorAll:()=>env.composers}});
  Object.defineProperty(globalThis,'location',{configurable:true,value:{href:'https://chatgpt.com/c/11111111-1111-4111-8111-111111111111'}});
  Object.defineProperty(globalThis,'fetch',{configurable:true,value:async()=>({json:async()=>({user:{email:env.email,id:env.id}})})});
- return await (await prepare)({evaluate:async(fn,args)=>fn(args)},env.request,env.identity,capabilityOnly);
+ const save=async(backup,directory)=>{
+  if(env.retentionFailure) throw new Error('PRIVATE_RETENTION_FAILED');
+  env.retained={backup,directory};
+  return {path:'/private/native-format-evidence.json',sha256:'f'.repeat(64),bytes:JSON.stringify(backup).length};
+ };
+ return await (await prepare(crypto,'composer',v=>v.replace(/\s+/g,' ').trim(),save))({...env.page,evaluate:async(fn,args)=>fn(args)},env.request,env.identity,capabilityOnly);
  } finally {for(const [k,d] of prior){if(d)Object.defineProperty(globalThis,k,d);else delete globalThis[k];}}
 }
 test('native getter requires unique composer/doc, verified account and exact characterized submit path',async()=>{
@@ -246,4 +251,146 @@ test('native support can be checked before input without reading a body and reta
   ({env})=>env.composers.push({}),
   ({host,editor})=>host.__reactFiber$fixture.memoizedState.memoizedState.deps.push({...editor}),
  ]) await assert.rejects(inspect(context=>{empty(context);change(context);},true),/NATIVE_SUBMISSION_UNVERIFIED/);
+});
+
+
+test('unsupported FORMAT retains private native shape and stays rejected without body or handler calls',async()=>{
+ let captured,calls=0;
+ const submit=new Function('return e=>changed(rN.getText(),e)')();
+ await assert.rejects(inspect(context=>{
+  captured=context.env;
+  context.host.__reactFiber$fixture.memoizedProps.onSubmit=submit;
+  context.doc.textBetween=()=>{throw new Error('no body read');};
+  context.editor.getText=()=>{calls++;throw new Error('no getter call');};
+  context.editor.markdownEditor.serialize=()=>{calls++;throw new Error('no serializer call');};
+ },true),error=>{
+  assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');
+  assert.deepEqual(error.nativeAdapter,{formatVersion:'chatgpt-native-adapter-v1',phase:'FORMAT',status:'UNSUPPORTED'});
+  assert.equal(error.nativeFormatEvidence.path,'/private/native-format-evidence.json');
+  assert.equal(JSON.stringify(error).includes('e=>changed'),false);
+  return true;
+ });
+ assert.equal(calls,0);
+ assert.equal(captured.retained.directory,'native-format-evidence');
+ const evidence=captured.retained.backup;
+ assert.equal(evidence.format,'chat-bridge-native-format-evidence-v1');
+ assert.equal(evidence.composerAncestor,1);
+ assert.equal(evidence.fibers[0].onSubmit.source,Function.prototype.toString.call(submit));
+ assert.equal(evidence.fibers[0].editors[0].viewDoc,true);
+ assert.equal(evidence.fibers[0].editors[0].dictationDoc,true);
+ for(const secret of [fixture.request,fixture.body,captured.identity]) assert.equal(JSON.stringify(evidence).includes(secret),false);
+});
+
+test('FORMAT sampling does not invoke accessors or custom function/object toString',async()=>{
+ for(const field of ['onSubmit','memoizedProps','view','return','objectToString','functionToString']) {
+  let captured,calls=0;
+  await assert.rejects(inspect(context=>{
+   captured=context.env;
+   const fiber=context.host.__reactFiber$fixture;
+   fiber.memoizedProps.onSubmit=()=>{};
+   const accessor=()=>{calls++;throw new Error('opaque accessor invoked');};
+   if(field==='onSubmit') Object.defineProperty(fiber.memoizedProps,'onSubmit',{get:accessor});
+   if(field==='memoizedProps') Object.defineProperty(fiber,'memoizedProps',{get:accessor});
+   if(field==='view') Object.defineProperty(context.editor,'view',{get:accessor});
+   if(field==='return') Object.defineProperty(fiber,'return',{get:accessor});
+   if(field==='objectToString') fiber.memoizedProps.onSubmit={toString:accessor};
+   if(field==='functionToString') fiber.memoizedProps.onSubmit.toString=accessor;
+  },true),/NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED/);
+  assert.equal(calls,0,field);
+  assert.equal(captured.retained.directory,'native-format-evidence');
+ }
+});
+
+test('wrong account produces no private native shape',async()=>{
+ let captured;
+ await assert.rejects(inspect(context=>{
+  captured=context.env;context.env.email='other@example.test';
+  context.host.__reactFiber$fixture.memoizedProps.onSubmit=()=>{};
+ },true),/NATIVE_SUBMISSION_UNVERIFIED/);
+ assert.equal(captured.retained,undefined);
+});
+
+test('private evidence write failure keeps the original strict FORMAT error',async()=>{
+ await assert.rejects(inspect(({host,env})=>{
+  env.retentionFailure=true;host.__reactFiber$fixture.memoizedProps.onSubmit=()=>{};
+ },true),error=>{
+  assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');
+  assert.deepEqual(error.nativeAdapter,{formatVersion:'chatgpt-native-adapter-v1',phase:'FORMAT',status:'UNSUPPORTED'});
+  assert.deepEqual(error.nativeFormatEvidence,{saved:false,code:'PRIVATE_RETENTION_FAILED'});
+  return true;
+ });
+});
+
+
+test('FORMAT diagnostics cap each function source in UTF-8 bytes without invoking it',async()=>{
+ for(const text of ['x'.repeat(1024*1024),'界'.repeat(8000)]) {
+  let captured;
+  await assert.rejects(inspect(context=>{
+   captured=context.env;context.host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('/*'+text+'*/');
+  },true),/NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED/);
+  const evidence=captured.retained.backup;
+  assert.equal(evidence.truncated,true);
+  assert.equal(evidence.limit,'FUNCTION_SOURCE_LIMIT');
+  assert.equal(evidence.fibers[0].onSubmit.source,null);
+  assert.equal(evidence.fibers[0].onSubmit.sourceTruncated,true);
+  assert(Buffer.byteLength(JSON.stringify(evidence))<256*1024);
+ }
+});
+
+test('FORMAT diagnostics deduplicate editor candidates across fibers and stop at 128',async()=>{
+ for(const count of [10,4096]) {
+  let captured;
+  await assert.rejects(inspect(context=>{
+   captured=context.env;
+   const editors=Array.from({length:count},()=>({...context.editor}));
+   const hooks=Array.from({length:64},(_,i)=>({memoizedState:{deps:editors.slice(i*64,i*64+64)}}));
+   for(let i=0;i<63;i++)hooks[i].next=hooks[i+1];
+   const fibers=Array.from({length:16},()=>({memoizedProps:{onSubmit:()=>{}},memoizedState:hooks[0]}));
+   for(let i=0;i<15;i++)fibers[i].return=fibers[i+1];
+   context.host.__reactFiber$fixture=fibers[0];
+  },true),/NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED/);
+  const evidence=captured.retained.backup;
+  assert.equal(evidence.fibers.reduce((n,row)=>n+row.editors.length,0),Math.min(count,128));
+  assert.equal(evidence.truncated,count>128);
+  assert.equal(evidence.limit,count>128?'EDITOR_CANDIDATE_LIMIT':null);
+  assert(Buffer.byteLength(JSON.stringify(evidence))<256*1024);
+ }
+});
+
+test('FORMAT diagnostic aggregate budget includes JSON escaping and opaque records',async()=>{
+ for(const kind of ['function-sources','opaque']) {
+  let captured,calls=0;
+  await assert.rejects(inspect(context=>{
+   captured=context.env;
+   const methods=['getText','getHtml','getJson','hasMarkdownFormatting','getPersistedText'];
+   const editor=()=>({...context.editor,markdownEditor:{serialize:new Function('/*'+'\0'.repeat(2500)+'*/')}});
+   const editors=Array.from({length:128},()=>{
+    const item=editor();
+    for(const key of methods)item[key]=new Function('/*'+'\0'.repeat(2500)+'*/');
+    if(kind==='opaque')Object.defineProperty(item,'view',{get(){calls++;throw new Error('must not invoke');}});
+    return item;
+   });
+   const hooks=Array.from({length:64},(_,i)=>({memoizedState:{deps:editors.slice((i%2)*64,(i%2+1)*64)}}));
+   for(let i=0;i<63;i++)hooks[i].next=hooks[i+1];
+   context.host.__reactFiber$fixture={memoizedProps:{onSubmit:()=>{}},memoizedState:hooks[0]};
+  },true),/NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED/);
+  const evidence=captured.retained.backup;
+  assert.equal(calls,0);
+  assert(Buffer.byteLength(JSON.stringify(evidence))<256*1024);
+  if(kind==='function-sources'){assert.equal(evidence.truncated,true);assert.equal(evidence.limit,'EVIDENCE_BYTES_LIMIT');}
+  else assert.equal(evidence.fibers.reduce((n,row)=>n+row.opaque.length,0),128);
+ }
+});
+
+test('FORMAT host refuses oversized final private envelope without changing rejection contract',async()=>{
+ let captured;
+ await assert.rejects(inspect(({host,env})=>{
+  captured=env;env.page={label:'x'.repeat(256*1024)};host.__reactFiber$fixture.memoizedProps.onSubmit=()=>{};
+ },true),error=>{
+  assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');
+  assert.deepEqual(error.nativeAdapter,{formatVersion:'chatgpt-native-adapter-v1',phase:'FORMAT',status:'UNSUPPORTED'});
+  assert.deepEqual(error.nativeFormatEvidence,{saved:false,code:'NATIVE_FORMAT_EVIDENCE_SIZE_LIMIT'});
+  return true;
+ });
+ assert.equal(captured.retained,undefined);
 });
