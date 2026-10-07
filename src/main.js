@@ -741,8 +741,8 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseC
 
 async function overflowManagedTask(reg, project, account, binding, options={}) {
   const plan=managedSpacePlan(reg,account,binding?.profileId||null);
-  reg.capacityOverflow ||= {};
-  const overflowKey=`${plan.identity}|${plan.profileId}`, remembered=reg.capacityOverflow[overflowKey];
+  if(!options.existingOnly) reg.capacityOverflow ||= {};
+  const overflowKey=`${plan.identity}|${plan.profileId}`, remembered=reg.capacityOverflow?.[overflowKey];
   if(remembered && remembered.profileId!==plan.profileId) throw new Error("OVERFLOW_MAPPING_PROFILE_MISMATCH");
   if(remembered && remembered.identity!==plan.identity) throw new Error("OVERFLOW_MAPPING_IDENTITY_MISMATCH");
   const legacyName=`${plan.spaceName}-overflow`;
@@ -783,7 +783,13 @@ async function overflowManagedTask(reg, project, account, binding, options={}) {
     name=previousSpaces[0].spaceName; existing=find(available);
     if(!existing || existing.profileId!==plan.profileId || Number(existing.id)!==Number(previousSpaces[0].spaceId)) throw new Error("OVERFLOW_MAPPING_CHANGED");
   }
-  const task=await taskSpace(name,!existing?{profileId:plan.profileId}:undefined);
+  if(options.existingOnly) {
+    const mapped=options.previous?previousSpaces?.[0]:remembered;
+    if(!options.preview || options.advance || !mapped || !existing || !Number.isSafeInteger(mapped.spaceId) || mapped.spaceId<=0 ||
+       !String(mapped.spaceName||"").startsWith("chat-bridge-agent-") || typeof mapped.createdAt!=="string" ||
+       Number(existing.id)!==mapped.spaceId) throw new Error("OVERFLOW_MAPPING_CHANGED");
+  }
+  const task=await taskSpace(options.existingOnly?existing.id:name,!existing?{profileId:plan.profileId}:undefined);
   const verified=find(await listTaskSpaces());
   if(!verified || verified.profileId!==plan.profileId || Number(verified.id)!==Number(task.spaceId))
     throw new Error("OVERFLOW_SPACE_VERIFICATION_FAILED");
@@ -1106,7 +1112,7 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
   if(!info || info.ownership!=="agent" || info.createdBy!=="agent" ||
      !info.name.startsWith("chat-bridge-agent-") || info.profileId!==binding.profileId)
     throw new Error("OPERATION_OBSERVATION_REQUIRES_MANAGED_SPACE");
-  if(pendingSession && (spaces.length!==1 || Number(info.id)!==Number(binding.spaceId))) throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
+  if(spaces.length!==1 || (pendingSession && Number(info.id)!==Number(binding.spaceId))) throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
   const assertNotPaused=async()=>{
     const runtime=await loadRuntime();
     if(runtime.sessions?.[scope.sessionRef]?.watchdogPausedForUserControl ||
@@ -1115,19 +1121,62 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
   };
   await assertNotPaused();
   await assertWebAvailable(scope.account);
-  const task=await taskSpace(info.id), tabs=await task.tabs();
-  if(pendingSession && Number(task.spaceId)!==Number(binding.spaceId)) throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
+  let task=await taskSpace(info.id);
+  const tabs=await task.tabs();
+  if(Number(task.spaceId)!==Number(info.id) || (pendingSession && Number(task.spaceId)!==Number(binding.spaceId)))
+    throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
   const prior=taskAccounts.get(Number(task.spaceId));
   if(prior && accountScope(reg,prior)!==scope.accountId) throw new Error("OPERATION_OBSERVATION_ACCOUNT_CONFLICT");
   taskAccounts.set(Number(task.spaceId),scope.account);
-  const matching=tabs.filter(x=>x.openedBy==="agent" && sameConversationUrl(x.url,scope.url));
+  const targets=tabs.filter(x=>sameConversationUrl(x.url,scope.url));
+  if(!pendingSession && (targets.length>1 || targets.some(x=>x.openedBy!=="agent" || !x.label)))
+    throw new Error("OPERATION_OBSERVATION_TAB_UNVERIFIED");
+  const matching=targets.filter(x=>x.openedBy==="agent");
   if(pendingSession && (matching.length!==1 || tabs.filter(x=>sameConversationUrl(x.url,scope.url)).length!==1))
     throw new Error("OPERATION_OBSERVATION_PENDING_TAB_UNVERIFIED");
   let page=matching.length?task.page(matching[0].label):null;
+  let overflowTarget=null, observationPool=null;
   if(!page) {
     // Only open the already identified conversation; never reclaim existing pages.
-    page=await task.newPage();
-    await page.goto(scope.url,{waitUntil:"domcontentloaded",timeout:20000});
+    let allocated=false;
+    await assertNotPaused();
+    try { page=await task.newPage(); allocated=true; }
+    catch(error) {
+      if(pendingSession || !pageBudgetError(error)) throw error;
+      const budget=Number(String(error.message).match(/page budget reached \(\d+\/(\d+)\)/i)?.[1]);
+      if(!Number.isSafeInteger(budget) || budget<=0 || !reg.capacityOverflow?.[`${identity}|${binding.profileId}`]) throw error;
+      const head=await overflowManagedTask(reg,scope.project,scope.account,binding,{preview:true,existingOnly:true});
+      const pool=[head];
+      if(head.mapping.previousSpaces?.length)
+        pool.push(await overflowManagedTask(reg,scope.project,scope.account,binding,{preview:true,existingOnly:true,previous:true}));
+      if(new Set([task.spaceId,...pool.map(p=>p.task.spaceId)]).size!==pool.length+1) throw new Error("OVERFLOW_MAPPING_CHANGED");
+      const inventory=[];
+      for(const entry of pool) inventory.push({...entry,tabs:await entry.task.tabs()});
+      observationPool=[{task,spaceName:binding.spaceName},...inventory];
+      const candidates=inventory.flatMap(entry=>entry.tabs.filter(tab=>sameConversationUrl(tab.url,scope.url)).map(tab=>({entry,tab})));
+      if(candidates.length>1 || candidates.some(({tab})=>tab.openedBy!=="agent" || !tab.label))
+        throw new Error("OPERATION_OBSERVATION_TAB_UNVERIFIED");
+      overflowTarget=candidates[0]?.entry||inventory.find(entry=>entry.tabs.length<budget);
+      if(!overflowTarget) throw error;
+      if(coordinated("observation-context",query).anchor!==scope.anchor) throw new Error("OPERATION_CHANGED_DURING_OBSERVATION");
+      await assertNotPaused();
+      const current=(await listTaskSpaces()).filter(x=>x.name===overflowTarget.spaceName);
+      if(current.length!==1 || Number(current[0].id)!==Number(overflowTarget.task.spaceId) || current[0].profileId!==binding.profileId ||
+         current[0].ownership!=="agent" || current[0].createdBy!=="agent") throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
+      task=overflowTarget.task;
+      const freshTabs=await task.tabs(), freshTargets=freshTabs.filter(tab=>sameConversationUrl(tab.url,scope.url));
+      if(candidates.length) {
+        if(freshTargets.length!==1 || freshTargets[0].label!==candidates[0].tab.label || freshTargets[0].openedBy!=="agent")
+          throw new Error("OPERATION_OBSERVATION_TAB_UNVERIFIED");
+        page=task.page(freshTargets[0].label);
+      } else {
+        if(freshTargets.length) throw new Error("OPERATION_OBSERVATION_TAB_UNVERIFIED");
+        if(freshTabs.length>=budget) throw error;
+        await assertNotPaused();
+        page=await task.newPage(); allocated=true; // One selected target; capacity races do not retry another Space.
+      }
+    }
+    if(allocated) await page.goto(scope.url,{waitUntil:"domcontentloaded",timeout:20000});
   }
   // Do not use waitForConversationReady: its load-error recovery can click Retry.
   await page.waitForFunction(()=>!!document.querySelector(
@@ -1147,6 +1196,17 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
   const snapshot=await state(page,pendingSession?"ids":true);
   if(!sameConversationUrl(snapshot.url,scope.url) || projectKey(snapshot.url)!==scope.projectId)
     throw new Error("OPERATION_OBSERVATION_CONVERSATION_CHANGED");
+  if(overflowTarget) {
+    const current=await listTaskSpaces(), targets=[];
+    for(const entry of observationPool) {
+      const spaces=current.filter(x=>x.name===entry.spaceName);
+      if(spaces.length!==1 || Number(spaces[0].id)!==Number(entry.task.spaceId) || spaces[0].profileId!==binding.profileId ||
+         spaces[0].ownership!=="agent" || spaces[0].createdBy!=="agent") throw new Error("OPERATION_OBSERVATION_SPACE_CHANGED");
+      targets.push(...(await entry.task.tabs()).filter(tab=>sameConversationUrl(tab.url,scope.url)).map(tab=>({tab,spaceId:entry.task.spaceId})));
+    }
+    if(targets.length!==1 || targets[0].spaceId!==task.spaceId || targets[0].tab.label!==page.label || targets[0].tab.openedBy!=="agent")
+      throw new Error("OPERATION_OBSERVATION_TAB_UNVERIFIED");
+  }
   if(coordinated("observation-context",query).anchor!==scope.anchor)
     throw new Error("OPERATION_CHANGED_DURING_OBSERVATION");
   await assertNotPaused();

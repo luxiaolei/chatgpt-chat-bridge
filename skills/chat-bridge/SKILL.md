@@ -471,6 +471,8 @@ External RPC extraction prefers the exact message-bound Markdown source where av
 
 Existing UNKNOWN recovery: see docs/architecture.md, "Recovery of an already created, unregistered rotation". Use operation-anchored queue observe for missing runtime tasks; rotation-recover defaults to preview. Never treat recovery binding as successor ACK.
 
+If that UNKNOWN observation cannot find the exact owned tab and the primary Space is full, it may reuse the existing verified identity/Profile overflow/previous pool. It searches for one exact agent-owned Project/CID tab, or opens the known CID once in one existing Space with available capacity. Duplicate/unowned targets, changed mappings/Profile, user-controlled Spaces and a full pool are explicit refusals. It never creates a Space, saves an attachment/mapping/capacity record, reclaims a page, clears a draft/pause, retries another target, sends or ACKs. Fresh login/Project/CID, target ownership, user pause and the original local anchor still govern the observation. The pending-successor status/read path still requires its one existing registered tab and does not use this capacity fallback.
+
 
 ## Per-claim delivery evidence
 
