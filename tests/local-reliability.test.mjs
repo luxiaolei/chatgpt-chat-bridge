@@ -39,10 +39,10 @@ async function harness(f={}) {
       if(f.recoveryApprovalRace) nativeRetry=async()=>{throw new Error("APPROVAL_REQUIRED");};
     }
     if(f.detach) {
-      listTaskSpaces=async()=>[{id:7,name:"managed",profileId:"P1",ownership:"agent"}];
+      listTaskSpaces=async()=>[{id:7,name:"managed",profileId:"P1",ownership:"agent",createdBy:"agent"}];
       imageSessionOccupancy=()=>({occupied:false});
       coordinated=command=>{if(command!=="page-reclaim-context")throw Error(command);return {sessionRefs:[],unboundProjectIds:[],unboundAny:false};};
-      openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,page:()=>({url:async()=>f.chat.url,evaluate:async()=>"login-a",close:async()=>f.calls.push("close")}),tabs:async()=>[{label:"p1",url:f.chat.url,active:false,openedBy:"agent"}]}});
+      openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,page:()=>({url:async()=>f.chat.url,evaluate:async()=>"login-a",close:async()=>f.calls.push("close")}),tabs:async()=>f.calls.includes("close")?[]:[{label:"p1",url:f.chat.url,active:false,openedBy:"agent"}]}});
     }
     return {classifySnapshot,gradedRecover,ensurePage,state,nativeRetry,watchOnce,detachTerminalTaskPages};
   `)(f);

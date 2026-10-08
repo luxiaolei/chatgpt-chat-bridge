@@ -153,7 +153,7 @@ test("overflow exhaustion keeps resource waiting without recursion or another re
 test("queue capacity exhaustion waits with backoff and stays distinct from BLOCKED", async()=>{
   const root=await mkdtemp(path.join(tmpdir(),"bridge-capacity-")), config=path.join(root,"config"), state=path.join(root,"state");
   await mkdir(config); await mkdir(state);
-  const registry={defaultAccount:"a",accounts:{a:{identity:"login-a"}},projects:{P:{activeAccount:"a",bindings:{a:{projectUrl:"https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project",spaceName:"agent-a"}}}},chats:{controller:{id:"controller",project:"P",account:"a",role:"conductor",status:"active"}}};
+  const registry={defaultAccount:"a",accounts:{a:{identity:"login-a"}},projects:{P:{activeAccount:"a",bindings:{a:{projectUrl:"https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project",spaceName:"agent-a",profileId:"P1"}}}},chats:{controller:{id:"controller",project:"P",account:"a",role:"conductor",status:"active"}}};
   await writeFile(path.join(config,"registry.json"),JSON.stringify(registry));
   await writeFile(path.join(state,"runtime.json"),JSON.stringify({version:2,projects:{},tasks:{},sessions:{}}));
   const marker=path.join(root,"ready");

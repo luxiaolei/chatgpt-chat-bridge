@@ -14,7 +14,7 @@ test('local Codex owner survives restart, receives replayable results and alone 
   const worker=path.join(root,'worker');
   await writeFile(worker,'#!/bin/sh\nprintf \'{"delivered":true,"modelSelection":{"model":"Latest","effort":"High"}}\\n\'\n',{mode:0o755});
   await writeFile(path.join(config,'registry.json'),JSON.stringify({
-    accounts:{a:{identity:'one'}},projects:{P:{bindings:{a:{projectUrl:'https://chatgpt.com/g/p/project'}}}},
+    accounts:{a:{identity:'one'}},projects:{P:{bindings:{a:{projectUrl:'https://chatgpt.com/g/g-p-'+ 'a'.repeat(32) + '/project',profileId:'P1'}}}},
     chats:{w:{id:'w',project:'P',account:'a',role:'worker',status:'active'},
       root:{id:'root',project:'P',account:'a',role:'conductor',status:'active'}}
   }));

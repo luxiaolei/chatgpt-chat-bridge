@@ -200,7 +200,7 @@ test("unrouted resource notice survives a formal successor ACK and delivers once
 spec=importlib.util.spec_from_file_location("coordinator","src/coordinator.py");c=importlib.util.module_from_spec(spec);spec.loader.exec_module(c)
 with tempfile.TemporaryDirectory() as root:
  p=pathlib.Path(root);config=p/"config";state=p/"state";config.mkdir();state.mkdir()
- reg={"accounts":{"a":{"identity":"fixture"}},"projects":{"P":{}},"chats":{
+ reg={"accounts":{"a":{"identity":"fixture"}},"projects":{"P":{"bindings":{"a":{"projectUrl":"https://chatgpt.com/g/g-p-11111111111111111111111111111111/project","profileId":"fixture-profile"}}}},"chats":{
  "old":{"id":"old","project":"P","account":"a","role":"conductor","status":"retired"},
  "next":{"id":"next","project":"P","account":"a","role":"conductor","status":"pending-rotation"}}}
  (config/"registry.json").write_text(json.dumps(reg));(state/"runtime.json").write_text(json.dumps({"tasks":{},"projects":{},"sessions":{}}))

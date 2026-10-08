@@ -184,14 +184,14 @@ set_runtime_fixture '{"version":2,"projects":{},"tasks":{},"sessions":{}}'
 "$ROOT/bin/chat-bridge" watch --quiet >/dev/null
 [[ "$(wc -l < "$LOG" | tr -d ' ')" == "2" ]]
 
-# An active task with no cooldown reaches Ego/browser work.
+# An active task and its separate scoped prune obey the same pacing lane.
 set_runtime_fixture '{"version":2,"projects":{},"tasks":{"T-1":{"taskId":"T-1","project":"X","role":"worker","status":"RUNNING"}},"sessions":{}}'
 python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.last" <<'PY'
 import pathlib,sys,time
 pathlib.Path(sys.argv[1]).write_text(str(time.time()-11)+"\n")
 PY
 "$ROOT/bin/chat-bridge" watch --quiet >/dev/null
-[[ "$(wc -l < "$LOG" | tr -d ' ')" == "3" ]]
+[[ "$(wc -l < "$LOG" | tr -d ' ')" == "4" ]]
 
 # A busy pacing lock also fails fast.
 echo "pacing phase: explicit busy lock"
@@ -218,7 +218,7 @@ pathlib.Path(sys.argv[1]).write_text(str(time.time()-11)+"\n")
 pathlib.Path(sys.argv[2]).write_text(str(time.time()-31)+"\n")
 PY
 "$ROOT/bin/chat-bridge" new --project X --name Y --message Z >/dev/null
-[[ "$(wc -l < "$LOG" | tr -d ' ')" == "4" ]]
+[[ "$(wc -l < "$LOG" | tr -d ' ')" == "5" ]]
 HEAVY_STAMP="$(cat "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.heavy.last")"
 python3 - "$CHAT_BRIDGE_STATE_DIR/ui-pacing-$PACE_SCOPE.last" <<'PY'
 import pathlib,sys,time

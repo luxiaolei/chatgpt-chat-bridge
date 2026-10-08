@@ -17,6 +17,91 @@ async function fixture(){
   return {state,directory,body,descriptor:{format:manifest.format,operationId:op,claimOrdinal:1,directory,manifestSha256:sha(raw)}};
 }
 
+test('the frozen canonical route fences TARGET, input witness and Send for both creation and existing chats',async()=>{
+  const home='https://chatgpt.com/g/g-p-'+'a'.repeat(32)+'/project';
+  for(const phase of ['TARGET_OBSERVED','BEFORE_INPUT','INPUT_VERIFIED','SEND_INTENT']) {
+    const f=await fixture();
+    try {
+      const manifest=JSON.parse(await fs.readFile(path.join(f.directory,'manifest.json'),'utf8'));
+      manifest.route={projectId:'g-p-'+'a'.repeat(32),profileId:'P1',identityHash:sha('login')};
+      const bytes=JSON.stringify(manifest)+'\n';await fs.writeFile(path.join(f.directory,'manifest.json'),bytes);
+      const j=await openAttempt(f.state,{...f.descriptor,manifestSha256:sha(bytes)});
+      const data=url=>({url,targetUrl:url,profileId:'P1',nativeWitness:{url,accountIdentityHash:sha('login')}});
+      for(const url of [home.replace('chatgpt.com','foreign.example'),home.replace('a'.repeat(32),'b'.repeat(32)),home.replace('/project','/project/c/foreign'),home.replace('https://','https://user@')])
+        await assert.rejects(()=>j.record(phase,data(url)),/DELIVERY_ROUTE_CHANGED/);
+      if(phase==='TARGET_OBSERVED')await assert.rejects(()=>j.record(phase,{...data(home),profileId:'P2'}),/DELIVERY_ROUTE_CHANGED/);
+      if(phase==='INPUT_VERIFIED')await assert.rejects(()=>j.record(phase,{...data(home),nativeWitness:{url:home,accountIdentityHash:sha('foreign')}}),/DELIVERY_ROUTE_CHANGED/);
+      await j.record(phase,data(home));
+      assert.equal((await fs.readdir(f.directory)).length,2);
+    }finally{await fs.rm(f.state,{recursive:true,force:true});}
+  }
+});
+
+test('first claim freezes the route, later registry changes cannot retarget it or create a new UNKNOWN',()=>{
+  const code=String.raw`import tempfile,pathlib,json,sys,hashlib
+sys.path.insert(0,str(pathlib.Path('src').resolve()));import coordinator as c
+with tempfile.TemporaryDirectory() as root:
+ p=pathlib.Path(root);config=p/'config';state=p/'state';config.mkdir();state.mkdir()
+ home='https://chatgpt.com/g/g-p-'+'a'*32+'/project';identity='login'
+ reg={'accounts':{'a':{'identity':identity}},'projects':{'P':{'bindings':{'a':{'projectUrl':home,'profileId':'P1'}}}},'chats':{}}
+ (config/'registry.json').write_text(json.dumps(reg));(state/'runtime.json').write_text(json.dumps({'tasks':{}}))
+ db=c.connection(config,state);op='11111111-1111-4111-8111-111111111111'
+ db.execute("INSERT INTO operations(id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,role,message,task_id,created_at,updated_at,not_before) VALUES(?,?,?,'QUEUED','P','a',?,'owner','worker','body','T',?,?,0)",(op,op,'hash',c.account_id(identity),c.stamp(),c.stamp()));db.commit()
+ row=c.claim(db);route=json.loads(row['reclaim_route']);assert route['projectId']=='g-p-'+'a'*32
+ attempt=c.delivery_attempt_module().prepare(state,row);assert c.delivery_attempt_module().verify_current(state,db,attempt)['id']==op
+ reg['projects']['P']['bindings']['a']['projectUrl']=home.replace('a'*32,'b'*32)
+ db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(reg),));db.commit()
+ try:c.delivery_attempt_module().verify_current(state,db,attempt);raise AssertionError('mutable route accepted')
+ except ValueError as e:assert str(e)=='DELIVERY_ROUTE_CHANGED'
+ db.execute("UPDATE operations SET status='QUEUED',not_before=0");db.commit()
+ c.run_bridge=lambda *args,**kwargs:(_ for _ in ()).throw(AssertionError('child started'))
+ c.work_one(db);after=db.execute('SELECT * FROM operations WHERE id=?',(op,)).fetchone()
+ assert after['status']=='FAILED_PRE_SEND' and json.loads(after['result'])['childStarted'] is False,dict(after)
+ assert json.loads(after['reclaim_route'])==route
+ print('PASS immutable route, admission and proven prechild rejection')`;
+  const result=spawnSync('python3',['-c',code],{encoding:'utf8'});assert.equal(result.status,0,result.stderr);assert.match(result.stdout,/PASS immutable route/);
+});
+
+test('a new claim without a verified Profile fails before starting a child, unlike an untouched legacy claim',()=>{
+  const code=String.raw`import tempfile,pathlib,json,sys
+sys.path.insert(0,str(pathlib.Path('src').resolve()));import coordinator as c
+with tempfile.TemporaryDirectory() as root:
+ p=pathlib.Path(root);config=p/'config';state=p/'state';config.mkdir();state.mkdir()
+ reg={'accounts':{'a':{'identity':'login'}},'projects':{'P':{'bindings':{'a':{'projectUrl':'https://chatgpt.com/g/g-p-'+'a'*32+'/project'}}}},'chats':{}}
+ (config/'registry.json').write_text(json.dumps(reg));(state/'runtime.json').write_text(json.dumps({'tasks':{}}))
+ db=c.connection(config,state);op='11111111-1111-4111-8111-111111111111'
+ db.execute("INSERT INTO operations(id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,role,message,task_id,created_at,updated_at,not_before) VALUES(?,?,?,'QUEUED','P','a',?,'owner','worker','body','T',?,?,0)",(op,op,'hash',c.account_id('login'),c.stamp(),c.stamp()));db.commit()
+ c.run_bridge=lambda *args,**kwargs:(_ for _ in ()).throw(AssertionError('unfenced child started'))
+ c.work_one(db);row=db.execute('SELECT * FROM operations WHERE id=?',(op,)).fetchone()
+ assert row['status']=='FAILED_PRE_SEND' and row['reason']=='DELIVERY_ROUTE_UNPROVEN',dict(row)
+ assert json.loads(row['reclaim_route'])=={} and json.loads(row['result'])['childStarted'] is False
+ db.execute("UPDATE operations SET status='QUEUED',attempts=3,reclaim_route=NULL");db.commit()
+ legacy=c.claim(db);assert legacy['reclaim_route'] is None and legacy['attempts']==4
+ print('PASS explicit unproven route and preserved legacy history')`;
+  const r=spawnSync('python3',['-c',code],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);assert.match(r.stdout,/PASS explicit unproven/);
+});
+
+test('a committed notification redirect cannot overwrite a stale claim or historical UNKNOWN route',()=>{
+  const code=String.raw`import tempfile,pathlib,json,sys
+sys.path.insert(0,str(pathlib.Path('src').resolve()));import coordinator as c
+with tempfile.TemporaryDirectory() as root:
+ p=pathlib.Path(root);config=p/'config';state=p/'state';config.mkdir();state.mkdir()
+ home='https://chatgpt.com/g/g-p-'+'a'*32+'/project'
+ reg={'accounts':{'a':{'identity':'one'},'b':{'identity':'two'}},'projects':{'P':{'bindings':{a:{'projectUrl':home,'profileId':'P1'} for a in ['a','b']}}},'chats':{'old':{'id':'old','project':'P','account':'a','status':'retired'},'new':{'id':'new','project':'P','account':'b','status':'active','role':'owner'}}}
+ (config/'registry.json').write_text(json.dumps(reg));(state/'runtime.json').write_text(json.dumps({'tasks':{}}))
+ db=c.connection(config,state);op='11111111-1111-4111-8111-111111111111'
+ db.execute("INSERT INTO operations(id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,role,message,task_id,created_at,updated_at,not_before,kind) VALUES(?,?,?,'QUEUED','P','a',?,'old','old','owner','body','T',?,?,0,'callback')",(op,op,'hash',c.account_id('one'),c.stamp(),c.stamp()))
+ db.execute("INSERT INTO session_successors VALUES('old','project:P:role:owner','new',2,'now')");db.commit()
+ claimed=c.claim(db)
+ for update in ["status='DELIVERY_UNKNOWN'","status='DISPATCHING',attempts=attempts+1","status='DISPATCHING',claimed_at=claimed_at+1"]:
+  db.execute('UPDATE operations SET '+update);db.commit();before=dict(db.execute('SELECT * FROM operations').fetchone())
+  try:c.retarget_notification(db,claimed);raise AssertionError('stale claim redirected')
+  except ValueError as e:assert str(e)=='DELIVERY_ATTEMPT_NO_LONGER_CURRENT',e
+  assert dict(db.execute('SELECT * FROM operations').fetchone())==before
+ print('PASS status, ordinal and timestamp CAS preserve exact historical route')`;
+  const r=spawnSync('python3',['-c',code],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);assert.match(r.stdout,/PASS status/);
+});
+
 test('same-claim evidence is private and a restarted writer cannot arm another Send',async()=>{
   const f=await fixture();
   try{
@@ -113,7 +198,7 @@ os.environ.pop('CHAT_BRIDGE_FROM_ACCOUNT_ID',None)
 s=importlib.util.spec_from_file_location('coordinator',pathlib.Path('src/coordinator.py').resolve());c=importlib.util.module_from_spec(s);s.loader.exec_module(c)
 with tempfile.TemporaryDirectory(prefix='bridge-fence-') as temp:
  root=pathlib.Path(temp);config=root/'config';state=root/'state';config.mkdir();state.mkdir()
- reg={'accounts':{'a':{'identity':'synthetic-user'}},'projects':{'P':{'activeAccount':'a','bindings':{'a':{'projectUrl':'https://chatgpt.com/g/g-p-'+'a'*32+'/project','spaceName':'fixture'}}}},'chats':{'owner':{'id':'owner','project':'P','account':'a','role':'conductor','status':'active'},'worker':{'id':'worker','project':'P','account':'a','role':'worker','status':'active'}}}
+ reg={'accounts':{'a':{'identity':'synthetic-user'}},'projects':{'P':{'activeAccount':'a','bindings':{'a':{'projectUrl':'https://chatgpt.com/g/g-p-'+'a'*32+'/project','spaceName':'fixture','profileId':'P1'}}}},'chats':{'owner':{'id':'owner','project':'P','account':'a','role':'conductor','status':'active'},'worker':{'id':'worker','project':'P','account':'a','role':'worker','status':'active'}}}
  (config/'registry.json').write_text(json.dumps(reg));(state/'runtime.json').write_text(json.dumps({'tasks':{},'sessions':{},'projects':{}}))
  db=c.connection(config,state)
  op=c.submit(db,{'requestId':'evidence-fence','callerRef':'owner','sessionRef':'worker','message':'exact'})
@@ -124,7 +209,7 @@ with tempfile.TemporaryDirectory(prefix='bridge-fence-') as temp:
  original=db.execute("SELECT payload FROM documents WHERE kind='registry'").fetchone()[0]
  changed=json.loads(original);changed['accounts']['a']['identity']='different-login'
  db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(changed),));db.commit()
- identity_denied=subprocess.run(cmd,input=json.dumps(ctx),text=True,capture_output=True);assert identity_denied.returncode==2 and 'DELIVERY_ACCOUNT_IDENTITY_CHANGED' in identity_denied.stderr,identity_denied.stderr
+ identity_denied=subprocess.run(cmd,input=json.dumps(ctx),text=True,capture_output=True);assert identity_denied.returncode==2 and 'DELIVERY_ROUTE_CHANGED' in identity_denied.stderr,identity_denied.stderr
  db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(original,));db.commit()
  db.execute("INSERT OR REPLACE INTO control_state(scope,mode,epoch,reason,updated_at) VALUES('global','PAUSED',99,'synthetic pause','now')");db.commit()
  denied=subprocess.run(cmd,input=json.dumps(ctx),text=True,capture_output=True);assert denied.returncode==2 and 'DELIVERY_ADMISSION_CHANGED' in denied.stderr,denied.stderr

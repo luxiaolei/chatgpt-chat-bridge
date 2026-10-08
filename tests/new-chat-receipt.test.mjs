@@ -10,7 +10,7 @@ test('uncertain first creation keeps a non-routing original-operation candidate,
   await mkdir(config);await mkdir(state);
   const projectId='g-p-'+'a'.repeat(32),cid='11111111-1111-4111-8111-111111111111',uid='22222222-2222-4222-8222-222222222222';
   const projectUrl='https://chatgpt.com/g/'+projectId+'/project',afterUrl=projectUrl.replace('/project','/c/'+cid);
-  const reg={accounts:{a:{identity:'one'},b:{identity:'two'}},projects:{P:{activeAccount:'a',bindings:{a:{projectId,projectUrl},b:{projectId,projectUrl}}}},
+  const reg={accounts:{a:{identity:'one'},b:{identity:'two'}},projects:{P:{activeAccount:'a',bindings:{a:{projectId,projectUrl,profileId:"P1"},b:{projectId,projectUrl,profileId:"P2"}}}},
     chats:{controller:{id:'controller',project:'P',account:'a',role:'conductor',status:'active'}}};
   await writeFile(path.join(config,'registry.json'),JSON.stringify(reg));await writeFile(path.join(state,'runtime.json'),JSON.stringify({tasks:{}}));
   const worker=path.join(root,'fake-bridge'),receipt={ok:false,deliveryStage:'SEND_ATTEMPTED',code:'DELIVERY_UNCONFIRMED',

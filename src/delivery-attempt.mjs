@@ -35,6 +35,16 @@ export async function openAttempt(stateDirectory, descriptor){
   return {manifest,async record(phase,data={},message=null){
     if(!phases.has(phase))throw new Error('DELIVERY_PHASE_INVALID');
     if(message!==null&&sha(message)!==manifest.messageSha256)throw new Error('DELIVERY_ATTEMPT_MESSAGE_MISMATCH');
+    if(manifest.route && ['TARGET_OBSERVED','BEFORE_INPUT','INPUT_VERIFIED','SEND_INTENT'].includes(phase)) {
+      const route=manifest.route;
+      const value=data.url||data.targetUrl||data.nativeWitness?.url||data.snapshot?.url;
+      let url;try{url=new URL(value);}catch{throw new Error('DELIVERY_ROUTE_CHANGED');}
+      const target=url.pathname.match(/^\/g\/(g-p-[0-9a-f]{32})(?:-[^/]+)?\/(?:project|c\/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\/?$/i);
+      if(url.origin!=='https://chatgpt.com'||url.username||url.password||!target||target[1].toLowerCase()!==route.projectId||
+         phase==='TARGET_OBSERVED'&&data.profileId!==route.profileId||
+         phase==='INPUT_VERIFIED'&&data.nativeWitness?.accountIdentityHash!==route.identityHash)
+        throw new Error('DELIVERY_ROUTE_CHANGED');
+    }
     if(phase==='OBSERVED'&&++observation>128)throw new Error('DELIVERY_OBSERVATION_BUDGET_EXCEEDED');
     const name=phases.get(phase)+'-'+phase+(phase==='OBSERVED'?'-'+String(observation).padStart(3,'0'):'')+'.json';
     const bytes=Buffer.from(JSON.stringify({format:FORMAT,operationId:manifest.operationId,claimOrdinal:manifest.claimOrdinal,

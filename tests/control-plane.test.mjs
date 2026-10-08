@@ -420,7 +420,7 @@ print(json.dumps([m.parse_worker_receipt(subprocess.CompletedProcess([],c[1],c[2
 
 test("queued notifications wait for a committed successor and then follow it", async()=>{
   for(const kind of ["management","callback"]) {
-    const f=await fixture();
+    const f=await fixture({twoAccounts:true});
     try {
       const parse=r=>{assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);};
       let op;
@@ -434,12 +434,13 @@ test("queued notifications wait for a committed successor and then follow it", a
         const r=spawnSync("python3",["-c","import sqlite3,json,sys;db=sqlite3.connect(sys.argv[1]);"+script+";db.commit()",path.join(f.state,"bridge.sqlite3")],{encoding:"utf8"});
         assert.equal(r.status,0,r.stderr);
       };
-      sql("reg=json.loads(db.execute(\"select payload from documents where kind='registry'\").fetchone()[0]);reg['chats']['controller']['status']='retired';reg['chats']['successor']={**reg['chats']['controller'],'id':'successor','status':'active'};db.execute(\"update documents set payload=? where kind='registry'\",(json.dumps(reg),))");
+      sql("reg=json.loads(db.execute(\"select payload from documents where kind='registry'\").fetchone()[0]);reg['chats']['controller']['status']='retired';reg['chats']['successor']={**reg['chats']['controller'],'id':'successor','status':'active','account':'b'};db.execute(\"update documents set payload=? where kind='registry'\",(json.dumps(reg),))");
       assert.equal(parse(f.call("work-one")).status,"WAITING_ROUTE");
       assert.equal(parse(f.call("status",[op.operationId])).status,"WAITING_ROUTE");
       sql("db.execute(\"insert into session_successors values(?,?,?,?,?)\",('controller','project:P:role:conductor','successor',2,'2026-09-30T00:00:00Z'))");
       const sent=parse(f.call("work-one"));
-      assert.equal(sent.status,"SENT");assert.equal(sent.sessionRef,"successor");
+      assert.equal(sent.status,"SENT",JSON.stringify(sent));assert.equal(sent.sessionRef,"successor");
+      assert.equal(sent.account,"b");
       assert.match(await readFile(f.log,"utf8"),/^send successor /m);
       if(kind==="management") assert.equal(parse(f.call("control",["ack","--event","rotation-wake","--caller-ref","successor","--status","ACKNOWLEDGED","--message","received"])).status,"ACKNOWLEDGED");
     } finally {await rm(f.root,{recursive:true,force:true});}

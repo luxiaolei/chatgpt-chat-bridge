@@ -20,12 +20,13 @@ with tempfile.TemporaryDirectory() as root:
  (config/"registry.json").write_text(json.dumps(reg));(state/"runtime.json").write_text(json.dumps(rt));db=c.connection(config,state)
  db.execute("INSERT INTO operations(id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,role,message,task_id,created_at,updated_at,not_before) VALUES('op','op','hash','SENT','P','a',?,? ,?,'worker','body','T',?,?,0)",(c.account_id("login"),owner,sid,c.stamp(),c.stamp()));db.commit()
  env=dict(os.environ);env.pop("CHAT_BRIDGE_FROM_ACCOUNT_ID",None);env.pop("CHAT_BRIDGE_FROM_SPACE",None)
- def context():
+ def context(full=False):
   before=[tuple(r) for r in db.execute("SELECT * FROM operations")],[tuple(r) for r in db.execute("SELECT * FROM documents")]
   r=subprocess.run([sys.executable,"src/coordinator.py","page-reclaim-context",str(config),str(state)],input=json.dumps({"account":"a"}),capture_output=True,text=True,env=env);assert r.returncode==0,r.stderr
   assert before==([tuple(r) for r in db.execute("SELECT * FROM operations")],[tuple(r) for r in db.execute("SELECT * FROM documents")])
   assert db.execute("SELECT count(*) FROM task_results").fetchone()[0]==0
-  return json.loads(r.stdout)["sessionRefs"]
+  value=json.loads(r.stdout)
+  return value if full else value["sessionRefs"]
  def put(kind,value):db.execute("UPDATE documents SET payload=? WHERE kind=?",(json.dumps(value),kind));db.commit()
  for status in ["CANCELLED","FAILED"]:
   task["status"]=status;put("runtime",rt);assert context()==[],"terminal task remains permanently occupied"
@@ -37,6 +38,14 @@ with tempfile.TemporaryDirectory() as root:
  db.execute("UPDATE operations SET status='SENT',kind='rotation'");db.commit();assert context()==[]
  changed=copy.deepcopy(reg);changed["projects"]["P"]["bindings"]["a"]["projectUrl"]=home.replace("chatgpt.com","foreign.test");put("registry",changed);assert context()==[sid]
  put("registry",reg);db.execute("UPDATE operations SET status='SENT'");db.commit();assert context()==[]
+ changed=copy.deepcopy(rt);changed.setdefault("projects",{})["P"]={"watchdogPausedForUserControl":True};put("runtime",changed)
+ assert context(True)["unboundProjectIds"]==[pid];put("runtime",rt)
+ route={"projectId":pid,"accountId":c.account_id("login"),"identityHash":hashlib.sha256(b"login").hexdigest(),"profileId":"P1"}
+ db.execute("UPDATE operations SET reclaim_route=?",(json.dumps(route),));db.commit()
+ task["status"]="RUNNING";put("runtime",rt)
+ assert context(True)["unplacedTaskScopes"]==[{"taskId":"T","project":"P","account":"a","sessionId":sid,"projectIds":[pid]}]
+ for field,value in [("identityHash","wrong"),("profileId",None),("projectId",[]),("accountId","wrong")]:
+  broken={**route,field:value};db.execute("UPDATE operations SET reclaim_route=?",(json.dumps(broken),));db.commit();assert context(True)["unplacedTaskScopes"]==[],field
  print("PASS")`;
   const r=spawnSync('python3',['-c',code],{encoding:'utf8',timeout:15000});assert.equal(r.status,0,r.stderr);assert.equal(r.stdout.trim(),'PASS');
 });
@@ -57,6 +66,7 @@ d=sqlite3.connect(sys.argv[1]);scope=lambda x:hashlib.sha256(('identity:'+x).enc
 rows=[('unknown','a','one','P','DELIVERY_UNKNOWN',sys.argv[2],None),('unbound','alias','one','P','DELIVERY_UNKNOWN',None,None),('future','a','one','P','QUEUED',None,None),('queued-bound','a','one','P','QUEUED','queued-session',None),('sent','a','one','P','SENT','sent-session',None),('result-recorded','a','one','P','SENT','result-session',None),('foreign','b','two','P','DELIVERY_UNKNOWN',None,None),('native','a','one','P','DELIVERY_UNKNOWN','native-session','{}'),('failed','a','one','P','FAILED_PRE_SEND','failed-session',None),(sys.argv[3],'a','one','P','DISPATCHING',None,None)]
 for id,a,identity,p,status,sid,native in rows:
  d.execute('INSERT INTO operations (id,request_key,payload_hash,status,project,account_alias,account_id,caller_ref,session_ref,role,message,task_id,created_at,updated_at,not_before,attempts,claimed_at,native_target) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(id,id,'hash',status,p,a,scope(identity),'controller',sid,id,'body','t-'+id,'now','now',0,1,time.time(),native))
+ d.execute('UPDATE operations SET reclaim_route=? WHERE id=?',(json.dumps({'projectId':'g-p-'+'a'*32,'accountId':scope(identity),'profileId':'P1','identityHash':hashlib.sha256(identity.encode()).hexdigest()}),id))
 d.execute("INSERT INTO task_results (task_id,result_version,event_id,status,summary,payload_hash,recorded_at) VALUES ('t-result-recorded','1','e','COMPLETE','done','hash','now')")
 d.commit()`,[cid,current]);
     const before=await readFile(path.join(state,"bridge.sqlite3"));
@@ -66,6 +76,7 @@ d.commit()`,[cid,current]);
     assert.equal(call("page-reclaim-context",{account:"a"},{CHAT_BRIDGE_FROM_ACCOUNT_ID:"foreign"}).status,2);
     assert.equal(call("page-reclaim-context",{account:"missing"}).status,2);
     sql("import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);d.execute(\"DELETE FROM operations WHERE id='unbound'\");d.commit()");
+    sql("import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);d.execute(\"UPDATE operations SET reclaim_route=NULL WHERE id=?\",(sys.argv[2],));d.commit()",[current]);
     const prepare=spawnSync("python3",["-c",`import sqlite3,sys,json;sys.path.insert(0,sys.argv[1]);import delivery_attempt;d=sqlite3.connect(sys.argv[2]);d.row_factory=sqlite3.Row;print(json.dumps(delivery_attempt.prepare(sys.argv[3],d.execute('SELECT * FROM operations WHERE id=?',(sys.argv[4],)).fetchone())))`,path.resolve("src"),path.join(state,"bridge.sqlite3"),state,current],{encoding:"utf8",env});
     assert.equal(prepare.status,0,prepare.stderr);const attempt=JSON.parse(prepare.stdout);
     const admitted=call("page-reclaim-context",{account:"a",attempt});assert.equal(admitted.status,0,admitted.stderr);assert.deepEqual(JSON.parse(admitted.stdout).unboundProjectIds,[]);
@@ -73,11 +84,14 @@ d.commit()`,[cid,current]);
     const stale={...attempt,claimOrdinal:2};assert.equal(call("page-reclaim-context",{account:"a",attempt:stale}).status,2);
     sql("import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);d.execute(\"UPDATE operations SET status='DELIVERY_UNKNOWN' WHERE id=?\",(sys.argv[2],));d.commit()",[current]);
     assert.equal(call("page-reclaim-context",{account:"a",attempt}).status,2);
+    sql("import sqlite3,sys,json,hashlib;d=sqlite3.connect(sys.argv[1]);d.execute(\"UPDATE operations SET reclaim_route=? WHERE id=?\",(json.dumps({'projectId':'g-p-'+'a'*32,'accountId':hashlib.sha256(b'identity:one').hexdigest(),'profileId':'P1','identityHash':hashlib.sha256(b'one').hexdigest()}),sys.argv[2]));d.commit()",[current]);
     const retained=call("page-reclaim-context",{account:"alias"});assert.equal(retained.status,0,retained.stderr);assert.deepEqual(JSON.parse(retained.stdout).unboundProjectIds,[pid]);
     sql("import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);d.execute(\"UPDATE operations SET project='missing' WHERE id=?\",(sys.argv[2],));d.commit()",[current]);
-    assert.equal(JSON.parse(call("page-reclaim-context",{account:"a"}).stdout).unboundAny,true);
+    assert.deepEqual(JSON.parse(call("page-reclaim-context",{account:"a"}).stdout).unboundProjectIds,[pid]);
     sql(`import sqlite3,sys,json;d=sqlite3.connect(sys.argv[1]);d.execute("UPDATE operations SET project='P' WHERE id=?",(sys.argv[2],));r=json.loads(d.execute("SELECT payload FROM documents WHERE kind='registry'").fetchone()[0]);r['projects']['P']['bindings']['a']['projectUrl']=r['projects']['P']['bindings']['a']['projectUrl'].replace('https://chatgpt.com','https://foreign.example');d.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(r),));d.commit()`,[current]);
-    const foreignUrl=JSON.parse(call("page-reclaim-context",{account:"a"}).stdout);assert.equal(foreignUrl.unboundAny,true);assert.deepEqual(foreignUrl.unboundProjectIds,[]);
+    const foreignUrl=JSON.parse(call("page-reclaim-context",{account:"a"}).stdout);assert.equal(foreignUrl.unboundAny,false);assert.deepEqual(foreignUrl.unboundProjectIds,[pid]);
+    sql("import sqlite3,sys;d=sqlite3.connect(sys.argv[1]);d.execute(\"UPDATE operations SET reclaim_route=NULL WHERE id=?\",(sys.argv[2],));d.commit()",[current]);
+    assert.equal(JSON.parse(call("page-reclaim-context",{account:"a"}).stdout).unboundAny,true); // A legacy binding cannot be backfilled as original route proof.
     const finalBytes=await readFile(path.join(state,"bridge.sqlite3"));call("page-reclaim-context",{account:"a"});assert.deepEqual(await readFile(path.join(state,"bridge.sqlite3")),finalBytes);
   }finally{await rm(root,{recursive:true,force:true});}
 });
@@ -109,11 +123,11 @@ c.mark_capacity_wait(d,r,receipt);c.finish(d,dict(r),'QUEUED','CAPACITY_WAITING'
       const docs=JSON.parse(sql("import sqlite3,sys,json;d=sqlite3.connect(sys.argv[2]);print(json.dumps({k:json.loads(v) for k,v in d.execute('SELECT kind,payload FROM documents')}))"));
       let closed=0;
       const page={label:"p9",url:async()=>home,close:async()=>{closed++;}};
-      const task={spaceId:9,pages:async()=>[page],tabs:async()=>[{label:"p9",url:home,active:false,openedBy:"agent"}]};
-      const helper=await new AsyncFunction("loadRuntime","activeTaskStatus","orphanManagedPageCandidates","state","projectHomeId","coordinated","sameConversationUrl","composerIsEmpty",code+";return reclaimOrphanManagedPage;")(
+      const task={spaceId:9,pages:async()=>[page],tabs:async()=>closed?[]:[{label:"p9",url:home,active:false,openedBy:"agent"}]};
+      const helper=await new AsyncFunction("loadRuntime","activeTaskStatus","orphanManagedPageCandidates","state","projectHomeId","coordinated","sameConversationUrl","composerIsEmpty","assertInputSafe","listTaskSpaces",code+";return reclaimOrphanManagedPage;")(
         async()=>docs.runtime,globalThis.__CHAT_BRIDGE_TASK_POLICY__.activeTaskStatus,globalThis.__CHAT_BRIDGE_PAGE_POOL__.orphanManagedPageCandidates,
-        async()=>{change();return {approvalRequired:false,generating:false,composerCount:1,composerRawText:"",composerAttachmentsEmpty:true};},
-        projectHomeId,()=>context(),globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,globalThis.__CHAT_BRIDGE_TASK_POLICY__.composerIsEmpty);
+        async()=>{change();return {url:home,approvalRequired:false,generating:false,composerCount:1,composerRawText:"",composerAttachmentsEmpty:true};},
+        projectHomeId,()=>context(),globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,globalThis.__CHAT_BRIDGE_TASK_POLICY__.composerIsEmpty,async()=>"one",async()=>[{id:9,name:"managed",profileId:"P1",ownership:"agent",createdBy:"agent"}]);
       await helper(docs.registry,task,docs.registry.projects.P.bindings.a,"a");return closed;
     };
     const proof=context().preSendCapacityWaits;
@@ -139,7 +153,7 @@ c.finish(d,dict(r),'QUEUED','CAPACITY_WAITING',15,resource_receipt={'ok':False,'
     sql("import sqlite3,sys;d=sqlite3.connect(sys.argv[2]);d.execute(\"UPDATE operations SET status='DELIVERY_UNKNOWN' WHERE id='33333333-3333-4333-8333-333333333333'\");d.commit()");
     assert.deepEqual(context().preSendCapacityWaits,[]);
     assert.equal(context().capacityWaitRefusals.waiting,"OPERATION_DELIVERY_UNKNOWN");
-    assert.equal(context().unboundAny,false);assert.equal(context().unboundProjectIds.length,1);
+    assert.equal(context().unboundAny,true);assert.equal(context().unboundProjectIds.length,0);
     assert.equal(await reclaim(),0);
     sql("import sqlite3,sys;d=sqlite3.connect(sys.argv[2]);d.execute(\"UPDATE operations SET status='QUEUED',reason='CAPACITY_WAITING' WHERE id='33333333-3333-4333-8333-333333333333'\");d.commit()");
     const saved=sql("import sqlite3,sys,json;d=sqlite3.connect(sys.argv[2]);d.row_factory=sqlite3.Row;print(json.dumps(dict(d.execute(\"SELECT * FROM operations WHERE id='33333333-3333-4333-8333-333333333333'\").fetchone())))");

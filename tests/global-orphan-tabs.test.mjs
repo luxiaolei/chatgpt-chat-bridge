@@ -15,20 +15,21 @@ async function fixture(change=()=>{}) {
     loadRuntime=async()=>f.runtime;
     listTaskSpaces=async()=>f.spaces||[{id:7,name,profileId:'P1',ownership:'agent',createdBy:'agent'}];
     imageSessionOccupancy=()=>({occupied:false});
-    state=async page=>{(f.observedPages||=[]).push(page.label);return f.snapshot;};
+    state=async page=>{(f.observedPages||=[]).push(page.label);return {...f.snapshot,...f.snapshots?.[page.label],url:await page.url()};};
+    assertInputSafe=async(page,identity,url,options)=>{f.guardCalls=(f.guardCalls||0)+1;if(f.guardError)throw f.guardError;f.beforeCloseGuard?.(page);return identity;};
     coordinated=command=>{if(command!=='page-reclaim-context')throw Error(command);f.queries++;return f.context;};
-    const pages=f.tabs.map(tab=>({label:tab.label,url:async()=>tab.url,close:async()=>{f.closed.push(tab.label);if(f.closeError)throw f.closeError;}}));
+    const pages=f.tabs.map(tab=>({label:tab.label,url:async()=>tab.url,close:async()=>{f.closed.push(tab.label);if(f.closeError)throw f.closeError;if(!f.closeUnconfirmed)f.tabs=f.tabs.filter(t=>t.label!==tab.label);}}));
     openBoundTask=async(_r,_p,_a,options)=>{
-      f.opens=(f.opens||0)+1;if(!options.requireExistingSpace||options.spaceOverride.spaceId!==(f.expectedSpaceId||7))throw Error('exact existing Space required');
+      f.opens=(f.opens||0)+1;if(f.pausedProject===_p)throw Error('paused');if(!options.requireExistingSpace||options.spaceOverride.spaceId!==(f.expectedSpaceId||7))throw Error('exact existing Space required');
       return {binding:{...f.binding,...options.spaceOverride},task:{spaceId:f.expectedSpaceId||7,pages:async()=>pages,tabs:async()=>f.tabs}};
     };
-    return await pruneManagedOrphanTabs(f.reg,'P','a');
+    return await pruneManagedOrphanTabs(f.reg,f.allProjects?null:'P','a');
   `)(f,name);
   f.out=run;return f;
 }
 
 test("global orphan cleanup reuses the guarded helper once per verified Space",async()=>{
-  const blank=await fixture();assert.deepEqual(blank.closed,["p1"]);assert.equal(blank.out.length,1);assert.equal(blank.queries,1);
+  const blank=await fixture();assert.deepEqual(blank.closed,["p1"]);assert.equal(blank.out.length,1);assert.equal(blank.queries,2);
   const project=await fixture(f=>{f.tabs.shift();});assert.deepEqual(project.closed,["p2"]);
 });
 
@@ -46,6 +47,7 @@ test("automatic orphan cleanup cannot bypass UNKNOWN, actual Project, registered
     f=>{f.runtime.tasks.t={project:"P",account:"a",status:"RUNNING"};}
   ])assert.deepEqual((await fixture(change)).closed,[]);
   let observed;await assert.rejects(()=>fixture(f=>{observed=f;f.closeError=Error("close acknowledgement unknown");}),/acknowledgement unknown/);assert.deepEqual(observed.closed,["p1"]);
+  await assert.rejects(()=>fixture(f=>{observed=f;f.closeUnconfirmed=true;}),/PAGE_CLOSE_UNCONFIRMED/);assert.deepEqual(observed.closed,["p1"]);
 });
 
 test("a precisely placed live conversation protects itself while an unrelated orphan is reclaimed",async()=>{
@@ -56,12 +58,64 @@ test("a precisely placed live conversation protects itself while an unrelated or
     f.tabs.push({label:"live",url,active:true,openedBy:"agent"});
   };
   const f=await fixture(setup);assert.deepEqual(f.closed,["p1"]);assert.equal(f.reg.chats[cid].page,"live");assert.equal(f.runtime.tasks.live.status,"RUNNING");
-  const project=await fixture(f=>{setup(f);f.tabs.shift();f.context.sessionRefs=[cid];});assert.deepEqual(project.closed,["p2"]);assert.deepEqual(project.observedPages,["p2"]);
+  const project=await fixture(f=>{setup(f);f.tabs.shift();f.context.sessionRefs=[cid];});assert.deepEqual(project.closed,["p2"]);assert.deepEqual(project.observedPages,["p2","p2"]);
   for(const change of [
     f=>{delete f.reg.chats[cid];},f=>{delete f.reg.chats[cid].page;},f=>{f.reg.chats[cid].spaceId=8;},f=>{f.reg.chats[cid].profileId="P2";},
     f=>{f.tabs.at(-1).url=home.replace(/project$/,"c/33333333-3333-4333-8333-333333333333");},
     f=>{f.runtime.tasks.live.project="HZOS";},f=>{f.runtime.tasks.live.account="foreign";f.reg.accounts.foreign={identity:"other-login"};},
     f=>{f.runtime.tasks.live.watchdogPausedForUserControl=true;},f=>{f.context.unboundAny=true;},f=>{f.context.unboundProjectIds=["g-p-"+"a".repeat(32)];}
+  ])assert.deepEqual((await fixture(f=>{setup(f);change(f);})).closed,[]);
+});
+
+test("a blocked first home cannot starve another safe page or another verified Project in the Space",async()=>{
+  const later=await fixture(f=>{
+    f.tabs.shift();f.tabs.push({...f.tabs[0],label:"p3"});
+    f.snapshots={p2:{generating:true}};
+  });
+  assert.deepEqual(later.closed,["p3"]);
+  for(const paused of [false,true]) {
+    const f=await fixture(f=>{
+      f.allProjects=true;f.tabs.shift();
+      const other=home.replace("a".repeat(32),"b".repeat(32));
+      f.reg.projects.Q={bindings:{a:{...f.binding,projectUrl:other}}};
+      f.tabs.push({...f.tabs[0],label:"p3",url:other});
+      f.context.unboundProjectIds=["g-p-"+"a".repeat(32)];
+      if(paused)f.pausedProject="P";
+    });
+    assert.deepEqual(f.closed,["p3"]);assert.equal(f.out.length,1);
+  }
+});
+
+test("orphan close checks the login and rechecks late draft, approval, generation, UNKNOWN and tab control",async()=>{
+  for(const change of [
+    f=>{f.guardError=Error("INPUT_LOGIN_MISMATCH");},
+    f=>{f.beforeCloseGuard=()=>{f.snapshot.composerRawText="new draft";};},
+    f=>{f.beforeCloseGuard=()=>{f.snapshot.approvalRequired=true;};},
+    f=>{f.beforeCloseGuard=()=>{f.snapshot.generating=true;};},
+    f=>{f.beforeCloseGuard=()=>{f.context.unboundAny=true;};},
+    f=>{f.beforeCloseGuard=()=>{f.tabs[0].active=true;};},
+    f=>{f.beforeCloseGuard=()=>{f.tabs[0].openedBy="user";};}
+    ,f=>{f.beforeCloseGuard=()=>{f.spaces=[{id:7,name,profileId:"P1",ownership:"user",createdBy:"agent"}];};}
+  ]) {
+    const f=await fixture(f=>{f.tabs.shift();change(f);});
+    assert.deepEqual(f.closed,[]);assert.equal(f.guardCalls,1);
+  }
+});
+
+test("an unplaced task permits only unrelated Projects proven by its immutable route",async()=>{
+  const setup=f=>{
+    f.tabs.shift();f.runtime.tasks.t={taskId:"t",project:"Q",account:"a",sessionId:null,status:"RUNNING"};
+    f.context.unplacedTaskScopes=[{taskId:"t",project:"Q",account:"a",sessionId:null,projectIds:["g-p-"+"b".repeat(32)]}];
+  };
+  assert.deepEqual((await fixture(setup)).closed,["p2"]);
+  for(const change of [
+    f=>{f.context.unplacedTaskScopes=[];},
+    f=>{f.context.unplacedTaskScopes[0].taskId="other";},
+    f=>{f.context.unplacedTaskScopes[0].projectIds=["g-p-"+"a".repeat(32)];},
+    f=>{f.runtime.tasks.t.watchdogPausedForUserControl=true;},
+    f=>{f.context.unboundAny=true;},
+    f=>{f.beforeCloseGuard=()=>{f.context.unplacedTaskScopes=[];};},
+    f=>{f.beforeCloseGuard=()=>{f.runtime.tasks.late={taskId:"late",project:"P",account:"a",status:"RUNNING"};};}
   ])assert.deepEqual((await fixture(f=>{setup(f);change(f);})).closed,[]);
 });
 
