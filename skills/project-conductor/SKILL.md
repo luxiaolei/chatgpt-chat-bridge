@@ -174,25 +174,25 @@ Treat **model** and **Thinking Level** as two separate controls.
 
 For the current ChatGPT Web deployment used by this Bridge:
 
-- `Latest` is a moving model choice; its underlying version is not verified by the UI label alone.
+- `GPT-6` is the default model choice, verified against the current visible model radio.
 - Thinking is the independent slider: `Instant → Medium → High → Extra High → Pro`.
 - `Pro` is the rightmost Thinking position.
-- `GPT-6 Pro` in Bridge commands is a convenience preset for `model=Latest, effort=Pro`; report the observed UI choice as `Latest`, not as a verified fixed GPT-6 version. It is not a separate account/Space routing decision.
+- `GPT-6 Pro` in Bridge commands is a convenience preset for `model=GPT-6, effort=Pro`; verify model and Thinking independently and report the observed UI choice. The UI label does not independently prove the underlying backend version. It is not a separate account/Space routing decision.
 
-New sessions should default to `Latest` unless a task explicitly requires an older pinned model. If effort is omitted, the page default is preserved; controllers should set effort deliberately when task quality matters.
+New sessions and unspecified queue/rotation models default to `GPT-6`. If effort is omitted, the page default is preserved; controllers should set effort deliberately when task quality matters. Explicit legacy `Latest` preferences remain supported where that choice is available; GPT-6 never falls back to Latest.
 
 Recommended policy:
 
-- Routine lookup, routing, status checks: `Latest + Instant/Medium`.
-- Normal implementation, debugging, scoped research: `Latest + High`.
-- Architecture, difficult review, ambiguous debugging: `Latest + Extra High`.
-- Highest-stakes synthesis, hard cross-system reasoning, final critical review: `Latest + Pro`.
+- Routine lookup, routing, status checks: `GPT-6 + Instant/Medium`.
+- Normal implementation, debugging, scoped research: `GPT-6 + High`.
+- Architecture, difficult review, ambiguous debugging: `GPT-6 + Extra High`.
+- Highest-stakes synthesis, hard cross-system reasoning, final critical review: `GPT-6 + Pro`.
 
 When creating or configuring a worker, prefer explicit model/effort when deterministic allocation matters:
 
 ```bash
-chat-bridge new --project "PROJECT" --name ROLE --model Latest --effort High --message "..."
-chat-bridge model ROLE Latest --effort "Extra High" --project "PROJECT"
+chat-bridge new --project "PROJECT" --name ROLE --model GPT-6 --effort High --message "..."
+chat-bridge model ROLE GPT-6 --effort "Extra High" --project "PROJECT"
 chat-bridge model ROLE "GPT-6 Pro" --project "PROJECT"
 ```
 
