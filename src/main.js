@@ -4799,7 +4799,7 @@ else if(cmd==="new"){
     await recordDeliveryStage("TARGET_OBSERVED",{project:p,account:a,sessionId:null,
       url:await page.url(),page:page.label||null,spaceId:task.spaceId||null,profileId:binding.profileId||null});
     await page.waitForSelector(COMPOSER_SELECTOR,{state:"visible",timeout:15000});
-    const model=opt("model","Latest"), requestedEffort=opt("effort",null);
+    const model=opt("model","GPT-6"), requestedEffort=opt("effort",null);
     let applied=null;
     await assertInputSafe(page,reg.accounts?.[a]?.identity,binding.projectUrl,{discardDraft:true});
     try {

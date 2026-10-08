@@ -82,6 +82,20 @@ test("queue persists and forwards requested model/effort to new worker and task 
   } finally { await rm(f.root,{recursive:true,force:true}); }
 });
 
+test("unspecified worker model persists GPT-6 through the queue and completion contract", async()=>{
+  const f=await fixture();
+  try{
+    let r=f.call("submit",[],{requestId:"gpt6-default",callerRef:"controller",role:"worker",message:"do it"});
+    assert.equal(r.status,0,r.stderr);
+    const op=JSON.parse(r.stdout);
+    assert.equal(op.requestedModel,"GPT-6");assert.equal(op.requestedEffort,null);
+    r=f.call("work-one");assert.equal(r.status,0,r.stderr);
+    assert.equal(JSON.parse(r.stdout).status,"SENT");
+    const log=await readFile(f.log,"utf8");
+    assert.match(log,/--model GPT-6/);assert.match(log,/requested_model: GPT-6/);
+  } finally { await rm(f.root,{recursive:true,force:true}); }
+});
+
 test("same logical new role is atomically reserved", async()=>{
   const f=await fixture({twoAccounts:true});
   try{

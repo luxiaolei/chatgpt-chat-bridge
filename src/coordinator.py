@@ -450,7 +450,7 @@ def control_footer(task_id, caller_ref, role, model, effort, policy_version, wor
         f"caller_ref: {caller_ref}",
         f"role: {role}",
         f"resource_policy_version: {policy_version}",
-        f"requested_model: {model or 'Latest'}",
+        f"requested_model: {model or 'GPT-6'}",
         f"requested_effort: {effort or 'page-default'}",
         "completion_contract:",
         "- Update durable GitHub/authorized project state first when the task changes durable work.",
@@ -715,7 +715,7 @@ def submit(db, payload):
                 target_chat = matches[0]
                 target = target_chat["id"]
         if requested_model is None:
-            requested_model = (target_chat or {}).get("model") or "Latest"
+            requested_model = (target_chat or {}).get("model") or "GPT-6"
         if requested_effort is None and target_chat:
             requested_effort = normalize_effort(target_chat.get("effort"))
 
@@ -2270,7 +2270,7 @@ def rotation_prepare(db, payload):
     epoch = (existing["epoch"] if existing else 1)
     rotation_id = str(uuid.uuid4())
     handoff_hash = hashlib.sha256(handoff.encode()).hexdigest()
-    requested_model = str(payload.get("model") or old_chat.get("model") or "Latest")
+    requested_model = str(payload.get("model") or old_chat.get("model") or "GPT-6")
     requested_effort = normalize_effort(payload.get("effort") or old_chat.get("effort"))
     message = "\n".join([
         "[CHATBRIDGE ROLE HANDOFF v1]",
@@ -2428,7 +2428,7 @@ def rotation_ack(db, payload, config, state):
             "Do not replay work that is already complete.",
             "[/ROTATION RESUME]",
         ])
-        requested_model=live.get("requestedModel") or successor_chat.get("model") or "Latest"
+        requested_model=live.get("requestedModel") or successor_chat.get("model") or "GPT-6"
         requested_effort=normalize_effort(live.get("requestedEffort") or successor_chat.get("effort"))
         resume_ops.append((op_id,op_key,hashlib.sha256(resume_message.encode()).hexdigest(),
                            "QUEUED",row["project"],successor_chat["account"],account_id(identity),caller,successor,
