@@ -7,6 +7,50 @@ import {spawnSync} from "node:child_process";
 
 const coordinator=path.resolve("src/coordinator.py");
 
+test("a successful page allocation cannot become a capacity wait when its state cleanup fails",async()=>{
+  const source=await readFile(path.resolve("src/main.js"),"utf8"),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  const code=source.slice(source.indexOf("async function newManagedPage"),source.indexOf("\nasync function controlPage"));
+  for(const mode of ["primary","reclaimed primary","overflow","previous overflow","advanced overflow"]) {
+    const failure=Error(mode.includes("primary")?"state cleanup: page budget reached":"state cleanup unavailable"),reasons=[];
+    let primaryCalls=0,created=0,clears=0;
+    const page={label:"created"},full=async()=>{throw Error("page budget reached");};
+    const create=async()=>{created++;return page;};
+    const primary={spaceId:1,newPage:async()=>{primaryCalls++;return mode==="primary"||mode==="reclaimed primary"&&primaryCalls===2?create():full();}};
+    const head={spaceId:2,newPage:mode==="overflow"?create:full},next={spaceId:3,newPage:create};
+    const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError",code+";return newManagedPage;")(
+      e=>/page budget reached/.test(e.message),async()=>{clears++;throw failure;},
+      async(_r,_p,_a,t)=>mode==="reclaimed primary"&&t===primary?{}:null,async()=>null,
+      async(_r,_p,_a,_b,reason)=>{reasons.push(reason);return {firstAt:Date.now()-121000,reason};},120,
+      async(_r,_p,_a,_b,options={})=>({task:options.previous||options.advance?next:head,mapping:{previousSpaces:mode==="previous overflow"?[{}]:[]}}),
+      (_b,_w,reason)=>Object.assign(Error(reason),{code:"CAPACITY_WAIT"})
+    );
+    await assert.rejects(()=>allocate({},"P","a",primary,{spaceName:"main"},null,{allowOverflow:true}),e=>e===failure,mode);
+    assert.equal(created,1,mode);assert.equal(clears,1,mode);
+    assert.deepEqual(reasons,mode.includes("primary")?[]:["PAGE_BUDGET_NO_SAFE_RECLAIM:main"],mode);
+  }
+});
+
+test("an uncertain overflow allocation error cannot become a retryable capacity wait",async()=>{
+  const source=await readFile(path.resolve("src/main.js"),"utf8"),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  const code=source.slice(source.indexOf("async function newManagedPage"),source.indexOf("\nasync function controlPage"));
+  for(const mode of ["first overflow","reclaimed overflow","advanced overflow"]) {
+    const failure=Error("allocation response lost"),reasons=[];let calls=0;
+    const full=async()=>{throw Error("page budget reached");},primary={spaceId:1,newPage:full};
+    const head={spaceId:2,newPage:async()=>{calls++;if(mode==="advanced overflow"||mode==="reclaimed overflow"&&calls===1)return full();throw failure;}};
+    const next={spaceId:3,newPage:async()=>{calls++;throw failure;}};
+    const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError",code+";return newManagedPage;")(
+      e=>/page budget reached/.test(e.message),()=>{throw Error("unexpected cleanup");},
+      async(_r,_p,_a,t)=>mode==="reclaimed overflow"&&t===head?{}:null,async()=>null,
+      async(_r,_p,_a,_b,reason)=>{reasons.push(reason);return {firstAt:Date.now()-121000,reason};},120,
+      async(_r,_p,_a,_b,options={})=>({task:options.advance?next:head}),
+      (_b,_w,reason)=>Object.assign(Error(reason),{code:"CAPACITY_WAIT"})
+    );
+    await assert.rejects(()=>allocate({},"P","a",primary,{spaceName:"main"},null,{allowOverflow:true}),e=>e===failure,mode);
+    assert.equal(calls,mode==="first overflow"?1:2,mode);
+    assert.deepEqual(reasons,["PAGE_BUDGET_NO_SAFE_RECLAIM:main"],mode);
+  }
+});
+
 test("normal allocation reuses the verified mapped pool before the expansion delay with real state storage",async()=>{
   const source=await readFile(process.env.CHAT_BRIDGE_CAPACITY_TEST_MAIN||path.resolve("src/main.js"),"utf8"),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
   const section=(a,z)=>source.slice(source.indexOf(a),source.indexOf(z,source.indexOf(a)));
@@ -143,10 +187,11 @@ test("overflow exhaustion keeps resource waiting without recursion or another re
       (_b,_w,reason)=>Error("capacity waiting: "+reason)
     );
     if(mode==="orphan") assert.equal((await allocate({},"P","a",primary,{spaceName:"main"},null,{allowOverflow:true})).page.label,"p9");
-    else await assert.rejects(()=>allocate({},"P","a",primary,{spaceName:"main"},null,{allowOverflow:true}),/capacity waiting: OVERFLOW_UNAVAILABLE:/);
+    else await assert.rejects(()=>allocate({},"P","a",primary,{spaceName:"main"},null,{allowOverflow:true}),mode==="non-budget error"?/^Error: connection lost$/:/capacity waiting: OVERFLOW_UNAVAILABLE:/);
     assert.equal(selections,1);assert.equal(allocations,["still full","orphan"].includes(mode)?2:1);assert.equal(cleared,mode==="orphan"?1:0);
     assert.deepEqual(calls,mode==="non-budget error"?[["idle",1],["orphan",1]]:mode==="still full"?[["idle",1],["orphan",1],["idle",9]]:[["idle",1],["orphan",1],["idle",9],["orphan",9]]);
     assert.equal(reasons[0],"PAGE_BUDGET_NO_SAFE_RECLAIM:main");
+    if(mode==="non-budget error") assert.equal(reasons.length,1);
   }
 });
 
