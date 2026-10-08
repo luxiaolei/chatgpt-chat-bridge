@@ -101,6 +101,60 @@ test('complete observed FORMAT shape admits only its native getter/serializer wi
  assert.equal(support.supported,true);
 });
 
+test('measured native graph completes ownership before body or capability admission',async()=>{
+ const graph=JSON.parse(await readFile(new URL('./native-submission-graph-fixture.json',import.meta.url),'utf8'));
+ assert.equal(graph.completeDescriptorScan,true);
+ for(const capabilityOnly of [false,true]) {
+  let native;
+  const witness=await inspectCharacterized(context=>{
+   native=context.native;
+   const first=context.host.__reactFiber$fixture,chain=[first];
+   for(let i=1;i<graph.ancestors;i++) {chain[i-1].return={};chain.push(chain[i-1].return);}
+   chain.at(-1).return=null;
+   for(const {ancestor,length} of graph.hookChains) {
+    let hook=chain[ancestor].memoizedState={memoizedState:{deps:[]}};
+    for(let n=1;n<length;n++) {hook.next={memoizedState:{deps:[]}};hook=hook.next;}
+    hook.next=null;
+   }
+  },capabilityOnly);
+  assert.equal(capabilityOnly?witness.supported:witness.body,capabilityOnly?true:fixture.body);
+  assert.equal(native.getterCalls,capabilityOnly?0:1);
+ }
+});
+
+test('recognized but incomplete ancestry retains an explicit private unsupported diagnostic',async()=>{
+ let captured,native;
+ await assert.rejects(inspectCharacterized(context=>{
+  captured=context.env;native=context.native;
+  let current=context.host.__reactFiber$fixture;
+  for(let i=1;i<513;i++) {current.return={};current=current.return;}
+  current.return=null;
+ },true),error=>{
+  assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');
+  assert.equal(error.nativeAdapter.status,'UNSUPPORTED');
+  assert.equal(JSON.stringify(error).includes(fixture.body),false);
+  return true;
+ });
+ assert.equal(captured.retained.backup.formatRecognized,true);
+ assert.equal(captured.retained.backup.truncated,true);
+ assert.equal(captured.retained.backup.limit,'FIBER_SCAN_INCOMPLETE');
+ assert.deepEqual([captured.retained.backup.limits.fibers,captured.retained.backup.limits.hooks],[512,1024]);
+ assert.equal(native.getterCalls,0);assert.equal(native.serializerCalls,0);
+});
+
+test('recognized oversized dependency admission cannot label its sampled prefix complete',async()=>{
+ let captured,native;
+ await assert.rejects(inspectCharacterized(context=>{
+  captured=context.env;native=context.native;
+  context.host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return e=>up(rS.getText(),e)')();
+  context.host.__reactFiber$fixture.memoizedState.memoizedState.deps=[context.editor,...Array(64).fill(null)];
+ },true),/NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED/);
+ assert.equal(captured.retained.backup.formatRecognized,true);
+ assert.equal(captured.retained.backup.truncated,true);
+ assert.equal(captured.retained.backup.limit,'FIBER_SCAN_INCOMPLETE');
+ assert.equal(native.getterCalls,0);assert.equal(native.serializerCalls,0);
+});
+
 test('characterized submit shape tolerates identifier renaming without accepting a different expression',async()=>{
  for(const submit of ['v=>submit(editor.getText(),v)','$e=>_send($editor.getText(),$e)'])
   assert.equal((await inspectCharacterized(({host})=>{
@@ -288,13 +342,15 @@ test('NSV2-R1 native execution cannot consume a foreign default document hidden 
 test('NSV2-R2 capability and body require a complete bounded ancestor scan before editor uniqueness',async t=>{
  const observations=[];
  for(const capabilityOnly of [true,false]) for(const mode of [
-  'second-at-15','second-at-16','complete-16','incomplete-17','cycle','opaque-return','prototype-limit'
+  'second-at-15','second-at-16','second-at-511','second-at-512','complete-16','complete-17','complete-512','incomplete-513','cycle','opaque-return','prototype-limit'
  ]) {
   let native,returnGetterCalls=0;
   const outcome=await inspectCharacterized(context=>{
    native=context.native;
    const first=context.host.__reactFiber$fixture;
-   const lastAncestor=mode==='second-at-16'||mode==='incomplete-17'?16:15;
+   const lastAncestor=mode==='second-at-16'||mode==='complete-17'?16:
+    mode==='second-at-511'||mode==='complete-512'?511:
+    mode==='second-at-512'||mode==='incomplete-513'?512:15;
    let current=first;
    for(let ancestor=1;ancestor<=lastAncestor;ancestor++) {
     current.return={};
@@ -318,7 +374,7 @@ test('NSV2-R2 capability and body require a complete bounded ancestor scan befor
  }
  t.diagnostic(JSON.stringify(observations));
  for(const row of observations) {
-  const expected=row.mode==='complete-16'?'ACCEPTED':'REJECTED';
+  const expected=row.mode.startsWith('complete-')?'ACCEPTED':'REJECTED';
   assert.equal(row.returnGetterCalls,0,'opaque ancestor links must never be invoked');
   assert.equal(row.status,expected,JSON.stringify({capabilityOnly:row.capabilityOnly,mode:row.mode}));
   if(row.status==='ACCEPTED') assert.equal(row.valid,true);
@@ -374,7 +430,7 @@ test('NSV2-R2-HOOK opaque or exhausted hook scan fields cannot hide a second edi
 
 test('NSV2-R2-HOOK finite data links preserve compatibility at prototype and hook bounds',async t=>{
  const observations=[];
- for(const capabilityOnly of [true,false]) for(const mode of ['entry','next','state','deps','complete-64','incomplete-65','cycle']) {
+ for(const capabilityOnly of [true,false]) for(const mode of ['entry','next','state','deps','complete-1024','incomplete-1025','cycle']) {
   let native;const counts={opaqueCalls:0};
   const outcome=await inspectCharacterized(context=>{
    native=context.native;
@@ -382,8 +438,8 @@ test('NSV2-R2-HOOK finite data links preserve compatibility at prototype and hoo
    else {
     const first=context.host.__reactFiber$fixture.memoizedState;
     let hook=first;
-    for(let i=1;i<64;i++) {hook.next={memoizedState:{deps:[context.editor]}};hook=hook.next;}
-    if(mode==='incomplete-65') hook.next={memoizedState:{deps:[{...context.editor}]}};
+    for(let i=1;i<1024;i++) {hook.next={memoizedState:{deps:[context.editor]}};hook=hook.next;}
+    if(mode==='incomplete-1025') hook.next={memoizedState:{deps:[{...context.editor}]}};
     if(mode==='cycle') hook.next=first;
    }
   },capabilityOnly).then(witness=>({status:'ACCEPTED',valid:capabilityOnly?witness.supported:witness.body===fixture.body}),
@@ -392,7 +448,7 @@ test('NSV2-R2-HOOK finite data links preserve compatibility at prototype and hoo
  }
  t.diagnostic(JSON.stringify(observations));
  for(const row of observations) {
-  const rejected=['incomplete-65','cycle'].includes(row.mode);
+  const rejected=['incomplete-1025','cycle'].includes(row.mode);
   assert.equal(row.status,rejected?'REJECTED':'ACCEPTED',JSON.stringify(row));
   assert.equal(row.opaqueCalls,0);
   if(rejected) assert.match(row.error,/NATIVE_SUBMISSION_UNVERIFIED/);
@@ -603,7 +659,7 @@ test('admission refuses truncated editor dependencies, hooks and serializer sour
    if(mode==='dependencies') fiber.memoizedState.memoizedState.deps=[context.editor,...Array(63).fill(null),{...context.editor}];
    else {
     let hook=fiber.memoizedState;
-    for(let i=1;i<64;i++) {hook.next={memoizedState:{deps:[]}};hook=hook.next;}
+    for(let i=1;i<1024;i++) {hook.next={memoizedState:{deps:[]}};hook=hook.next;}
     hook.next={memoizedState:{deps:[{...context.editor}]}};
    }
   },true),/NATIVE_SUBMISSION_UNVERIFIED/);
