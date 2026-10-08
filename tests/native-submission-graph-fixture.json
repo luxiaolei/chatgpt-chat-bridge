@@ -1,0 +1,11 @@
+{
+  "format": "chat-bridge-native-graph-characterization-v1",
+  "observedAt": "2026-10-08T15:43:50.608Z",
+  "privateEvidenceSHA256": "fe881c8accf9ee58574155713f5a853ec0eed2820b200577a58b2aa576a36bec",
+  "ancestors": 380,
+  "hookChains": [{"ancestor": 47, "length": 615}, {"ancestor": 55, "length": 774}],
+  "composerEditors": 1,
+  "completeDescriptorScan": true,
+  "nativeGetterCalls": 0,
+  "send": 0
+}

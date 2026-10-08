@@ -2202,6 +2202,9 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     }
     const firstFiber=fiber;
     const candidates=new Map(),composerEditors=new Set();
+    // ponytail: recharacterize before admitting graphs beyond these measured native layout budgets.
+    const limits={fibers:512,hooks:1024,dependencies:64,prototype:8,
+      editorCandidates:128,functionSourceBytes:16*1024,evidenceBytes:256*1024};
     let formatRecognized=false,admissionTruncated=false,ancestryIncomplete=false,hookScanIncomplete=false;
     const hookValue=(object,key)=>{
       const field=scanProperty(object,key);
@@ -2218,7 +2221,7 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     // Full intrinsic sources come from the retained normal FORMAT failure; no normalization or wildcard body.
     const characterizedShape={getter:formats[1].getter,serializer:"(n,a)=>{var r;let i,l=((r=new C.m((0,s.b)(n)).removeMark(0,n.content.size,n.type.schema.marks.literalPaste).doc).descendants((e,t,n,a)=>{if(!e.isText||null==n)return;let l=e.marks.find(T.g);if(null==l)return;let s=0===a?void 0:n.child(a-1).marks.find(T.g);if(null!=s&&l.eq(s))return;let c=e.text??\"\",d=t+e.nodeSize;for(let e=a+1;e<n.childCount;e++){let t=n.child(e),a=t.marks.find(T.g);if(!t.isText||null==a||!l.eq(a))break;c+=t.text??\"\",d+=t.nodeSize}let u=(0,o.b)(c);(d!==t+e.nodeSize||null==u)&&(null==i&&(i=new C.m(r)),null==u?i.removeMark(t,d,l):i.addMark(t,d,l.type.create({...l.attrs,href:u})))}),i?.doc??r);return!a?.preserveParagraphSpacing&&l.childCount>0&&l.content.content.every(e=>\"paragraph\"===e.type.name)?Array.from({length:l.childCount},(n,a)=>{let r=l.child(a),o=t.get(r);return null==o&&(o=e.serialize(r).replace(/\\n$/,\"\"),t.set(r,o)),o}).join(\"\\n\"):e.serialize(l).replace(/\\n$/,\"\")}"};
     const submitShape=/^([A-Za-z_$][\w$]*)=>([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\.getText\(\),\1\)$/;
-    for(let i=0;fiber&&i<16;i++,fiber=value(fiber,'return')) {
+    for(let i=0;fiber&&i<limits.fibers;i++,fiber=value(fiber,'return')) {
       const parent=scanProperty(fiber,'return');
       if(parent.kind==='accessor' || parent.kind==='truncated') ancestryIncomplete=true;
       const submit=describe(value(fiber,'memoizedProps'),'onSubmit').source;
@@ -2229,7 +2232,7 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
         (identifiers && new Set(identifiers.slice(1)).size===3?characterizedShape:null);
       if(format && !format.serializer) formatRecognized=true;
       let hook=hookValue(fiber,'memoizedState');
-      for(let n=0;hook&&n<64;n++,hook=hookValue(hook,'next')) {
+      for(let n=0;hook&&n<limits.hooks;n++,hook=hookValue(hook,'next')) {
         const deps=hookValue(hookValue(hook,'memoizedState'),'deps');
         if(!Array.isArray(deps)) continue;
         if(deps.length>64) {admissionTruncated=true;break;}
@@ -2263,19 +2266,14 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     }
     // An unvisited ancestor, opaque link or exhausted prototype lookup cannot prove uniqueness.
     if(fiber) ancestryIncomplete=true;
-    if(formatRecognized && (admissionTruncated || ancestryIncomplete || hookScanIncomplete || ownershipScanIncomplete)) {
-      if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
-      return fail();
-    }
-    if(!formatRecognized) {
+    if(!formatRecognized || admissionTruncated || ancestryIncomplete || hookScanIncomplete || ownershipScanIncomplete) {
       if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
       // Raw diagnostic sampling cannot contribute to an admission or invoke native accessors.
       const value=(object,key)=>property(object,key).value;
       const sample=(object,key)=>describe(object,key,property(object,key));
-      const seen=new Set(),fibers=[],limits={fibers:16,hooks:64,dependencies:64,prototype:8,
-        editorCandidates:128,functionSourceBytes:16*1024,evidenceBytes:256*1024};
+      const seen=new Set(),fibers=[];
       const evidence={format:'chat-bridge-native-format-evidence-v1',observedAt:new Date().toISOString(),
-        url:location.href.length<=4096?location.href:null,composerAncestor,limits,truncated:false,limit:null,fibers};
+        url:location.href.length<=4096?location.href:null,composerAncestor,formatRecognized,limits,truncated:false,limit:null,fibers};
       const refuse=limit=>{evidence.truncated=true;evidence.limit||=limit;};
       // ponytail: fixed diagnostic budgets; increase only for a measured characterization need.
       let remaining=limits.evidenceBytes-1024-bytes(JSON.stringify(evidence));
@@ -2285,13 +2283,13 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
         remaining-=size;list.push(item);return true;
       };
       if(evidence.url===null) refuse('EVIDENCE_BYTES_LIMIT');
-      for(let current=firstFiber,ancestor=0;current&&ancestor<16&&!evidence.truncated;current=value(current,'return'),ancestor++) {
+      for(let current=firstFiber,ancestor=0;current&&ancestor<limits.fibers&&!evidence.truncated;current=value(current,'return'),ancestor++) {
         const props=property(current,'memoizedProps'),row={ancestor,propsKind:props.kind,
           onSubmit:sample(props.value,'onSubmit'),returnKind:property(current,'return').kind,editors:[],opaque:[]};
         if(!keep(fibers,row)) break;
         if(row.onSubmit.sourceTruncated) {refuse('FUNCTION_SOURCE_LIMIT');break;}
         let hook=hookValue(current,'memoizedState'),index=0;
-        for(;hook&&index<64&&!evidence.truncated;hook=hookValue(hook,'next'),index++) {
+        for(;hook&&index<limits.hooks&&!evidence.truncated;hook=hookValue(hook,'next'),index++) {
           const deps=hookValue(hookValue(hook,'memoizedState'),'deps');
           if(!Array.isArray(deps)) continue;
           for(let dep=0;dep<Math.min(value(deps,'length'),64)&&!evidence.truncated;dep++) {
