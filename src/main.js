@@ -587,6 +587,7 @@ function spaceProtection(reg, runtime, binding, task, tabs=[]) {
 async function reclaimIdlePageSlot(reg, project, account, task, binding, excludeChatId=null, onlyChatId=null) {
   const targetProject=projectHomeId(binding.projectUrl);
   if(!targetProject) return null;
+  if(coordinated("page-reclaim-context",{account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null}).unboundAny) return null;
   const rt=await loadRuntime();
   const tabs=await task.tabs().catch(()=>[]);
   const protection=spaceProtection(reg,rt,binding,task,tabs);
@@ -652,6 +653,7 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
 }
 
 async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseControlBinding=null) {
+  if(coordinated("page-reclaim-context",{account:account||binding.account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null}).unboundAny) return null;
   if(reuseControlBinding && (Number(reuseControlBinding.spaceId)!==Number(task.spaceId) ||
     reuseControlBinding.spaceName!==binding.spaceName || reuseControlBinding.profileId!==binding.profileId)) return null;
   if(reuseControlBinding) {
@@ -3703,6 +3705,7 @@ async function detachTerminalTaskPages(reg, project=null, account=null) {
     if(!spaceOverride.spaceName || !Number.isSafeInteger(Number(spaceOverride.spaceId)) || Number(spaceOverride.spaceId)<=0 || !spaceOverride.profileId) continue;
     let opened;
     try {
+      if(coordinated("page-reclaim-context",{account:chat.account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null}).unboundAny) continue;
       const available=await listTaskSpaces();
       if(!available.some(space=>space.name===spaceOverride.spaceName && Number(space.id)===Number(spaceOverride.spaceId) &&
         space.profileId===spaceOverride.profileId && space.ownership==="agent")) continue;
@@ -3718,6 +3721,7 @@ async function detachTerminalTaskPages(reg, project=null, account=null) {
 
 async function pruneManagedOrphanTabs(reg, project=null, account=null, options={}) {
   if(typeof listTaskSpaces!=="function") return [];
+  if(account && coordinated("page-reclaim-context",{account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null}).unboundAny) return [];
   const closed=[];
   const identity=account?reg.accounts?.[account]?.identity:null;
   const sameAccount=alias=>!account || alias===account || (!!identity && reg.accounts?.[alias]?.identity===identity);
@@ -3758,7 +3762,9 @@ async function pruneManagedOrphanTabs(reg, project=null, account=null, options={
       if(seen.has(key) || reg.accounts[record.account].identity!==reg.accounts[scoped[0].account].identity) continue;
       seen.add(key);
       let opened;
-      try { opened=await openBoundTask(reg,record.project,record.account,{pauseOnUserControl:true,requireExistingSpace:true,
+      try {
+        if(!account && coordinated("page-reclaim-context",{account:record.account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null}).unboundAny) continue;
+        opened=await openBoundTask(reg,record.project,record.account,{pauseOnUserControl:true,requireExistingSpace:true,
         spaceOverride:{spaceName:space.name,spaceId:space.id,profileId:space.profileId}}); }
       catch { continue; }
       if(Number(opened.task.spaceId)!==Number(space.id)) continue;
@@ -4427,7 +4433,10 @@ else if(cmd==="space" && ["scan","map","restore"].includes(args[1])){
 }
 else if(cmd==="space"){
   const sub=args[1]||"show";
-  if(sub==="gc") {
+  const reclaimAccount=sub==="prune"?(accountArg||(!args.includes("--all")&&project?activeAccount(reg,project):null)):null;
+  if(sub==="prune" && reclaimAccount && coordinated("page-reclaim-context",{account:reclaimAccount,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null}).unboundAny) {
+    print({ok:true,state:"DEFERRED",reason:"PAGE_RECLAIM_UNBOUND_UNKNOWN",project,account:reclaimAccount,closed:[]});
+  } else if(sub==="gc") {
     print(await gcAgentSpaces(reg,args.includes("--confirm")));
   } else if(sub==="consolidate") {
     const a=accountArg||reg.defaultAccount||DEFAULT_ACCOUNT;

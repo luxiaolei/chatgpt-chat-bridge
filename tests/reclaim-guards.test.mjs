@@ -37,7 +37,7 @@ async function fixture(orphan=false,change=()=>{}) {
     globalThis.__CHAT_BRIDGE_TASK_POLICY__.activeTaskStatus,globalThis.__CHAT_BRIDGE_TASK_POLICY__.composerIsEmpty,
     globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,
     projectHomeId,
-    (command,payload)=>{assert.equal(command,"page-reclaim-context");f.queries++;if(f.readContext)return f.readContext(payload);return f.queries>1?f.freshContext||f.context:f.context;},
+    (command,payload)=>{assert.equal(command,"page-reclaim-context");f.queries++;if(f.readContext)return f.readContext(payload);return f.states>0?f.freshContext||f.context:f.context;},
     (_r,_p,a)=>a||"a",async(_r,_p,_a,options)=>{
       f.openOptions=options;
       if(f.terminalOverflow && (!options?.spaceOverride || f.forceMainReturn))return {binding,task:{spaceId:1,page:label=>({label,close:async()=>{f.mainClosed=(f.mainClosed||0)+1;}}),tabs:async()=>[{label:"p9",active:false,openedBy:"agent",url:url.replace(cid,"99999999-9999-4999-8999-999999999999")}]}};
@@ -121,7 +121,7 @@ test("proven pre-send capacity waiting without a page cannot veto safe orphan re
   };
   const out=await fixture(true,waiting);
   assert.equal(out.closed,1);
-  assert.equal(out.queries,2);
+  assert.ok(out.queries>=2);
   for(const [name,change] of [
     ["no authoritative proof",f=>{delete f.context.preSendCapacityWaits;}],
     ["another task",f=>{f.context.preSendCapacityWaits[0].taskId="other";}],
@@ -151,7 +151,7 @@ test("capacity proof is rechecked after page observation before closing",async()
     f.context.preSendCapacityWaits=[{taskId:"waiting",project:"P",account:"a",sessionId:"missing"}];
     f.freshContext={sessionRefs:["missing"],unboundProjectIds:[],unboundAny:false,preSendCapacityWaits:[]};
   });
-  assert.equal(out.closed,0);assert.equal(out.queries,2);
+  assert.equal(out.closed,0);assert.ok(out.states>=1);assert.ok(out.queries>=2);
 });
 
 test("both reclaim helpers preserve user, draft, permission, generation and image occupants",async()=>{
