@@ -5,15 +5,23 @@ import "../src/model-policy.js";
 const { modelPreset, observedModel, selectModelLabel } = globalThis.__CHAT_BRIDGE_MODEL_POLICY__;
 
 test("default and current version aliases do not implicitly request Pro", () => {
-  for (const spec of [undefined, null, "", "  ", "Latest", "GPT-6", "6"]) {
-    assert.deepEqual(modelPreset(spec), { radio: "Latest", effort: null, label: "Latest" });
+  for (const spec of [undefined, null, "", "  ", "GPT-6", "GPT 6", "6"]) {
+    assert.deepEqual(modelPreset(spec), { radio: "GPT-6", effort: null, label: "GPT-6" });
   }
 });
 
-test("current Pro presets keep the Latest radio label separate from version", () => {
-  for (const spec of ["GPT-6 Pro", "latest pro", "6 Pro"]) {
-    assert.deepEqual(modelPreset(spec), { radio: "Latest", effort: "Pro", label: "Latest" });
+test("current Pro presets select GPT-6 with independent thinking effort", () => {
+  for (const spec of ["GPT-6 Pro", "GPT 6 Pro", "6 Pro"]) {
+    assert.deepEqual(modelPreset(spec), { radio: "GPT-6", effort: "Pro", label: "GPT-6" });
   }
+});
+
+test("explicit legacy Latest preferences are retained without claiming a fixed version", () => {
+  assert.deepEqual(modelPreset("Latest"), { radio: "Latest", effort: null, label: "Latest" });
+  assert.deepEqual(modelPreset("latest pro"), { radio: "Latest", effort: "Pro", label: "Latest" });
+  assert.equal(selectModelLabel(["GPT-6", "GPT-5.6 Sol"], modelPreset().radio), "GPT-6");
+  assert.equal(selectModelLabel(["6", "GPT-5.6 Sol"], modelPreset().radio), "6");
+  assert.throws(() => selectModelLabel(["Latest", "GPT-5.6 Sol"], modelPreset().radio), /Unavailable/);
 });
 
 test("older version Pro presets never select Latest", () => {

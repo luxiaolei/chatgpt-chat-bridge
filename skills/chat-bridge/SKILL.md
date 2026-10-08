@@ -326,33 +326,33 @@ Model choice and Thinking Level are independent controls.
 
 In the current ChatGPT Web deployment used by this Bridge:
 
-- `Latest` is a moving model choice; its underlying version is not verified by the UI label alone.
+- `GPT-6` is the default model choice, verified against the current visible model radio.
 - Thinking Level is the slider: `Instant → Medium → High → Extra High → Pro`.
 - `Pro` is the rightmost slider position.
-- The Bridge preset `GPT-6 Pro` selects `Latest + Pro`; the observed UI choice must be reported as `Latest`, not as a verified fixed GPT-6 version.
+- The Bridge preset `GPT-6 Pro` selects `GPT-6 + Pro`; model and effort must both be verified independently.
 
-New sessions default to `Latest`. They do **not** force `Pro`; if effort is omitted the page default is preserved.
+New sessions and unspecified queue/rotation models default to `GPT-6`. They do **not** force `Pro`; if effort is omitted the page default is preserved. Explicit legacy `Latest` preferences are retained for deployments offering that choice, without inferring a fixed version. GPT-6 never falls back to Latest.
 
 Select the two controls separately:
 
 ```bash
-chat-bridge model research-agent Latest --project "PROJECT NAME"
+chat-bridge model research-agent GPT-6 --project "PROJECT NAME"
 chat-bridge effort research-agent High --project "PROJECT NAME"
 ```
 
 Or set them together:
 
 ```bash
-chat-bridge model research-agent Latest --effort "Extra High" --project "PROJECT NAME"
+chat-bridge model research-agent GPT-6 --effort "Extra High" --project "PROJECT NAME"
 chat-bridge model research-agent "GPT-6 Pro" --project "PROJECT NAME"
 ```
 
 Recommended controller allocation:
 
-- routine lookup/routing/status: `Latest + Instant/Medium`
-- normal implementation/debugging/research: `Latest + High`
-- difficult architecture/review/ambiguous debugging: `Latest + Extra High`
-- highest-stakes synthesis/final critical review: `Latest + Pro`
+- routine lookup/routing/status: `GPT-6 + Instant/Medium`
+- normal implementation/debugging/research: `GPT-6 + High`
+- difficult architecture/review/ambiguous debugging: `GPT-6 + Extra High`
+- highest-stakes synthesis/final critical review: `GPT-6 + Pro`
 
 Older pinned models such as `5.6 Pro` or `5.5 Pro` remain explicit compatibility choices; never silently downgrade to them. Unavailable/ambiguous choices fail explicitly.
 

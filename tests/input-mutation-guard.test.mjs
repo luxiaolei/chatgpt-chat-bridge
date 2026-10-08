@@ -63,7 +63,7 @@ async function run(f,fn) {
     fetch:async(path,options)=>{f.calls.push('auth');assert.equal(path,'/api/auth/session');assert.equal(options?.cache,'no-store');assert.equal(options?.credentials,'same-origin');if(f.change.draftDuringLogin)f.composer.textContent=f.composer.innerText='new user draft';if(f.change.loginUnavailable)throw Error('offline');
       return {ok:!f.change.badResponse,json:async()=>({user:{id:f.login}})};},
     __CHAT_BRIDGE_INPUT_RESUMED_USER_CONTROL__:!!f.change.resumedUserControl,
-    __CHAT_BRIDGE_ARGS__:['new','--project','P','--account','a','--message',message,'--strict-model']};
+    __CHAT_BRIDGE_ARGS__:f.change.args||['new','--project','P','--account','a','--message',message,'--strict-model']};
   const saved=new Map([...Object.keys(values),'__CHAT_BRIDGE_WATCH'].map(k=>[k,Object.getOwnPropertyDescriptor(globalThis,k)]));
   try {
     for(const[k,v]of Object.entries(values))Object.defineProperty(globalThis,k,{value:v,configurable:true,writable:true});
@@ -76,8 +76,8 @@ async function run(f,fn) {
       'if(f.change.afterIntent)recordDeliveryStage=async phase=>{if(phase==="DRAFT_DISCARD_INTENT")f.change.afterIntent(f);};',
       "coordinated=command=>{if(f.change.paused)throw Error('DRAFT_DISCARD_ADMISSION_DENIED');return command==='page-reclaim-context'?{sessionRefs:[],unboundProjectIds:[],unboundAny:false}:{ok:true,control:{mode:'RUNNING'}};};",
       "saveDraftBackup=async backup=>{f.backup=backup;return {sha256:'synthetic',bytes:1};};",
-      "applyModelSpec=async()=>{f.calls.push('model');return {model:'Latest',effort:'High'};};",
-      "setEffort=async()=>{f.calls.push('effort');return true;};saveRegistry=async()=>{};touchRuntime=async()=>{};print=()=>{};",
+      "applyModelSpec=async(_page,model)=>{f.calls.push('model');f.modelRequest=model;if(f.change.modelError)throw Error(f.change.modelError);return {model:'Latest',effort:'High'};};",
+      "setEffort=async()=>{f.calls.push('effort');return true;};saveRegistry=async()=>{f.calls.push('registry');};touchRuntime=async()=>{};print=value=>{f.printed=value;};",
       'openBoundTask=async()=>({task:{spaceId:2},binding:f.reg.projects.P.bindings.a});',
        'listTaskSpaces=async()=>[{id:2,name:"managed",profileId:"P1",ownership:"agent",createdBy:"agent"}];',
       'if(f.change.reclaim){loadRuntime=async()=>({tasks:{t:{taskId:"t",sessionId:chat.id,project:"P",account:"a",status:"CANCELLED"}}});imageSessionOccupancy=()=>({occupied:false});}',
@@ -116,6 +116,18 @@ test('authorized Project draft discard backs up raw text and enters the normal s
       assert.equal(f.backup?.rawText,raw,entry);
       assert.equal(f.calls.filter(x=>x==='discard').length,1,entry);assert.equal(f.calls.filter(x=>x==='fill').length,entry==='dispatch'?0:1,entry);
     }
+  }
+});
+test('direct new verifies the GPT-6 default and Pro before its first send without requiring strict-model',async()=>{
+  for(const model of [null,'GPT-6 Pro']) {
+    const args=['new','--project','P','--account','a','--message',message,...(model?['--model',model]:[])];
+    const f=fixture({args,modelError:'model/effort button disappeared'});
+    f.buttons.push(node('GPT-5.6 Sol High'));
+    await run(f,api=>assert.rejects(api.new(),/model\/effort button disappeared/));
+    assert.equal(f.modelRequest,model||'GPT-6');
+    assert.deepEqual(f.calls.filter(x=>/^(fill|key:|insert|send|registry)/.test(x)),[]);
+    assert.equal(f.printed,undefined);
+    assert.equal(Object.values(f.reg.chats).some(chat=>chat.verifiedModel),false);
   }
 });
 test('selected terminal reclaim reaches the actual input guard and native draft discard',async()=>{

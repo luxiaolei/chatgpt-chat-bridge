@@ -4799,13 +4799,13 @@ else if(cmd==="new"){
     await recordDeliveryStage("TARGET_OBSERVED",{project:p,account:a,sessionId:null,
       url:await page.url(),page:page.label||null,spaceId:task.spaceId||null,profileId:binding.profileId||null});
     await page.waitForSelector(COMPOSER_SELECTOR,{state:"visible",timeout:15000});
-    const model=opt("model","Latest"), requestedEffort=opt("effort",null);
+    const model=opt("model","GPT-6"), requestedEffort=opt("effort",null);
     let applied=null;
     await assertInputSafe(page,reg.accounts?.[a]?.identity,binding.projectUrl,{discardDraft:true});
     try {
       applied=await applyModelSpec(page,model,requestedEffort);
     } catch(error) {
-      if(args.includes("--strict-model") || !deferrableModelUiError(error)) throw error;
+      if(args.includes("--strict-model") || modelPreset(model).radio==="GPT-6" || !deferrableModelUiError(error)) throw error;
       const observed=observedModel((await state(page)).mode);
       applied={model,effort:requestedEffort||observed.effort||null,observed,deferredUntilDispatch:true};
     }

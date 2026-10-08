@@ -229,18 +229,18 @@ The bridge separates:
 A normal configuration may be:
 
 ```text
-Latest + High
+GPT-6 + High
 ```
 
-The `GPT-6 Pro` bridge preset is intentionally represented as:
+The `GPT-6 Pro` bridge preset is represented as:
 
 ```text
-Latest + Pro
+GPT-6 + Pro
 ```
 
-because the current ChatGPT UI exposes the highest path through the `Latest` model choice plus the rightmost `Pro` thinking level.
+The current ChatGPT UI exposes a verified `GPT-6` model radio and a separate thinking slider whose rightmost level is `Pro`.
 
-New sessions default to Latest without forcing an effort. 5.5/5.6 Pro retain the requested older radio version. Pro uses the slider's current maximum and checks displayed effort. No unavailable-model or quota fallback is silent. Callers receive `modelSelection` with observed model/effort/raw UI text; configured preferences are not evidence of the live model.
+New sessions and unspecified queue/rotation models default to GPT-6 without forcing an effort. Explicit legacy `Latest` and 5.5/5.6 preferences remain unchanged; `Latest` does not verify a fixed version. GPT-6 never falls back to Latest. Pro uses the slider's current maximum and checks displayed effort. No unavailable-model or quota fallback is silent. Callers receive `modelSelection` with observed model/effort/raw UI text; configured preferences are not evidence of the live model.
 
 When the current visible effort exactly matches the requested level, effort selection skips reopening the menu; model selection retains its radio confirmation, and different or unknown effort still requires slider and displayed-level verification.
 

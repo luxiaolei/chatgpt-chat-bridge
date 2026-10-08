@@ -1,7 +1,9 @@
 (function installModelPolicy(globalObject) {
   function modelPreset(spec) {
     const raw = String(spec ?? "").trim();
-    const latest = /^(?:(?:GPT[- ]?)?6|Latest)?(?:\s+(Pro))?$/i.exec(raw);
+    const current = /^(?:(?:GPT[- ]?)?6)?(?:\s+(Pro))?$/i.exec(raw);
+    if (current) return { radio: "GPT-6", effort: current[1] ? "Pro" : null, label: "GPT-6" };
+    const latest = /^Latest(?:\s+(Pro))?$/i.exec(raw);
     if (latest) return { radio: "Latest", effort: latest[1] ? "Pro" : null, label: "Latest" };
     const version = /^(?:GPT[- ]?)?(5\.[56])(?:\s+(Pro))?$/i.exec(raw);
     if (version) {

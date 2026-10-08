@@ -54,7 +54,8 @@ function parse(html) {
  return root;
 }
 function fixture(options={}) {
- const root=parse(fixtures[options.advanced?1:0]),picker=root.querySelector('[data-model-picker-view]');
+ const html=fixtures[options.advanced?1:0];
+ const root=parse(options.modelLabel?html.replaceAll('>Latest<','>'+options.modelLabel+'<'):html),picker=root.querySelector('[data-model-picker-view]');
  const content=picker.closest('[role="menu"]');
  const tracks=picker.children.filter(n=>n.attrs['aria-hidden']!==undefined);
  const radios=root.querySelectorAll('[role="menuitemradio"]'),slider=root.querySelector('[role="slider"]'),toggle=root.querySelector('[data-model-picker-view-toggle="true"]'),power=root.querySelector('[data-reasoning-slider="true"]');
@@ -213,6 +214,17 @@ test('captured simple view never uses inactive model radios to select Latest',as
 test('captured High to Latest plus Extra High sequence reaches active Thinking and confirms the exact level',async()=>{
  const f=fixture();const r=await f.api.applyModelSpec(f.page,'Latest','Extra High');
  assert.equal(r.effort,'Extra High');assert.equal(f.slider.getAttribute('aria-valuenow'),'3');assert.equal(f.calls.inactiveClicks,0);assert.equal(f.calls.send,0);
+});
+
+test('GPT-6 default and Pro use the verified radio and independent Thinking controls',async()=>{
+ // Reuse the captured layout with the GPT-6 radio observed on 2026-10-08.
+ for(const [spec,effort,expected] of [[undefined,'Extra High','Extra High'],['GPT-6 Pro',null,'Pro']]) {
+  const f=fixture({modelLabel:'GPT-6'});
+  const r=await f.api.applyModelSpec(f.page,spec,effort);
+  assert.equal(r.model,'GPT-6');assert.equal(r.effort,expected);
+  assert.equal(f.radios.find(r=>r.innerText==='GPT-6').getAttribute('aria-checked'),'true');
+  assert.equal(f.calls.inactiveClicks,0);assert.equal(f.calls.send,0);
+ }
 });
 
 
