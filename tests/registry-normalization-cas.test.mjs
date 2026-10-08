@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import * as crypto from 'node:crypto';
+import {isDeepStrictEqual} from 'node:util';
 
 const source=await readFile('src/main.js','utf8');
 const normalize=source.slice(source.indexOf('function normalizeRegistry('),source.indexOf('function normalizeRuntime('));
@@ -31,15 +32,15 @@ async function fixture(fn) {
   };
   try {
     stored('get','registry');
-    const api=await new AsyncFunction('stored','crypto',`
+    const api=await new AsyncFunction('stored','crypto','isDeepStrictEqual',`
       const DEFAULT_ACCOUNT='default',stateBaselines=new WeakMap();
       const emptyRegistry=()=>({version:2,accounts:{},projects:{},chats:{},spaces:{}});
       const defaultSpaceName=()=>{throw Error('unexpected default binding');};
       const projectIdFromUrl=()=>{throw Error('unexpected URL migration');};
       ${normalize}
       ${functions}
-      return {loadRegistry,saveRegistry};
-    `)(stored,crypto);
+      return {loadRegistry,saveRegistry,baseline:reg=>stateBaselines.get(reg)};
+    `)(stored,crypto,isDeepStrictEqual);
     await fn({api,stored,config,raw});
   } finally {await rm(root,{recursive:true,force:true});}
 }
@@ -73,4 +74,12 @@ test('registry read stays non-writing and unrelated concurrent metadata is retai
   reg.chats.C.page='p20';await api.saveRegistry(reg);
   const current=stored('peek','registry');
   assert.equal(current.operatorNote,'concurrent-owner-note');assert.equal(current.chats.C.page,'p20');
+}));
+
+test('an actual normalized save retains every default so the source guard baseline matches SQLite',async()=>fixture(async({api,stored})=>{
+  const reg=await api.loadRegistry();reg.chats.C.page='p20';reg.chats.C.pageSpaceId=16;
+  await api.saveRegistry(reg);
+  assert.deepEqual(stored('peek','registry'),api.baseline(reg));
+  assert.deepEqual(stored('peek','registry').projects.P.workgroups,{});
+  assert.deepEqual(stored('peek','registry').projects.P.lifecycle,{});
 }));

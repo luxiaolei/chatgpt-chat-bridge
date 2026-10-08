@@ -28,7 +28,7 @@ def differences(before, after, path=()):
         for key in before.keys() | after.keys():
             old = before.get(key, MISSING)
             new = after.get(key, MISSING)
-            if old is MISSING and isinstance(new, dict):
+            if old is MISSING and isinstance(new, dict) and new:
                 yield from differences({}, new, path + (key,))
             elif old is MISSING or new is MISSING:
                 yield path + (key,), old, new
