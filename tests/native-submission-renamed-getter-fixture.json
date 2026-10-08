@@ -1,0 +1,12 @@
+{
+  "observedAt": "2026-10-08T22:48:17.908Z",
+  "evidenceBytes": 56872,
+  "evidenceSha256": "6bc81eba90ed699118087dbc88064fc21b48013a9414e0c9306429c3021b3f64",
+  "submit": "e=>dk(rR.getText(),e)",
+  "getter": "getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,I.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}",
+  "serializerSource": "(n,a)=>{var r;let i,l=((r=new C.m((0,s.b)(n)).removeMark(0,n.content.size,n.type.schema.marks.literalPaste).doc).descendants((e,t,n,a)=>{if(!e.isText||null==n)return;let l=e.marks.find(T.g);if(null==l)return;let s=0===a?void 0:n.child(a-1).marks.find(T.g);if(null!=s&&l.eq(s))return;let c=e.text??\"\",d=t+e.nodeSize;for(let e=a+1;e<n.childCount;e++){let t=n.child(e),a=t.marks.find(T.g);if(!t.isText||null==a||!l.eq(a))break;c+=t.text??\"\",d+=t.nodeSize}let u=(0,o.b)(c);(d!==t+e.nodeSize||null==u)&&(null==i&&(i=new C.m(r)),null==u?i.removeMark(t,d,l):i.addMark(t,d,l.type.create({...l.attrs,href:u})))}),i?.doc??r);return!a?.preserveParagraphSpacing&&l.childCount>0&&l.content.content.every(e=>\"paragraph\"===e.type.name)?Array.from({length:l.childCount},(n,a)=>{let r=l.child(a),o=t.get(r);return null==o&&(o=e.serialize(r).replace(/\\n$/,\"\"),t.set(r,o)),o}).join(\"\\n\"):e.serialize(l).replace(/\\n$/,\"\")}",
+  "provenance": "Original RL turn3 gen9 normal PRE_SEND capability FORMAT failure on loaded PR166; complete descriptor-only evidence. Synthetic dependencies and body in tests; no live call in regression.",
+  "submitSha256": "70328d0e8e69832527dab86724e700e1f828854cc012418555ca114d57f95875",
+  "getterSha256": "4d8842b575a6bd942a739f7d72a2a79419b967b3076bc8e825e850ae5d732a06",
+  "serializerSourceSha256": "3aba1deaa60d9e30e99bc203dc9a2d08df4aa68b30ccbd4b579131b9e11637f6"
+}

@@ -2161,7 +2161,7 @@ async function nativeSubmissionWitness(page, request, expectedIdentity, capabili
   return witness;
 }
 
-// Volatile UI formats live in one closed browser probe; no generic alias matching.
+// Volatile UI formats live in one closed browser probe; only complete expression contracts are admitted.
 async function nativeSubmissionProbe({selector,request,expectedIdentity,capabilityOnly=false,discardBackup=null}) {
     const apply=Reflect.apply,toSource=Function.prototype.toString;
     const fail=()=>{throw new Error('NATIVE_SUBMISSION_UNVERIFIED');};
@@ -2224,18 +2224,20 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     ];
     // One closed expression grammar, with distinct renamed identifiers, and only this complete pair.
     // Full intrinsic sources come from the retained normal FORMAT failure; no normalization or wildcard body.
-    const characterizedShape={getter:formats[1].getter,serializer:"(n,a)=>{var r;let i,l=((r=new C.m((0,s.b)(n)).removeMark(0,n.content.size,n.type.schema.marks.literalPaste).doc).descendants((e,t,n,a)=>{if(!e.isText||null==n)return;let l=e.marks.find(T.g);if(null==l)return;let s=0===a?void 0:n.child(a-1).marks.find(T.g);if(null!=s&&l.eq(s))return;let c=e.text??\"\",d=t+e.nodeSize;for(let e=a+1;e<n.childCount;e++){let t=n.child(e),a=t.marks.find(T.g);if(!t.isText||null==a||!l.eq(a))break;c+=t.text??\"\",d+=t.nodeSize}let u=(0,o.b)(c);(d!==t+e.nodeSize||null==u)&&(null==i&&(i=new C.m(r)),null==u?i.removeMark(t,d,l):i.addMark(t,d,l.type.create({...l.attrs,href:u})))}),i?.doc??r);return!a?.preserveParagraphSpacing&&l.childCount>0&&l.content.content.every(e=>\"paragraph\"===e.type.name)?Array.from({length:l.childCount},(n,a)=>{let r=l.child(a),o=t.get(r);return null==o&&(o=e.serialize(r).replace(/\\n$/,\"\"),t.set(r,o)),o}).join(\"\\n\"):e.serialize(l).replace(/\\n$/,\"\")}"};
+    const characterizedShape={serializer:"(n,a)=>{var r;let i,l=((r=new C.m((0,s.b)(n)).removeMark(0,n.content.size,n.type.schema.marks.literalPaste).doc).descendants((e,t,n,a)=>{if(!e.isText||null==n)return;let l=e.marks.find(T.g);if(null==l)return;let s=0===a?void 0:n.child(a-1).marks.find(T.g);if(null!=s&&l.eq(s))return;let c=e.text??\"\",d=t+e.nodeSize;for(let e=a+1;e<n.childCount;e++){let t=n.child(e),a=t.marks.find(T.g);if(!t.isText||null==a||!l.eq(a))break;c+=t.text??\"\",d+=t.nodeSize}let u=(0,o.b)(c);(d!==t+e.nodeSize||null==u)&&(null==i&&(i=new C.m(r)),null==u?i.removeMark(t,d,l):i.addMark(t,d,l.type.create({...l.attrs,href:u})))}),i?.doc??r);return!a?.preserveParagraphSpacing&&l.childCount>0&&l.content.content.every(e=>\"paragraph\"===e.type.name)?Array.from({length:l.childCount},(n,a)=>{let r=l.child(a),o=t.get(r);return null==o&&(o=e.serialize(r).replace(/\\n$/,\"\"),t.set(r,o)),o}).join(\"\\n\"):e.serialize(l).replace(/\\n$/,\"\")}"};
     const submitShape=/^([A-Za-z_$][\w$]*)=>([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\.getText\(\),\1\)$/;
+    // shortcut: serializer bytes remain pinned; recharacterize when its implementation changes.
+    const getterShape=/^getText\(\)\{let ([A-Za-z_$][\w$]*)=arguments\.length>0&&void 0!==arguments\[0\]\?arguments\[0\]:this\.dictation\.document;return\(0,([A-Za-z_$][\w$]*)\.g\)\(\1,this\.plainTextMode\?void 0:this\.markdownEditor\?\.serialize\)\}$/;
     for(let i=0;fiber&&i<limits.fibers;i++,fiber=value(fiber,'return')) {
       const parent=scanProperty(fiber,'return');
       if(parent.kind==='accessor' || parent.kind==='truncated') ancestryIncomplete=true;
       const submit=describe(value(fiber,'memoizedProps'),'onSubmit').source;
       const identifiers=submit?.match(submitShape);
-      const format=formats.find(value=>submit===value.submit ||
+      const exactFormat=formats.find(value=>submit===value.submit ||
         (value.submit==='e=>up(rT.getText(),e)' && ['e=>uh(rE.getText(),e)','e=>up(rS.getText(),e)'].includes(submit)) ||
-        (value.persistedText && submit==='e=>{ev(F.getText(),e)}')) ||
-        (identifiers && new Set(identifiers.slice(1)).size===3?characterizedShape:null);
-      if(format && !format.serializer) formatRecognized=true;
+        (value.persistedText && submit==='e=>{ev(F.getText(),e)}'));
+      const shapeSubmit=identifiers && new Set(identifiers.slice(1)).size===3;
+      if(exactFormat) formatRecognized=true;
       let hook=hookValue(fiber,'memoizedState');
       for(let n=0;hook&&n<limits.hooks;n++,hook=hookValue(hook,'next')) {
         const deps=hookValue(hookValue(hook,'memoizedState'),'deps');
@@ -2247,11 +2249,16 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
           composerEditors.add(editor);
           if(composerEditors.size>128) {admissionTruncated=true;break;}
           // Ownership cannot be excluded by a missing or unmatched submit format.
-          if(!format) continue;
+          if(!exactFormat && !shapeSubmit) continue;
           const markdownEditor=value(editor,'markdownEditor');
           const getText=value(editor,'getText'),serialize=value(markdownEditor,'serialize');
           const getterSource=describe(editor,'getText').source,serializerSource=describe(markdownEditor,'serialize').source;
-          if(getterSource!==format.getter || typeof getText!=='function' || typeof serialize!=='function' || serializerSource===null ||
+          const getterIdentifiers=getterSource?.match(getterShape);
+          const shapeGetter=getterIdentifiers && getterIdentifiers[1]!==getterIdentifiers[2] &&
+            !['arguments','this'].includes(getterIdentifiers[2]);
+          const format=exactFormat && getterSource===exactFormat.getter?exactFormat:
+            (shapeSubmit && shapeGetter && serializerSource===characterizedShape.serializer?characterizedShape:null);
+          if(!format || typeof getText!=='function' || typeof serialize!=='function' || serializerSource===null ||
             (format.serializer && serializerSource!==format.serializer)) continue;
           const methods=[['getText',getText]];
           if(format.persistedText) {
