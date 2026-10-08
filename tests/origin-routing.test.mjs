@@ -63,7 +63,11 @@ test('an unqualified watch enters the browser separately for each eligible accou
     const result=spawnSync(path.join(root,'bin/chat-bridge'),['watch','--quiet'],{env,encoding:'utf8'});
     assert.equal(result.status,0,result.stderr);
     const calls=(await readFile(capture,'utf8')).trim().split('\n').map(row=>JSON.parse(row.slice(row.indexOf('=')+1).trim().replace(/;$/,'')));
-    assert.deepEqual(calls.map(args=>args[args.indexOf('--account')+1]),['a','b','alias']);
+    assert.deepEqual(calls.slice(0,3).map(args=>args[args.indexOf('--account')+1]),['a','b','alias']);
+    assert.deepEqual(calls.slice(3),[
+      ['space','prune','--all','--project','P','--account','a'],
+      ['space','prune','--all','--project','Q','--account','b']
+    ]);
   } finally {await rm(dir,{recursive:true,force:true});}
 });
 
