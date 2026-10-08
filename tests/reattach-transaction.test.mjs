@@ -53,9 +53,9 @@ test('scoped orphan cleanup visits both verified overflow mappings without expan
   const prior={spaceName:primary.spaceName+'-overflow',spaceId:9,profileId:'P1',identity:'login-a'},head={...prior,spaceName:prior.spaceName+'-2',spaceId:10,previousSpaces:[prior]};
   const reg={accounts:{a:{identity:'login-a'}},projects:{P:{bindings:{a:primary}}},capacityOverflow:{'login-a|P1':head}};
   const spaces=[primary,prior,head].map(s=>({id:s.spaceId,name:s.spaceName,profileId:s.profileId,ownership:'agent',createdBy:'agent'}));
-  const fn=await new AsyncFunction('listTaskSpaces','openBoundTask','reclaimOrphanManagedPage','projectHomeId',source.slice(a,z)+';return pruneManagedOrphanTabs;')(
+  const fn=await new AsyncFunction('listTaskSpaces','openBoundTask','reclaimOrphanManagedPage','projectHomeId','coordinated',source.slice(a,z)+';return pruneManagedOrphanTabs;')(
     async()=>spaces,async(_r,p,account,options)=>({binding:primary,task:{spaceId:options.spaceOverride.spaceId,tabs:async()=>[{url:home}]}}),
-    async(_r,task,binding)=>{assert.equal(binding.projectUrl,home);visited.push(task.spaceId);return {page:'old'};},u=>u===home?'g-p-'+'a'.repeat(32):null);
+    async(_r,task,binding)=>{assert.equal(binding.projectUrl,home);visited.push(task.spaceId);return {page:'old'};},u=>u===home?'g-p-'+'a'.repeat(32):null,()=>({unboundAny:false}));
   assert.equal((await fn(reg,'P','a',{excludeSpaceId:2})).length,2);assert.deepEqual(visited,[9,10]);
   visited.length=0;spaces[1].id=99;assert.equal((await fn(reg,'P','a',{excludeSpaceId:2})).length,1);assert.deepEqual(visited,[10]);
 });
