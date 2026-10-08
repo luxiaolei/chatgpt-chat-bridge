@@ -4,6 +4,36 @@ import {readFile} from 'node:fs/promises';
 import {statusFixture} from './status-source-fixture.mjs';
 const main=await readFile(new URL('../src/main.js',import.meta.url),'utf8');
 
+test('a whole same-message content reference cannot replace the rendered research RPC',async()=>{
+  const aid='33333333-3333-4333-8333-333333333333',body='{"op":"context","section":"checkpoint"}';
+  for(const index of ['0','7']) {
+    const {snapshot}=await statusFixture(main,{aid,assistantText:`::chatgpt-content-reference{index="${index}" source_message_id="${aid}"}`,assistantRenderedText:body});
+    assert.equal(snapshot.lastAssistant,body);assert.equal(snapshot.lastAssistantId,aid);
+    assert.equal(snapshot.lastAssistantTextSource,'rendered-dom');
+    assert.equal(snapshot.assistantMessageBinding,null);
+    assert.equal(snapshot.assistantMessageBindingCondition,'NATIVE_PARENT_ASSOCIATION_UNAVAILABLE');
+  }
+});
+
+test('embedded references, other message references and unknown reference grammar do not promote rendered RPC text',async()=>{
+  const aid='33333333-3333-4333-8333-333333333333';
+  for(const text of [
+    `literal ::chatgpt-content-reference{index="0" source_message_id="${aid}"}`,
+    '::chatgpt-content-reference{index="0" source_message_id="other"}',
+    `::chatgpt-content-reference{index="0" source_message_id="${aid}" extra="unknown"}`
+  ]) {
+    const {snapshot}=await statusFixture(main,{aid,assistantText:text,assistantRenderedText:'{"op":"context"}'});
+    assert.equal(snapshot.lastAssistant,text);assert.equal(snapshot.lastAssistantTextSource,'message-bound-markdown-source');
+  }
+});
+
+test('a known reference with no rendered body remains empty and never becomes a fabricated research reply',async()=>{
+  const aid='33333333-3333-4333-8333-333333333333';
+  const {snapshot}=await statusFixture(main,{aid,assistantText:`::chatgpt-content-reference{index="0" source_message_id="${aid}"}`,assistantRenderedText:''});
+  assert.equal(snapshot.lastAssistant,null);assert.equal(snapshot.lastAssistantTextSource,'rendered-dom');
+  assert.equal(snapshot.assistantMessageBinding,null);
+});
+
 test('ordinary status exposes the exact latest bound source without a QC-specific flag',async()=>{
   const body='  whitespace\n~~~json\n{"x":"🧪"}\n~~~\n';
   const {snapshot,evaluateArgs}=await statusFixture(main,{body});

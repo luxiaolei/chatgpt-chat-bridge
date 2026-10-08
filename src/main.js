@@ -3,6 +3,7 @@ const os = await import("node:os");
 const pathMod = await import("node:path");
 const crypto = await import("node:crypto");
 const childProcess = await import("node:child_process");
+const {isDeepStrictEqual}=await import("node:util");
 const args = globalThis.__CHAT_BRIDGE_ARGS__ || [];
 let sendAttempted=false;
 const HOME = os.homedir();
@@ -351,7 +352,7 @@ async function loadRegistry() {
 async function saveRegistry(reg, registration=null) {
   const next=normalizeRegistry(reg),base=stateBaselines.get(reg);
   if(!base) throw new Error("registry state must be loaded before save");
-  if(!registration && JSON.stringify(base)===JSON.stringify(next)) return;
+  if(!registration && isDeepStrictEqual(base,next)) return;
   stored("put","registry",{base,next,...(registration?{registration}:{})});
   stateBaselines.set(reg,structuredClone(next));
 }
@@ -1403,8 +1404,12 @@ async function state(page, includeUserMessages=false, controlAction=null, includ
       let fiber=roots[0][Object.keys(roots[0]).find(k=>k.startsWith('__reactFiber'))];
       for(let i=0;fiber&&i<16;i++,fiber=fiber.return) {
         const props=fiber.memoizedProps||{};
-        if(props.streamId===conversationId+':'+id && props.conversationId===conversationId && typeof props.children==='string')
+        if(props.streamId===conversationId+':'+id && props.conversationId===conversationId && typeof props.children==='string') {
+          const reference=/^::chatgpt-content-reference\{index="[0-9]+" source_message_id="([^"]+)"\}$/.exec(props.children);
+          // A bound content reference is a pointer, not the rendered message body.
+          if(reference?.[1]===id) return null;
           return {text:props.children,textSource:'message-bound-markdown-source'};
+        }
         const owner=props['data-chatgpt-selection-message-id']||props['data-message-id'];
         if(owner && owner!==id) return null;
       }
@@ -2407,9 +2412,9 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null, lif
          before.lastUserSourceCondition!=="BOUND_SOURCE" || !/^local-chatgpt:/.test(source?.conversationId||"") ||
          source.messageId!==before.lastUserId || typeof source.text!=="string" ||
          !before.userMessageIds?.includes(before.lastUserId)) fail();
-      const anchor=JSON.stringify(stored("peek","registry"));
+      const anchor=stored("peek","registry");
       const base=stateBaselines.get(reg);
-      if(base && JSON.stringify(base)!==anchor) fail();
+      if(base && !isDeepStrictEqual(base,anchor)) fail();
       const guard=async()=>{
         await assertInputSafe(page,identity,inputTarget);
         await loadRuntime();
@@ -2419,7 +2424,7 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null, lif
            fresh.pageWasDiscarded!==false || contextExhausted(fresh) || recoveryRequired(fresh) ||
            fresh.lastUserId!==original.lastUserId || fresh.lastUserSourceCondition!=="BOUND_SOURCE" ||
            fresh.lastUserSource?.messageId!==source.messageId || fresh.lastUserSource.text!==source.text) fail();
-        if(JSON.stringify(stored("peek","registry"))!==anchor) fail();
+        if(!isDeepStrictEqual(stored("peek","registry"),anchor)) fail();
         const runtime=normalizeRuntime(stored("peek","runtime"));
         if(runtime.sessions?.[registered.id]?.watchdogPausedForUserControl ||
            Object.values(runtime.tasks||{}).some(t=>t.sessionId===registered.id&&t.watchdogPausedForUserControl)) fail();

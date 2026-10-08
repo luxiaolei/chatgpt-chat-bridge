@@ -112,6 +112,7 @@ async function inBrowser(f,fn){
     delete globalThis.__CHAT_BRIDGE_WATCH;Date.now=()=>f.now;
     const setup=[
       'const reg=f.reg;',
+      'if(f.registryBaseline)stateBaselines.set(reg,structuredClone(f.registryBaseline));',
       'stored=(command,kind)=>{if(command!=="peek"||!["registry","runtime"].includes(kind))throw Error("TEST_UNEXPECTED_STORE");return structuredClone(kind==="registry"?f.reg:f.runtime||{sessions:{},tasks:{}});};',
       'loadRuntime=async()=>{f.onRuntime?.(f);return structuredClone(f.runtime||{sessions:{},tasks:{}});};',
       'coordinated=(command,context)=>{if(command==="image-session-occupancy")return {occupied:!!f.imageOccupied};if(command==="admission-check")return {ok:true,control:{mode:f.paused?"PAUSED":"RUNNING"}};if(!f.attempt||command!=="delivery-admission"||context.operationId!==f.attempt.descriptor.operationId)throw new Error("TEST_UNEXPECTED_ADMISSION"); f.admissions=(f.admissions||0)+1;if(f.denyAdmission)throw new Error("DELIVERY_ATTEMPT_NO_LONGER_CURRENT");return {ok:true};};',
@@ -574,6 +575,24 @@ function existingFixture(){
   f.onReload=x=>{x.source.conversationId=uuid;x.frames[10].memoizedProps.conversationId=uuid;};
   return f;
 }
+
+test('existing source settlement accepts an equal registry baseline with different object key order',async()=>{
+  const f=existingFixture();
+  f.registryBaseline=Object.fromEntries(Object.entries(structuredClone(f.reg)).reverse());
+  f.registryBaseline.chats[uuid]=Object.fromEntries(Object.entries(f.registryBaseline.chats[uuid]).reverse());
+  await inBrowser(f,async({sendMessage})=>assert.equal((await sendMessage(f.page,request,permanent)).delivered,true));
+  assert.equal(f.reloads,1);assert.equal(f.fills,1);assert.equal(f.sends,1);
+});
+
+test('existing source settlement still rejects actual baseline field changes before reload or input',async()=>{
+  for(const change of [r=>{r.chats[uuid].role='other';},r=>{r.chats[uuid].status='retired';},
+    r=>{r.accounts.a.identity='other';},r=>{r.projects.P.bindings.a.projectUrl='https://chatgpt.com/g/g-p-'+('b'.repeat(32))+'/project';},
+    r=>{r.chats[uuid].page='p-other';}]) {
+    const f=existingFixture();f.registryBaseline=structuredClone(f.reg);change(f.registryBaseline);
+    await inBrowser(f,async({sendMessage})=>assert.rejects(sendMessage(f.page,request,permanent),e=>e.code==='NATIVE_EXISTING_SOURCE_UNVERIFIED'&&e.deliveryStage==='PRE_SEND'));
+    assert.equal(f.reloads||0,0);assert.equal(f.fills,0);assert.equal(f.sends,0);
+  }
+});
 
 test('existing source recovery fails closed on missing proof, controls and changed after-reload scope/body/UI',async()=>{
   const cases=[

@@ -114,7 +114,8 @@ test('registry no-op saves skip writes while real changes and registrations rema
  const source=await readFile('src/main.js','utf8');
  const helper=source.slice(source.indexOf('async function saveRegistry('),source.indexOf('\nfunction opt(',source.indexOf('async function saveRegistry(')));
  const baselines=new WeakMap(),writes=[];
- const save=new Function('normalizeRegistry','stateBaselines','stored',helper+';return saveRegistry;')(r=>r,baselines,(...args)=>writes.push(args));
+ const {isDeepStrictEqual}=await import('node:util');
+ const save=new Function('normalizeRegistry','stateBaselines','stored','isDeepStrictEqual',helper+';return saveRegistry;')(r=>r,baselines,(...args)=>writes.push(args),isDeepStrictEqual);
  const reg={chats:{}};baselines.set(reg,structuredClone(reg));
  await save(reg);assert.equal(writes.length,0);
  reg.chats.worker={id:'worker'};await save(reg);assert.equal(writes.length,1);

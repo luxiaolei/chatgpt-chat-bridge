@@ -49,7 +49,7 @@ export async function statusFixture(main, options={}) {
     message:body,copyPlainTextFromSource:true,...options.sourceProps},return:null};
   if(options.missingSource)delete outer.__reactFiber$fixture;
   const assistant=root.append(new Element('DIV',{'data-chatgpt-search-unit-key':'a:assistant','data-chatgpt-search-message-ids':aid}));
-  const markdown=assistant.append(new Element('DIV',{'data-markdown-text-style':'assistant-message'},'rendered assistant'));
+  const markdown=assistant.append(new Element('DIV',{'data-markdown-text-style':'assistant-message'},options.assistantRenderedText??'rendered assistant'));
   markdown.__reactFiber$fixture={memoizedProps:{streamId:cid+':'+aid,conversationId:cid,children:options.assistantText||'Old assistant must not become a parent proof.'},return:null};
   if(options.sidebarRetry)button(sidebar.append(new Element('DIV',{role:'status'},'Unable to load history')), 'Retry');
   for(const label of options.currentControls||[])button(assistant,label);

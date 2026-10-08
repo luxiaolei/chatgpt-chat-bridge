@@ -7,6 +7,25 @@ import { spawnSync, spawn } from 'node:child_process';
 
 const script = path.resolve('src/state-store.py');
 
+test('added empty objects survive the public SQLite merge and cannot overwrite a concurrent object',async()=>{
+  const root=await mkdtemp(path.join(tmpdir(),'bridge-store-empty-'));
+  const config=path.join(root,'config'),state=path.join(root,'state');
+  await mkdir(config);await mkdir(state);
+  await writeFile(path.join(config,'registry.json'),JSON.stringify({projects:{P:{name:'P'}}}));
+  await writeFile(path.join(state,'runtime.json'),JSON.stringify({tasks:{}}));
+  const call=(command,kind,payload)=>spawnSync('python3',[script,command,config,state,kind],
+    {encoding:'utf8',input:payload===undefined?undefined:JSON.stringify(payload)});
+  try {
+    const base=JSON.parse(call('get','registry').stdout),next=structuredClone(base);next.projects.P.workgroups={};
+    const saved=call('put','registry',{base,next});assert.equal(saved.status,0,saved.stderr);
+    assert.deepEqual(JSON.parse(saved.stdout),next);
+    const current=JSON.parse(saved.stdout),changed=structuredClone(current);changed.projects.P.workgroups.A={controller:'owner'};
+    assert.equal(call('put','registry',{base:current,next:changed}).status,0);
+    const conflict=call('put','registry',{base,next});assert.notEqual(conflict.status,0);assert.match(conflict.stderr,/STATE_CONFLICT/);
+    assert.deepEqual(JSON.parse(call('peek','registry').stdout),changed);
+  } finally {await rm(root,{recursive:true,force:true});}
+});
+
 test('SQLite state merges independent worker changes and rejects stale overlapping writes', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'bridge-store-'));
   const config = path.join(root, 'config'), state = path.join(root, 'state');
