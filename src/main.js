@@ -4805,7 +4805,7 @@ else if(cmd==="new"){
     try {
       applied=await applyModelSpec(page,model,requestedEffort);
     } catch(error) {
-      if(args.includes("--strict-model") || !deferrableModelUiError(error)) throw error;
+      if(args.includes("--strict-model") || modelPreset(model).radio==="GPT-6" || !deferrableModelUiError(error)) throw error;
       const observed=observedModel((await state(page)).mode);
       applied={model,effort:requestedEffort||observed.effort||null,observed,deferredUntilDispatch:true};
     }
