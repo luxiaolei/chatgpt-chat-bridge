@@ -9,6 +9,7 @@ const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const helper=source.slice(source.indexOf('async function nativeSubmissionWitness('),source.indexOf('\nasync function sendMessage('));
 const getter='getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,T.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}';
 const prepare=new AsyncFunction('crypto','COMPOSER_SELECTOR','normalizedEvidenceText','saveDraftBackup',helper+';return nativeSubmissionWitness;');
+const prepareProbe=new AsyncFunction(helper+';return nativeSubmissionProbe;');
 async function inspect(change=()=>{},capabilityOnly=false) {
  const doc={content:{size:fixture.request.length},textBetween:()=>fixture.request};
  const composer={pmViewDesc:{node:doc},parentElement:null};
@@ -27,6 +28,7 @@ async function inspect(change=()=>{},capabilityOnly=false) {
   env.retained={backup,directory};
   return {path:'/private/native-format-evidence.json',sha256:'f'.repeat(64),bytes:JSON.stringify(backup).length};
  };
+ if(env.discardBackup) return await (await prepareProbe())({selector:'composer',expectedIdentity:env.identity,discardBackup:env.discardBackup});
  return await (await prepare(crypto,'composer',v=>v.replace(/\s+/g,' ').trim(),save))({...env.page,evaluate:async(fn,args)=>fn(args)},env.request,env.identity,capabilityOnly);
  } finally {for(const [k,d] of prior){if(d)Object.defineProperty(globalThis,k,d);else delete globalThis[k];}}
 }
@@ -416,6 +418,179 @@ test('NSV2-R2-HOOK unknown FORMAT diagnostics retain incomplete hook scans witho
  for(const row of observations) {
   assert.equal(row.opaqueCalls,0);assert.equal(row.getterCalls,0);assert.equal(row.serializerCalls,0);
   assert.equal(row.truncated,true,JSON.stringify(row));assert.equal(row.limit,'HOOK_SCAN_INCOMPLETE',JSON.stringify(row));
+ }
+});
+
+// Exercise actual probe paths with synthetic object graphs, without a live page or private body.
+function configureScanProperty(owner,key,kind,linked,counts) {
+ delete owner[key];
+ if(kind==='accessor') Object.defineProperty(owner,key,{configurable:true,enumerable:true,get(){counts.opaqueCalls++;return linked;}});
+ else {
+  const depth=kind==='prototype-8'?8:kind==='prototype-7'?7:0;
+  for(let i=0;i<depth;i++) {const parent={};Object.setPrototypeOf(owner,parent);owner=parent;}
+  owner[key]=linked;
+ }
+}
+function configureOwnershipEdge(context,field,kind,counts,foreign=false) {
+ const {host,editor}=context,second={...editor,view:{...editor.view,dom:foreign?{}:context.composer}};
+ const deps=host.__reactFiber$fixture.memoizedState.memoizedState.deps=[editor,second];
+ if(foreign) for(const key of ['getText','markdownEditor','dictation'])
+  Object.defineProperty(second,key,{get(){counts.opaqueCalls++;throw new Error('known foreign editor must not be inspected');}});
+ const [owner,key,linked]=field==='dependency'?[deps,'1',second]:
+  field==='view'?[second,'view',second.view]:[second.view,'dom',second.view.dom];
+ configureScanProperty(owner,key,kind,linked,counts);
+}
+const ownershipOutcome=capabilityOnly=>witness=>({status:'ACCEPTED',witnessPresent:witness!=null,
+ valid:capabilityOnly?witness?.supported===true:witness?.body===fixture.body});
+const ownershipError=error=>({status:'REJECTED',error:error.message});
+
+test('NSV2-OWNERSHIP unreadable dependency view or DOM cannot hide a second editor in any shared mode',async t=>{
+ const observations=[];
+ for(const mode of ['capability','body','discard']) for(const field of ['dependency','view','dom']) for(const kind of ['accessor','prototype-8']) {
+  let native;const counts={opaqueCalls:0,transactionReads:0};
+  const outcome=await inspectCharacterized(context=>{
+   native=context.native;configureOwnershipEdge(context,field,kind,counts);
+   if(mode==='discard') {
+    context.env.discardBackup={document:{synthetic:true}};
+    Object.defineProperty(context.editor.view.state,'tr',{get(){counts.transactionReads++;throw new Error('SYNTHETIC_DISCARD_MUTATION_BOUNDARY');}});
+   }
+  },mode==='capability').then(ownershipOutcome(mode==='capability'),ownershipError);
+  observations.push({mode,field,kind,...counts,getterCalls:native.getterCalls,serializerCalls:native.serializerCalls,...outcome});
+ }
+ t.diagnostic(JSON.stringify(observations));
+ for(const row of observations) {
+  assert.equal(row.status,'REJECTED',JSON.stringify(row));
+  assert.match(row.error,row.mode==='discard'?/DRAFT_DISCARD_UNSUPPORTED/:/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(row.opaqueCalls,0);assert.equal(row.transactionReads,0);
+  assert.equal(row.getterCalls,0);assert.equal(row.serializerCalls,0);
+ }
+});
+
+test('NSV2-OWNERSHIP complete data and depth7 distinguish a second owner from a known foreign DOM',async t=>{
+ const observations=[];
+ for(const capabilityOnly of [true,false]) for(const field of ['dependency','view','dom']) for(const kind of ['data','prototype-7']) for(const foreign of [false,true]) {
+  let native;const counts={opaqueCalls:0};
+  const outcome=await inspectCharacterized(context=>{
+   native=context.native;configureOwnershipEdge(context,field,kind,counts,foreign);
+  },capabilityOnly).then(ownershipOutcome(capabilityOnly),ownershipError);
+  observations.push({capabilityOnly,field,kind,foreign,...counts,getterCalls:native.getterCalls,serializerCalls:native.serializerCalls,...outcome});
+ }
+ t.diagnostic(JSON.stringify(observations));
+ for(const row of observations) {
+  assert.equal(row.status,row.foreign?'ACCEPTED':'REJECTED',JSON.stringify(row));
+  assert.equal(row.opaqueCalls,0);
+  if(row.foreign) assert.equal(row.valid,true);
+  else assert.match(row.error,/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(row.getterCalls,row.foreign&&!row.capabilityOnly?1:0);
+  assert.equal(row.serializerCalls,row.foreign&&!row.capabilityOnly?1:0);
+ }
+});
+
+test('NSV2-OWNERSHIP root props and document entry reads cannot become absent or legacy fallback',async t=>{
+ const observations=[];
+ for(const capabilityOnly of [true,false]) for(const field of ['react-entry','props','onSubmit','pmViewDesc','node']) for(const kind of (field==='react-entry'?['accessor']:['accessor','prototype-8'])) {
+  let native;const counts={opaqueCalls:0};
+  const outcome=await inspectCharacterized(context=>{
+   native=context.native;
+   const {composer,host,editor}=context,first=host.__reactFiber$fixture;
+   const hidden={memoizedProps:first.memoizedProps,memoizedState:{memoizedState:{deps:[{...editor}]}},return:null};
+   let owner,key,linked;
+   if(field==='react-entry') {owner=composer;key='__reactFiber$hidden';linked=hidden;}
+   else if(field==='pmViewDesc') {owner=composer;key='pmViewDesc';linked=composer.pmViewDesc;}
+   else if(field==='node') {owner=composer.pmViewDesc;key='node';linked=context.doc;}
+   else {
+    first.return=hidden;
+    if(field==='props') {owner=hidden;key='memoizedProps';linked=hidden.memoizedProps;}
+    else {hidden.memoizedProps={};owner=hidden.memoizedProps;key='onSubmit';linked=first.memoizedProps.onSubmit;}
+   }
+   configureScanProperty(owner,key,kind,linked,counts);
+  },capabilityOnly).then(ownershipOutcome(capabilityOnly),ownershipError);
+  observations.push({capabilityOnly,field,kind,...counts,getterCalls:native.getterCalls,serializerCalls:native.serializerCalls,...outcome});
+ }
+ t.diagnostic(JSON.stringify(observations));
+ for(const row of observations) {
+  assert.equal(row.status,'REJECTED',JSON.stringify(row));assert.match(row.error,/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(row.opaqueCalls,0);assert.equal(row.getterCalls,0);assert.equal(row.serializerCalls,0);
+ }
+});
+
+test('NSV2-OWNERSHIP format matching cannot filter out another composer-bound editor',async t=>{
+ const observations=[];
+ for(const capabilityOnly of [true,false]) for(const handler of ['unmatched-data','missing']) for(const foreign of [false,true]) {
+  let native;
+  const outcome=await inspectCharacterized(context=>{
+   native=context.native;
+   const {host,editor,composer}=context,first=host.__reactFiber$fixture;
+   first.return={memoizedProps:handler==='missing'?{}:{onSubmit:()=>{}},
+    memoizedState:{memoizedState:{deps:[{...editor,view:{...editor.view,dom:foreign?{}:composer}}]}},return:null};
+  },capabilityOnly).then(ownershipOutcome(capabilityOnly),ownershipError);
+  observations.push({capabilityOnly,handler,foreign,getterCalls:native.getterCalls,serializerCalls:native.serializerCalls,...outcome});
+ }
+ t.diagnostic(JSON.stringify(observations));
+ for(const row of observations) {
+  assert.equal(row.status,row.foreign?'ACCEPTED':'REJECTED',JSON.stringify(row));
+  if(row.foreign) assert.equal(row.valid,true);else assert.match(row.error,/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(row.getterCalls,row.foreign&&!row.capabilityOnly?1:0);
+  assert.equal(row.serializerCalls,row.foreign&&!row.capabilityOnly?1:0);
+ }
+});
+
+test('NSV2-OWNERSHIP sameBinding rejects fields made opaque before or during native execution',async t=>{
+ const observations=[];
+ const fields=['view','dom','state','doc','markdownEditor','getText','serialize','plainTextMode','pmViewDesc','node'];
+ for(const phase of ['before-capability','before-body','after-body']) for(const [index,field] of fields.entries()) {
+  let native,reads=0,armed=false;const counts={opaqueCalls:0};
+  const kind=index%2?'prototype-8':'accessor';
+  const outcome=await inspectCharacterized(context=>{
+   native=context.native;const {editor,composer,doc}=context;
+   const view=editor.view,markdown=editor.markdownEditor;
+   const objects={view:[editor,'view'],dom:[view,'dom'],state:[view,'state'],doc:[view.state,'doc'],
+    markdownEditor:[editor,'markdownEditor'],getText:[editor,'getText'],serialize:[markdown,'serialize'],
+    plainTextMode:[editor,'plainTextMode'],pmViewDesc:[composer,'pmViewDesc'],node:[composer.pmViewDesc,'node']};
+   const [owner,key]=objects[field],linked=owner[key];
+   const hide=()=>{if(!armed){armed=true;configureScanProperty(owner,key,kind,linked,counts);}};
+   if(phase==='after-body') doc.descendants=hide;
+   else Object.defineProperty(editor.dictation,'document',{get(){if(++reads===2)hide();return doc;}});
+  },phase==='before-capability').then(ownershipOutcome(phase==='before-capability'),ownershipError);
+  observations.push({phase,field,kind,...counts,getterCalls:native.getterCalls,serializerCalls:native.serializerCalls,...outcome});
+ }
+ t.diagnostic(JSON.stringify(observations));
+ for(const row of observations) {
+  assert.equal(row.status,'REJECTED',JSON.stringify(row));assert.match(row.error,/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(row.opaqueCalls,0);
+  assert.equal(row.getterCalls,row.phase==='after-body'?1:0);
+  assert.equal(row.serializerCalls,row.phase==='after-body'?1:0);
+ }
+});
+
+test('NSV2-OWNERSHIP unknown FORMAT retains unreadable ownership diagnostics without native calls',async t=>{
+ const observations=[];
+ for(const field of ['dependency','view','dom']) for(const kind of ['accessor','prototype-8']) {
+  let captured,native;const counts={opaqueCalls:0};
+  await assert.rejects(inspectCharacterized(context=>{
+   captured=context.env;native=context.native;configureOwnershipEdge(context,field,kind,counts);
+   context.host.__reactFiber$fixture.memoizedProps.onSubmit=()=>{};
+  },true),/NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED/);
+  observations.push({field,kind,...counts,getterCalls:native.getterCalls,serializerCalls:native.serializerCalls,
+   truncated:captured.retained.backup.truncated,limit:captured.retained.backup.limit});
+ }
+ t.diagnostic(JSON.stringify(observations));
+ for(const row of observations) {
+  assert.equal(row.opaqueCalls,0);assert.equal(row.getterCalls,0);assert.equal(row.serializerCalls,0);
+  assert.equal(row.truncated,true,JSON.stringify(row));assert.equal(row.limit,'EDITOR_OWNERSHIP_SCAN_INCOMPLETE',JSON.stringify(row));
+ }
+});
+
+test('NSV2-OWNERSHIP complete missing optional fields and legacy composer absence retain their contract',async()=>{
+ for(const capabilityOnly of [true,false]) {
+  const witness=await inspectCharacterized(({host})=>{
+   const deps=host.__reactFiber$fixture.memoizedState.memoizedState.deps;
+   deps.push(null,undefined,{}, {view:null}, {view:{}});deps.length++;
+  },capabilityOnly);
+  assert.equal(capabilityOnly?witness.supported:witness.body===fixture.body,true);
+  for(const field of ['pmViewDesc','node']) assert.equal(await inspect(({composer})=>{
+   if(field==='pmViewDesc')delete composer.pmViewDesc;else delete composer.pmViewDesc.node;
+  },capabilityOnly),null);
  }
 });
 
