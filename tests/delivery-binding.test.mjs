@@ -19,7 +19,9 @@ async function harness(f={}) {
   f.calls=[];f.snapshots ||= [before,after];
   return new AsyncFunction('f',source+`
     const identity=f.witness?.accountIdentity||"verified@example.test";
-    const reg={accounts:{a:{identity}},chats:{C:{url:f.snapshots[0]?.url||"https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/11111111-1111-4111-8111-111111111111",account:"a"}}};
+    const reg={accounts:{a:{identity}},chats:{C:{project:"P",url:f.snapshots[0]?.url||"https://chatgpt.com/g/g-p-11111111111111111111111111111111/c/11111111-1111-4111-8111-111111111111",account:"a"}}};
+    coordinated=command=>{if(command!=="admission-check")throw Error(command);if(f.paused)throw Error("ADMISSION_PAUSED");return {ok:true,control:{mode:"RUNNING"}};};
+    recordDeliveryStage=async phase=>{if(phase==="SEND_INTENT"&&f.intentPause)f.paused=true;};
     assertImagePageFree=async()=>{};
     detectWebRateLimit=async()=>{};
     state=async(_page,mode,controlAction)=>{if(controlAction==="approval"){f.calls.push(["approval-state"]);return {approvalRequired:false,url:f.current?.url||f.snapshots[0]?.url||reg.chats.C.url};}if(mode===false||mode==="ids"&&f.current&&f.calls.at(-1)?.[0]==="guard-state"){f.calls.push(['guard-state']);return f.current||f.snapshots[0];}f.calls.push(['state',mode]);if(f.stateErrorAt===f.calls.filter(([kind])=>kind==='state').length)throw f.stateError;return f.current=f.snapshots.shift()||f.latest||f.snapshots.at(-1);};
@@ -107,6 +109,19 @@ test('an unacknowledged click or Enter never falls back to another send action',
     await assert.rejects(api.triggerSend(page),/lost action acknowledgement/);
     assert.deepEqual(f.calls,[['approval-state'],[hasSend?'click':'enter']]);
     assert.equal(api.attempted(),true);
+  }
+});
+
+test('pause arriving during input or intent persistence prevents the native Send action',async()=>{
+  for(const stage of ['input','intent']) {
+    const f={shortWait:true,latest:after},api=await harness(f);
+    const page={fill:async()=>{if(stage==='input')f.paused=true;},waitForTimeout:async()=>{},
+      evaluate:async fn=>String(fn).includes('/api/auth/session')?'verified@example.test':true,
+      click:async()=>f.calls.push(['click']),press:async()=>f.calls.push(['enter'])};
+    if(stage==='intent') f.intentPause=true;
+    await assert.rejects(api.sendMessage(page,message,url,null,{project:'P'}),error=>/ADMISSION_PAUSED/.test(error.message)&&
+      error.deliveryStage===(stage==='intent'?'SEND_ATTEMPTED':'PRE_SEND'));
+    assert.equal(f.calls.some(([kind])=>kind==='click'||kind==='enter'),false);
   }
 });
 

@@ -11,6 +11,30 @@ FORMAT = "chat-bridge-delivery-attempt-v1"
 MAX_READ_BYTES = 16 * 1024 * 1024
 
 
+def route_snapshot(reg, row):
+    """Capture before the first child; never backfill an uncertain old send."""
+    identity = (reg.get("accounts", {}).get(row["account_alias"]) or {}).get("identity")
+    binding = (reg.get("projects", {}).get(row["project"]) or {}).get("bindings", {}).get(row["account_alias"]) or {}
+    match = re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/project/?", binding.get("projectUrl") or "", re.I)
+    if not isinstance(identity, str) or not identity or hashlib.sha256(("identity:" + identity).encode()).hexdigest() != row["account_id"] or not match or not isinstance(binding.get("profileId"), str) or not binding["profileId"]:
+        return {}
+    return {"projectId": match[1].lower(), "accountId": row["account_id"],
+            "identityHash": hashlib.sha256(identity.encode()).hexdigest(), "profileId": binding["profileId"]}
+
+
+def original_reclaim_route(row, account_id, identity):
+    try:
+        route = json.loads(row["reclaim_route"] or "null") if "reclaim_route" in row.keys() else None
+        if (isinstance(route, dict) and route.get("accountId") == account_id and
+                route.get("identityHash") == hashlib.sha256(identity.encode()).hexdigest() and
+                isinstance(route.get("profileId"), str) and route["profileId"] and
+                re.fullmatch(r"g-p-[0-9a-f]{32}", route.get("projectId") or "")):
+            return route
+    except (ValueError, TypeError):
+        pass
+    return None  # A current binding cannot supply missing historical route proof.
+
+
 def encoded(value):
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
@@ -67,6 +91,8 @@ def prepare(state, row):
                 "controlEpoch": row["control_epoch"] if "control_epoch" in row.keys() else None,
                 "requestedModel": row["requested_model"], "requestedEffort": row["requested_effort"],
                 "claimIsNotSendCount": True, "retryAuthorized": False}
+    if "reclaim_route" in row.keys() and row["reclaim_route"] is not None:
+        manifest["route"] = json.loads(row["reclaim_route"])
     reference = write_once(directory / "manifest.json", manifest)
     return {"format": FORMAT, "operationId": operation, "claimOrdinal": ordinal,
             "manifestSha256": reference["sha256"], "directory": str(directory)}
@@ -160,4 +186,9 @@ def verify_current(state, db, context):
             or any(manifest.get(key) != row[column] for key, column in mapping.items())
             or hashlib.sha256(row["message"].encode()).hexdigest() != manifest.get("messageSha256")):
         raise ValueError("DELIVERY_ATTEMPT_NO_LONGER_CURRENT")
+    if "reclaim_route" in row.keys() and row["reclaim_route"] is not None:
+        route = json.loads(row["reclaim_route"])
+        reg = json.loads(db.execute("SELECT payload FROM documents WHERE kind='registry'").fetchone()[0])
+        if not route or manifest.get("route") != route or route_snapshot(reg, row) != route:
+            raise ValueError("DELIVERY_ROUTE_CHANGED")
     return row

@@ -105,3 +105,32 @@ test("UI pacing scope follows stable ChatGPT account identity", async()=>{
   assert.equal(scopeFor("H"),scopeFor("A"));
   assert.notEqual(scopeFor("H"),scopeFor("Q"));
 });
+
+test("watch-all uses separate public scoped reclaim without trusting a task child exit or waking idle lanes",()=>{
+  const code=String.raw`import tempfile,pathlib,sys,importlib.util,json
+spec=importlib.util.spec_from_file_location("web",pathlib.Path("src/web-preflight.py"));w=importlib.util.module_from_spec(spec);spec.loader.exec_module(w)
+with tempfile.TemporaryDirectory() as d:
+ p=pathlib.Path(d);state=p/"state";state.mkdir();config=p/"config";config.mkdir()
+ reg={"defaultAccount":"a","accounts":{"a":{"identity":"login"}},"projects":{"P":{},"Q":{}},"chats":{}}
+ rt={"tasks":{str(i):{"taskId":str(i),"account":"a","project":name,"status":"RUNNING"} for i,name in enumerate(["P","P","Q"])}}
+ (config/"registry.json").write_text(json.dumps(reg));(state/"runtime.json").write_text(json.dumps(rt))
+ calls=[]
+ class Completed:returncode=0;stdout='{"ok":true,"closed":[]}';stderr=""
+ w.subprocess.run=lambda args,**kwargs:(calls.append(args) or Completed())
+ def run():
+  try:w.run("watch-all",config,state,["bridge","watch"])
+  except SystemExit as e:assert e.code==0
+ run();assert len(calls)==5,calls
+ assert all("--skip-lifecycle" in a for a in calls[:3]),calls
+ assert [a[a.index("--project")+1] for a in calls]==["P","P","Q","P","Q"],calls
+ assert all(a[1:4]==["space","prune","--all"] for a in calls[3:]),calls
+ calls.clear()
+ try:w.run("watch-all",config,state,["bridge","watch","--dry-run"])
+ except SystemExit as e:assert e.code==0
+ assert len(calls)==3 and not any("prune" in a for a in calls),calls
+ calls.clear()
+ calls.clear();w.cooldown=lambda *args:{"active":True};run();assert not calls
+ rt["tasks"]={};(state/"runtime.json").write_text(json.dumps(rt));w.cooldown=lambda *args:{"active":False};run();assert not calls
+ print("PASS scoped admission, dedup, cooldown, idle")`;
+  assert.match(execFileSync("python3",["-c",code],{encoding:"utf8"}),/PASS scoped admission/);
+});

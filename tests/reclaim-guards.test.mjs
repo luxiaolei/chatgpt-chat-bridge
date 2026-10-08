@@ -26,7 +26,7 @@ async function fixture(orphan=false,change=()=>{}) {
     snapshot:{url:orphan?home:url,composerCount:1,composerAttachmentsEmpty:true,composerRawText:"",generating:false,approvalRequired:false},
     context:{sessionRefs:[],unboundProjectIds:[],unboundAny:false},closed:0,states:0,queries:0};
   await change(f);let tabReads=0;
-  const pages=f.tabs.map(tab=>({label:tab.label,url:async()=>f.pageUrl??tab.url,close:async()=>{f.closed++;(f.closedPages||=[]).push(tab.label);if(f.closeError)throw f.closeError;}}));
+  const pages=f.tabs.map(tab=>({label:tab.label,url:async()=>f.pageUrl??tab.url,close:async()=>{f.closed++;(f.closedPages||=[]).push(tab.label);if(f.closeError)throw f.closeError;f.tabs=f.tabs.filter(t=>t.label!==tab.label);if(f.freshTabs)f.freshTabs=f.freshTabs.filter(t=>t.label!==tab.label);}}));
   const task={spaceId:9,page:label=>pages.find(p=>p.label===label),pages:async()=>pages,tabs:async()=>{if(tabReads++&&f.beforeFreshTabs)await f.beforeFreshTabs();return tabReads>1?f.freshTabs||f.tabs:f.tabs;},
     newPage:async()=>{f.allocations=(f.allocations||0)+1;if(f.entry==="allocate"&&f.allocations>1)return {label:"p10"};throw Error("page budget reached");}};
   const api=await new AsyncFunction("loadRuntime","state","saveRegistry","imageSessionOccupancy","pageDetachCandidates","orphanManagedPageCandidates","activeTaskStatus","composerIsEmpty","sameConversationUrl","projectHomeId","coordinated",
@@ -47,7 +47,7 @@ async function fixture(orphan=false,change=()=>{}) {
     error=>error.message==="page budget reached",async()=>{},async()=>({firstAt:Date.now()}),120,
     async()=>{throw Error("unexpected overflow");},()=>Object.assign(Error("capacity waiting"),{code:"CAPACITY_WAIT"}),
     async()=>f.available||[{id:9,name:f.terminalOverflow?"overflow":"managed",profileId:"P1",ownership:"agent",createdBy:"agent"}],{env:{}},
-    async(_page,_identity,_url,options)=>{f.inputChecks=(f.inputChecks||0)+1;if(f.inputError)throw Error(f.inputError);if(options.discardDraft===true){f.discards=(f.discards||0)+1;if(f.discardError)throw Error("discard unconfirmed");f.snapshot.composerRawText="";}}
+    async(_page,_identity,_url,options)=>{f.inputChecks=(f.inputChecks||0)+1;if(f.inputError)throw Error(f.inputError);if(options.discardDraft===true){f.discards=(f.discards||0)+1;if(f.discardError)throw Error("discard unconfirmed");f.snapshot.composerRawText="";}return _identity;}
   );
   f.result=f.entry==="allocate"?await api.newManagedPage(reg,"P","a",task,binding):f.entry==="terminal"?await api.detachTerminalTaskPages(reg,"P","a"):f.entry==="prune"?await api.pruneProjectSpace(reg,"P","a"):f.entry==="ensure"?await api.ensureProjectLocation(reg,"P","a",{create:true,confirm:true}):
     orphan?await api.reclaimOrphanManagedPage(reg,task,binding,"a"):await api.reclaimIdlePageSlot(reg,"P","a",task,binding);
@@ -90,6 +90,14 @@ test("orphan reclaim never closes an unregistered conversation or another Projec
     ["unbound UNKNOWN",f=>{f.context.unboundProjectIds=["g-p-"+"a".repeat(32)];}],
     ["unplaced UNKNOWN",f=>{f.context.unboundAny=true;}]
   ]) assert.equal((await fixture(true,change)).closed,0,name);
+});
+
+test("terminal and orphan closes recheck Space ownership, creator and physical identity",async()=>{
+  for(const orphan of [false,true]) for(const patch of [{ownership:"user"},{createdBy:"user"},{profileId:"P2"},{name:"other"},{id:10}]) {
+    const f=await fixture(orphan,f=>{f.afterState=()=>{if(f.states>=2)f.available=[{id:9,name:"managed",profileId:"P1",ownership:"agent",createdBy:"agent",...patch}];};});
+    assert.equal(f.closed,0,JSON.stringify({orphan,patch}));
+    if(!orphan) assert.equal(f.reg.chats[cid].page,"p9");
+  }
 });
 test("explicit Project discard is shared by terminal and orphan reclaim after every protection passes",async()=>{
   const permit=f=>{f.reg.projects.P.lifecycle={draftPolicy:"discard"};f.snapshot.composerRawText="old text";};
@@ -156,20 +164,20 @@ test("both reclaim helpers preserve user, draft, permission, generation and imag
   ]) assert.equal((await fixture(orphan,change)).closed,0,`${orphan}:${name}`);
 });
 
-test("reclaim checks one candidate, rechecks ownership and stops on an uncertain close",async()=>{
+test("reclaim searches safe candidates, rechecks ownership and stops on an uncertain close",async()=>{
   for(const orphan of [false,true]) {
     const addSecond=f=>{
       const second="33333333-3333-4333-8333-333333333333",secondUrl=url.replace(cid,second);
       f.tabs.push({label:"p10",url:orphan?home:secondUrl,active:false,openedBy:"agent"});
       if(!orphan){f.reg.chats[second]={...f.reg.chats[cid],id:second,page:"p10",url:secondUrl};f.rt.tasks.second={...f.rt.tasks.t,sessionId:second};}
     };
-    const one=await fixture(orphan,addSecond);assert.equal(one.states,orphan?1:2);assert.equal(one.closed,1);
-    const unsafe=await fixture(orphan,f=>{addSecond(f);f.snapshot.generating=true;});assert.equal(unsafe.states,1);assert.equal(unsafe.closed,0);
+    const one=await fixture(orphan,addSecond);assert.equal(one.states,2);assert.equal(one.closed,1);
+    const unsafe=await fixture(orphan,f=>{addSecond(f);f.snapshot.generating=true;});assert.equal(unsafe.states,2);assert.equal(unsafe.closed,0);
     for(const changed of [...(orphan?[{active:true}]:[]),{openedBy:"user"},{url:"about:blank"}])
       assert.equal((await fixture(orphan,f=>{f.freshTabs=[{...f.tabs[0],...changed}];})).closed,0);
     let observed;
     await assert.rejects(()=>fixture(orphan,f=>{addSecond(f);f.closeError=Error("close acknowledgement unknown");observed=f;}),/acknowledgement unknown/);
-    assert.equal(observed.closed,1);assert.equal(observed.states,orphan?1:2);
+    assert.equal(observed.closed,1);assert.equal(observed.states,2);
   }
 });
 
@@ -347,7 +355,7 @@ test("selected terminal empty composer uses the shared login guard and fresh clo
     const out=await fixture(false,f=>{f.tabs[0].active=true;change(f);});assert.equal(out.closed,0,name);
   }
   for(const code of ["INPUT_LOGIN_UNAVAILABLE","INPUT_LOGIN_MISMATCH","DELIVERY_TARGET_MISMATCH","USER_DRAFT_PRESENT"]){
-    let observed;await assert.rejects(()=>fixture(false,f=>{f.tabs[0].active=true;f.inputError=code;observed=f;}),new RegExp(code));assert.equal(observed.closed,0);assert.equal(observed.reg.chats[cid].page,"p9");
+    const observed=await fixture(false,f=>{f.tabs[0].active=true;f.inputError=code;});assert.equal(observed.closed,0);assert.equal(observed.reg.chats[cid].page,"p9");
   }
 });
 
@@ -355,6 +363,7 @@ test("existing reclaim input mode requires an exact Project/CID before any draft
   const guard=new Function("sameConversationUrl","projectHomeId","projectKey",section("function assertInputTarget(","\nasync function saveDraftBackup")+";return assertInputTarget;")(globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,projectHomeId,new Function(section("function projectKey(","\n")+";return projectKey;")());
   assert.doesNotThrow(()=>guard({url:"https://chatgpt.com/c/"+cid},url)); // Preserve the existing legacy input URL contract.
   assert.doesNotThrow(()=>guard({url},url,true));
+  assert.doesNotThrow(()=>guard({url:home},home,true));
   for(const changed of [home,"https://chatgpt.com/c/"+cid,url.replace(cid,"22222222-2222-4222-8222-222222222222"),url.replace("a".repeat(32),"b".repeat(32))])
     assert.throws(()=>guard({url:changed},url,true),/DELIVERY_TARGET_MISMATCH/);
 });

@@ -13,7 +13,7 @@ test('durable submit is idempotent, reserves one account and survives process re
   const config = path.join(root, 'config'), state = path.join(root, 'state');
   await mkdir(config); await mkdir(state);
   const registry = { accounts: { a: { identity: 'one' }, b: { identity: 'two' } },
-    projects: { P: { activeAccount: 'a', bindings: { a: { projectUrl: 'https://chatgpt.com/g/a/project', spaceName: 'A' }, b: { projectUrl: 'https://chatgpt.com/g/b/project', spaceName: 'B' } } } },
+    projects: { P: { activeAccount: 'a', bindings: { a: { projectUrl: 'https://chatgpt.com/g/g-p-' + 'a'.repeat(32) + '/project', spaceName: 'A', profileId: 'P1' }, b: { projectUrl: 'https://chatgpt.com/g/g-p-' + 'b'.repeat(32) + '/project', spaceName: 'B', profileId: 'P2' } } } },
     chats: { controller: { id: 'controller', project: 'P', account: 'a', role: 'conductor', status: 'active' } } };
   await writeFile(path.join(config, 'registry.json'), JSON.stringify(registry));
   await writeFile(path.join(state, 'runtime.json'), JSON.stringify({ tasks: {} }));
@@ -94,7 +94,7 @@ test('stale in-flight delivery becomes unknown and cannot hold an account foreve
   const fake = path.join(root, 'bridge-worker');
   try {
     await writeFile(path.join(config, 'registry.json'), JSON.stringify({
-      accounts: { a: { identity: 'one' } }, projects: { P: { bindings: { a: { projectUrl: 'https://chatgpt.com/g/g-p-' + 'a'.repeat(32) + '/project' } } } },
+      accounts: { a: { identity: 'one' } }, projects: { P: { bindings: { a: { projectUrl: 'https://chatgpt.com/g/g-p-' + 'a'.repeat(32) + '/project', profileId: 'P1' } } } },
       chats: { controller: { id: 'controller', project: 'P', account: 'a', status: 'active' } },
     }));
     await writeFile(path.join(state, 'runtime.json'), JSON.stringify({ tasks: {} }));

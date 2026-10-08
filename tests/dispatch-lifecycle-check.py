@@ -333,7 +333,7 @@ def temporary_queue(coordinator, fakes, *, existing=True, worker_body):
     project_id = 'g-p-' + 'a' * 32
     reg = {'accounts': {'a': {'identity': 'one'}},
            'projects': {'P': {'bindings': {'a': {'projectId': project_id,
-             'projectUrl': 'https://chatgpt.com/g/' + project_id + '/project'}}}},
+             'projectUrl': 'https://chatgpt.com/g/' + project_id + '/project', 'profileId': 'P1'}}}},
            'chats': {'controller': {'id': 'controller', 'project': 'P', 'account': 'a', 'role': 'conductor'},
                      'worker': {'id': 'worker', 'project': 'P', 'account': 'a', 'role': 'worker'}}}
     (config/'registry.json').write_text(json.dumps(reg))

@@ -184,6 +184,7 @@ def connection(config, state, initialize=True):
         ("local_owner", "TEXT"),
         ("native_target", "TEXT"),
         ("routing_advice", "TEXT"),
+        ("reclaim_route", "TEXT"),
     ):
         ensure_column(db, "operations", name, declaration)
     db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS operations_active_placement
@@ -1098,13 +1099,23 @@ def materialize_pending_callbacks(db):
             if not identity:
                 continue
             db.execute("""UPDATE operations SET status='QUEUED',account_alias=?,account_id=?,caller_ref=?,session_ref=?,
-                          role=?,not_before=?,reason=NULL,updated_at=? WHERE id=? AND status='WAITING_ROUTE'""",
+                          role=?,not_before=?,reason=NULL,updated_at=?,reclaim_route=?
+                          WHERE id=? AND status='WAITING_ROUTE' AND attempts=? AND claimed_at IS ?""",
                        (alias, account_id(identity), target_ref, target_ref, target.get("role") or target_ref,
-                        time.time(), stamp(), row["id"]))
+                        time.time(), stamp(), redirected_notification_route(reg, row, alias, identity),
+                        row["id"], row["attempts"], row["claimed_at"]))
         db.commit()
     except Exception:
         db.rollback()
         raise
+
+
+def redirected_notification_route(reg, row, alias, identity):
+    # A pre-child committed-successor redirect uses one CAS; legacy proof stays absent.
+    if row["reclaim_route"] is not None:
+        target = {**dict(row), "account_alias": alias, "account_id": account_id(identity)}
+        return json.dumps(delivery_attempt_module().route_snapshot(reg, target), sort_keys=True)
+    return None
 
 
 def refresh_waiting_routes(db):
@@ -1134,9 +1145,11 @@ def refresh_waiting_routes(db):
                                   WHERE event_id=? AND target_ref=?""",
                                (target_ref, stamp(), row["event_id"], row["session_ref"]))
             db.execute("""UPDATE operations SET status='QUEUED',account_alias=?,account_id=?,caller_ref=?,session_ref=?,
-                          role=?,not_before=?,reason=NULL,updated_at=? WHERE id=? AND status='WAITING_ROUTE'""",
+                          role=?,not_before=?,reason=NULL,updated_at=?,reclaim_route=?
+                          WHERE id=? AND status='WAITING_ROUTE' AND attempts=? AND claimed_at IS ?""",
                        (alias, account_id(identity), target_ref, target_ref, target.get("role") or target_ref,
-                        time.time(), stamp(), row["id"]))
+                        time.time(), stamp(), redirected_notification_route(reg, row, alias, identity),
+                        row["id"], row["attempts"], row["claimed_at"]))
             if row["kind"] == "callback" and row["event_id"]:
                 db.execute("UPDATE task_results SET callback_status='QUEUED' WHERE callback_operation_id=?",
                            (row["id"],))
@@ -1164,14 +1177,16 @@ def retarget_notification(db, row):
         return None
     begin_immediate(db)
     try:
+        changed = db.execute("""UPDATE operations SET account_alias=?,account_id=?,caller_ref=?,session_ref=?,role=?,reason=NULL,updated_at=?,reclaim_route=?
+                      WHERE id=? AND status='DISPATCHING' AND attempts=? AND claimed_at IS ?""",
+                   (alias, account_id(identity), successor_ref, successor_ref, successor.get("role") or successor_ref,
+                    stamp(), redirected_notification_route(reg, row, alias, identity), row["id"], row["attempts"], row["claimed_at"]))
+        if changed.rowcount != 1:
+            raise ValueError("DELIVERY_ATTEMPT_NO_LONGER_CURRENT")
         if row["kind"] == "management" and row["event_id"]:
             db.execute("""UPDATE management_deliveries SET target_ref=?,status='QUEUED',updated_at=?
                           WHERE event_id=? AND target_ref=?""",
                        (successor_ref, stamp(), row["event_id"], row["session_ref"]))
-        db.execute("""UPDATE operations SET account_alias=?,account_id=?,caller_ref=?,session_ref=?,role=?,reason=NULL,updated_at=?
-                      WHERE id=? AND status='DISPATCHING'""",
-                   (alias, account_id(identity), successor_ref, successor_ref, successor.get("role") or successor_ref,
-                    stamp(), row["id"]))
         db.commit()
     except Exception:
         db.rollback()
@@ -2726,6 +2741,10 @@ def claim(db):
                      created_at,id LIMIT 1""", (time.time(),)).fetchone()
         queued = row
         if row:
+            if row["attempts"] == 0 and not row["native_target"]:
+                route = delivery_attempt_module().route_snapshot(registry(db), row)
+                db.execute("UPDATE operations SET reclaim_route=? WHERE id=? AND reclaim_route IS NULL",
+                           (json.dumps(route, sort_keys=True), row["id"]))
             db.execute("UPDATE operations SET status='DISPATCHING',attempts=attempts+1,claimed_at=?,updated_at=?,reason=NULL WHERE id=?",
                        (time.time(), stamp(), row["id"]))
             row = db.execute("SELECT * FROM operations WHERE id=?", (row["id"],)).fetchone()
@@ -3527,6 +3546,16 @@ def work_one(db):
             row = db.execute("SELECT * FROM operations WHERE id=?", (row["id"],)).fetchone()
     if row["native_target"]:
         return work_native(db, row)
+    if row["reclaim_route"] is not None:
+        try:
+            route = json.loads(row["reclaim_route"])
+            if not isinstance(route, dict) or not route:
+                raise ValueError("DELIVERY_ROUTE_UNPROVEN")
+            if delivery_attempt_module().route_snapshot(registry(db), row) != route:
+                raise ValueError("DELIVERY_ROUTE_CHANGED")
+        except (ValueError, TypeError) as error:
+            code = "DELIVERY_ROUTE_UNPROVEN" if str(error) != "DELIVERY_ROUTE_CHANGED" else str(error)
+            return finish(db, row, "FAILED_PRE_SEND", code, result={"ok": False, "deliveryStage": "PRE_SEND", "code": code, "childStarted": False})
     bridge = os.environ.get("CHAT_BRIDGE_BIN") or str(pathlib.Path.home() / ".local/bin/chat-bridge")
     args = [bridge]
     if row["kind"] in {"callback", "management"}:
@@ -5021,6 +5050,15 @@ def main():
                 if any(actual.get(key) != value for key, value in candidate.items()):
                     sessions.add(candidate["id"])
             rt = runtime(db)
+            for project, cfg in (reg.get("projects") or {}).items():
+                for alias, binding in (cfg.get("bindings") or {}).items():
+                    if ((reg.get("accounts") or {}).get(alias) or {}).get("identity") != identity:
+                        continue
+                    if (management_mode(db, project)["mode"] in {"PAUSED", "DRAINING"} or
+                            rt.get("projects", {}).get(project, {}).get("watchdogPausedForUserControl")):
+                        route = re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/project/?", binding.get("projectUrl") or "", re.I)
+                        if route:
+                            unbound.add(route[1].lower())
             # ponytail: scan linked tasks per account chat; index if this read becomes a bottleneck.
             for session_ref, chat in (reg.get("chats") or {}).items():
                 project = chat.get("project")
@@ -5070,10 +5108,9 @@ def main():
                     if row["session_ref"]:
                         sessions.add(row["session_ref"])
                         continue
-                    binding = ((reg.get("projects") or {}).get(row["project"]) or {}).get("bindings", {}).get(row["account_alias"]) or {}
-                    match = re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/project/?", binding.get("projectUrl") or "", re.I)
-                    if match and ((reg.get("accounts") or {}).get(row["account_alias"]) or {}).get("identity") == identity:
-                        unbound.add(match[1].lower())
+                    route = delivery_attempt_module().original_reclaim_route(row, stable, identity)
+                    if route:
+                        unbound.add(route["projectId"])
                     else:
                         any_unbound = True
             capacity_waits, capacity_refusals = [], {}
@@ -5114,7 +5151,26 @@ def main():
                     capacity_refusals[task_id] = refusal
                 else:
                     capacity_waits.append({"taskId": task_id, "project": task["project"], "account": task["account"], "sessionId": task.get("sessionId")})
+            unplaced_scopes = []
+            for task in (rt.get("tasks") or {}).values():
+                if (str(task.get("status") or "").upper() in TERMINAL or not task.get("taskId") or
+                        ((reg.get("accounts") or {}).get(task.get("account")) or {}).get("identity") != identity or
+                        (reg.get("chats", {}).get(task.get("sessionId")) or {}).get("page")):
+                    continue
+                related = list(db.execute("SELECT * FROM operations WHERE task_id=? AND native_target IS NULL", (task["taskId"],))) if has_operations else []
+                projects = set()
+                for row in related:
+                    route = delivery_attempt_module().original_reclaim_route(row, stable, identity)
+                    if (not route or row["account_id"] != stable or row["project"] != task.get("project") or
+                            row["account_alias"] != task.get("account")):
+                        projects.clear()
+                        break
+                    projects.add(route["projectId"])
+                if projects:
+                    unplaced_scopes.append({"taskId": task["taskId"], "project": task["project"], "account": task["account"],
+                                            "sessionId": task.get("sessionId"), "projectIds": sorted(projects)})
             value = {"sessionRefs": sorted(sessions), "unboundProjectIds": sorted(unbound), "unboundAny": any_unbound,
+                     "unplacedTaskScopes": unplaced_scopes,
                      "preSendCapacityWaits": capacity_waits, "capacityWaitRefusals": capacity_refusals, "readOnly": True}
         elif command == "delivery-admission":
             context = json.load(sys.stdin)

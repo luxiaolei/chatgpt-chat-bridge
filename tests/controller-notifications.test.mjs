@@ -28,13 +28,24 @@ async function harness(f) {
     observeSession=async()=>({inputReady:true,generating:false,composerCount:1,composerAttachmentsEmpty:true,composerRawText:f.observed?.composerText||'',sessionState:'IDLE_COMPLETE',...f.observed});
     sendMessage=async(_page,message)=>{f.calls.push(['send',message]);f.markerAtSend=structuredClone(f.runtime.projects.P.pendingReconcileEvent);if(f.deliveryError||f.preSendError){const e=new Error('DELIVERY_UNCONFIRMED');e.code='DELIVERY_UNCONFIRMED';e.deliveryStage=f.preSendError?'PRE_SEND':'SEND_ATTEMPTED';throw e;}return {delivered:true};};
     emitTaskEvent=async(task,type,data)=>f.emit?f.emit(task,type,data):(f.events.push({taskId:task.taskId,type,data}),{cursor:'event-'+f.events.length});
-    coordinated=(command,payload)=>{f.calls.push([command,payload]);return f.coordinate?f.coordinate(command,payload):{status:'QUEUED',operationId:'op'};};
+    coordinated=(command,payload,extraArgs)=>{f.calls.push([command,payload]);if(command==="admission-check")return f.admit?f.admit(extraArgs):{ok:true,control:{mode:"RUNNING"}};return f.coordinate?f.coordinate(command,payload):{status:'QUEUED',operationId:'op'};};
     detachTerminalTaskPages=async()=>[];
     pruneManagedOrphanTabs=async()=>[];
     return {maybeNotifyProjectReconcile,notifyController,watchProject:watchOnce,gradedRecover};
   `)(f);
 }
 const sent=f=>f.calls.filter(([kind])=>kind==='send');
+
+test('management pause is checked before Web work and again after the awaited Send reservation',async()=>{
+  for(const denyAt of [1,2]) {
+    const f=fixture();let calls=0;
+    f.admit=()=>{if(++calls===denyAt)throw new Error('ADMISSION_PAUSED');return {ok:true,control:{mode:'RUNNING'}};};
+    const out=await (await harness(f)).maybeNotifyProjectReconcile(f.reg,'P');
+    assert.equal(out.state,'NOT_SENT');assert.equal(sent(f).length,0);
+    assert.equal(f.runtime.projects.P.pendingReconcileEvent.deliveryStage,'PRE_SEND');
+    assert.equal(f.calls.filter(([kind])=>kind==='page').length,denyAt===1?0:1);
+  }
+});
 
 test('legacy reconcile uses the existing unique root on its actual account',async()=>{
   const f=fixture(),api=await harness(f);

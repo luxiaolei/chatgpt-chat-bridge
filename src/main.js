@@ -605,16 +605,10 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     const linked=Object.values(rt.tasks||{}).filter(t=>t.sessionId===chat.id);
     return linked.length && linked.every(t=>t.project===chat.project && t.account===chat.account && ["COMPLETE","FAILED","CANCELLED","RESULT_RECORDED"].includes(String(t.status).toUpperCase()) &&
       !t.watchdogPendingNotification && !t.externalResponsePending && !t.watchdogPausedForUserControl);
-  }).filter(chat=>sameConversationUrl(tabs.find(t=>t.label===chat.page)?.url,chat.url,targetProject)).slice(0,1)) {
+  }).filter(chat=>sameConversationUrl(tabs.find(t=>t.label===chat.page)?.url,chat.url,targetProject))) {
     let page=null;
     try { page=task.page(candidate.page); }
-    catch {
-      candidate.page=null;
-      candidate.detachedAt=new Date().toISOString();
-      candidate.attachmentEpoch=Number(candidate.attachmentEpoch||0)+1;
-      await saveRegistry(reg);
-      continue;
-    }
+    catch { continue; } // A missing handle is not proof that the tab was closed.
     const tab=tabs.find(item=>item.label===candidate.page);
     if(!tab || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
@@ -632,7 +626,10 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     if(!fresh || fresh.openedBy!=="agent" || !sameConversationUrl(fresh.url,candidate.url,targetProject)) continue;
     const context=coordinated("page-reclaim-context",reclaimContext);
     if(context.sessionRefs.includes(candidate.id) || context.unboundAny || context.unboundProjectIds.includes(targetProject)) continue;
-    await assertInputSafe(page,reg.accounts[account].identity,candidate.url,{discardDraft:!!discard,reclaim:true});
+    if(!await assertInputSafe(page,reg.accounts[account].identity,candidate.url,{discardDraft:!!discard,reclaim:true}).catch(error=>{
+      if(discard) throw error; // A partial discard is not a read-only refusal; stop this sweep.
+      return null;
+    })) continue;
     const current=(await task.tabs()).find(t=>t.label===candidate.page);
     const closing=await state(page,false,null,true).catch(()=>null);
     if(!current || current.openedBy!=="agent" || !sameConversationUrl(current.url,candidate.url,targetProject) ||
@@ -640,7 +637,11 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
       !sameConversationUrl(closing.url,candidate.url,targetProject) || imageSessionOccupancy(reg,candidate).occupied) continue;
     const guarded=coordinated("page-reclaim-context",reclaimContext);
     if(guarded.sessionRefs.includes(candidate.id) || guarded.unboundAny || guarded.unboundProjectIds.includes(targetProject)) continue;
+    const spaces=(await listTaskSpaces()).filter(space=>Number(space.id)===Number(task.spaceId));
+    if(spaces.length!==1 || spaces[0].name!==binding.spaceName || spaces[0].profileId!==binding.profileId ||
+      spaces[0].ownership!=="agent" || spaces[0].createdBy!=="agent") continue;
     await page.close(); // An uncertain close must not fall through to another candidate.
+    if((await task.tabs()).some(tab=>tab.label===oldPage)) throw new Error("PAGE_CLOSE_UNCONFIRMED");
     candidate.page=null;
     candidate.detachedAt=new Date().toISOString();
     candidate.attachmentEpoch=Number(candidate.attachmentEpoch||0)+1;
@@ -663,9 +664,9 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseC
   }
   const rt=await loadRuntime();
   const pages=await task.pages().catch(()=>[]), tabs=await task.tabs().catch(()=>[]);
-  const liveTasks=Object.values(rt.tasks||{}).filter(item=>activeTaskStatus(item.status));
+  let liveTasks=Object.values(rt.tasks||{}).filter(item=>activeTaskStatus(item.status));
   let reclaimContext=null;
-  const hasUnplacedLiveTasks=()=>liveTasks.some(item=>{
+  const hasUnplacedLiveTasks=(candidateProject=null)=>liveTasks.some(item=>{
     const chat=item.sessionId?reg.chats?.[item.sessionId]:null;
     const taskBinding=projectBindingForTask(reg,item);
     const identity=reg.accounts?.[account||binding.account]?.identity;
@@ -676,6 +677,10 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseC
         if(reclaimContext.preSendCapacityWaits?.some(wait=>wait.taskId===item.taskId && wait.project===item.project &&
           wait.account===liveAccount && wait.sessionId===(item.sessionId||null))) return false;
       }
+      reclaimContext ||= coordinated("page-reclaim-context",{account:account||binding.account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
+      if(candidateProject && !item.watchdogPausedForUserControl && !item.watchdogPendingNotification && !item.externalResponsePending &&
+        reclaimContext.unplacedTaskScopes?.some(scope=>scope.taskId===item.taskId && scope.project===item.project && scope.account===liveAccount &&
+          scope.sessionId===(item.sessionId||null) && scope.projectIds.length && !scope.projectIds.includes(candidateProject))) return false;
       return true;
     }
     if(!samePhysicalSpace(chat,binding,task) && !samePhysicalSpace(taskBinding,binding,task)) return false;
@@ -685,8 +690,7 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseC
       Number(chat.spaceId)!==Number(task.spaceId) || chat.profileId!==binding.profileId || taskBinding?.profileId!==binding.profileId || !targetProject ||
       !sameConversationUrl(tabs.find(tab=>tab.label===chat.page)?.url,chat.url,targetProject);
   });
-  // Bound live pages remain protected below; an unplaced live task vetoes the Space.
-  if(hasUnplacedLiveTasks()) return null;
+  // An unplaced task is scoped only by authoritative original-route proof, never its current binding.
 
   const protectedPages=new Set();
   for(const project of Object.values(reg.projects||{})) {
@@ -714,7 +718,7 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseC
       projectHomeId(tab?.url)===projectHomeId(binding.projectUrl);
     return /^(about:blank|chrome:\/\/newtab\/?$)$/i.test(String(tab?.url||"")) ||
       !!projectHomeId(binding.projectUrl) && projectHomeId(tab?.url)===projectHomeId(binding.projectUrl);
-  }).slice(0,1)) {
+  })) {
     const tab=tabs.find(t=>t.label===page.label), blank=/^(about:blank|chrome:\/\/newtab\/?$)$/i.test(tab.url);
     const snapshot=blank?null:await state(page).catch(()=>null);
     if(!blank && (!snapshot || snapshot.approvalRequired!==false || snapshot.generating!==false)) continue;
@@ -723,18 +727,28 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseC
     if(!blank && !composerIsEmpty(snapshot) && !discard) continue;
     if(!blank && await page.url()!==tab.url) continue;
     const context=reclaimContext=coordinated("page-reclaim-context",{account:account||binding.account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
-    if(hasUnplacedLiveTasks() || context.unboundAny || (blank?context.unboundProjectIds.length:context.unboundProjectIds.includes(projectHomeId(tab.url)))) continue;
+    if(hasUnplacedLiveTasks(blank?null:projectHomeId(tab.url)) || context.unboundAny || (blank?context.unboundProjectIds.length:context.unboundProjectIds.includes(projectHomeId(tab.url)))) continue;
     const fresh=(await task.tabs()).find(t=>t.label===page.label);
     if(!fresh || fresh.active || fresh.openedBy!=="agent" || fresh.url!==tab.url) continue;
-    if(discard) {
-      await assertInputSafe(page,reg.accounts[account||binding.account].identity,tab.url,{discardDraft:true,reclaim:true});
-      reclaimContext=coordinated("page-reclaim-context",{account:account||binding.account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
-      const current=(await task.tabs()).find(t=>t.label===page.label);
-      if(hasUnplacedLiveTasks() || reclaimContext.unboundAny || reclaimContext.unboundProjectIds.includes(projectHomeId(tab.url)) ||
-        !current || current.active || current.openedBy!=="agent" || current.url!==tab.url) continue;
+    if(!blank) {
+      if(!await assertInputSafe(page,reg.accounts?.[account||binding.account]?.identity,tab.url,{discardDraft:!!discard,reclaim:true}).catch(error=>{
+        if(discard) throw error;
+        return null;
+      })) continue;
+      const closing=await state(page,false,null,true).catch(()=>null);
+      if(!closing || closing.url!==tab.url || closing.approvalRequired!==false || closing.generating!==false || !composerIsEmpty(closing)) continue;
     }
+    liveTasks=Object.values((await loadRuntime()).tasks||{}).filter(item=>activeTaskStatus(item.status));
+    reclaimContext=coordinated("page-reclaim-context",{account:account||binding.account,attempt:globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__||null});
+    const current=(await task.tabs()).find(t=>t.label===page.label);
+    if(hasUnplacedLiveTasks(blank?null:projectHomeId(tab.url)) || reclaimContext.unboundAny || (blank?reclaimContext.unboundProjectIds.length:reclaimContext.unboundProjectIds.includes(projectHomeId(tab.url))) ||
+      !current || current.active || current.openedBy!=="agent" || current.url!==tab.url || await page.url()!==tab.url) continue;
+    const spaces=(await listTaskSpaces()).filter(space=>Number(space.id)===Number(task.spaceId));
+    if(spaces.length!==1 || spaces[0].name!==binding.spaceName || spaces[0].profileId!==binding.profileId ||
+      spaces[0].ownership!=="agent" || spaces[0].createdBy!=="agent") continue;
     if(reuseControlBinding) return {page:page.label,handle:page,reason:"control-home-reuse"};
     await page.close();
+    if((await task.tabs()).some(tab=>tab.label===page.label)) throw new Error("PAGE_CLOSE_UNCONFIRMED");
     return {page:page.label,reason:"orphan-managed"};
   }
   return null;
@@ -1910,18 +1924,25 @@ async function activateComposer(page) {
   await page.focus(COMPOSER_SELECTOR);
 }
 
-async function triggerSend(page, targetUrl=null) {
+async function triggerSend(page, targetUrl=null, lifecycleScope=null) {
   const hasSend=await page.evaluate(()=>!!document.querySelector('button[data-testid="send-button"]'));
   const snapshot=await state(page,false,"approval");
   if(snapshot.approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
   if(targetUrl) assertInputTarget(snapshot,targetUrl);
+  const admit=()=>{
+    if(lifecycleScope) {
+      const control=coordinated("admission-check",null,[lifecycleScope.project,...(lifecycleScope.workgroupId?["--workgroup",lifecycleScope.workgroupId]:[])]);
+      if(control.ok!==true || control.control?.mode!=="RUNNING") throw new Error("ADMISSION_NOT_RUNNING");
+    }
+    if(globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__) coordinated("delivery-admission",globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__);
+  };
   // The exclusive, synced intent is an uncertainty barrier, not a claim that
   // the UI click happened. A crash from this point never permits replay.
-  if(globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__)
-    coordinated("delivery-admission",globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__);
-  await recordDeliveryStage("SEND_INTENT",{control:hasSend?"click":"enter"});
+  admit();
+  await recordDeliveryStage("SEND_INTENT",{control:hasSend?"click":"enter",targetUrl:snapshot.url});
   sendAttempted=true;
   try {
+    admit();
     if(hasSend) {
       await page.click('button[data-testid="send-button"]'); return "click";
     }
@@ -1971,7 +1992,8 @@ function postSendObservation(before, after, witness, condition=null, observation
 }
 
 function assertInputTarget(snapshot, targetUrl, reclaim=false) {
-  if(!targetUrl || (reclaim && (!projectKey(targetUrl) || !sameConversationUrl(snapshot.url,targetUrl,projectKey(targetUrl)))) || (snapshot.url!==targetUrl && !sameConversationUrl(snapshot.url,targetUrl) &&
+  const exactHome=!!projectHomeId(targetUrl) && snapshot.url===targetUrl;
+  if(!targetUrl || (reclaim && !exactHome && (!projectKey(targetUrl) || !sameConversationUrl(snapshot.url,targetUrl,projectKey(targetUrl)))) || (snapshot.url!==targetUrl && !sameConversationUrl(snapshot.url,targetUrl) &&
     !(projectHomeId(snapshot.url) && projectHomeId(snapshot.url)===projectHomeId(targetUrl)))) {
     const error=new Error("DELIVERY_TARGET_MISMATCH");error.code=error.message;throw error;
   }
@@ -2314,7 +2336,7 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
       getterSource,serializerSource,observedAt:new Date().toISOString()};
 }
 
-async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
+async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null, lifecycleScope=null) {
   const attempts=[], observation={latest:null};
   let witness=null, before=null;
   try {
@@ -2407,7 +2429,7 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null) {
       throw new Error('NATIVE_SUBMISSION_TARGET_MISMATCH');
     before.nativeWitness=witness;
     await recordDeliveryStage("INPUT_VERIFIED",{nativeWitness:nativeWitnessReceipt(witness),nativeBody:witness?.body||null});
-    attempts.push(await triggerSend(page,inputTarget));
+    attempts.push(await triggerSend(page,inputTarget,lifecycleScope));
     await recordDeliveryStage("SEND_RETURNED",{control:attempts[0]});
     const after=await waitForDelivery(page,before,8000,observation);
     observation.latest=after;
@@ -3472,6 +3494,12 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
   if(!candidate.ready) return {project:projectName,event:candidate.event,state:"DEFERRED_MIN_GAP",waitSec:candidate.waitSec,eventKey:candidate.eventKey};
   if(workgroupId && !group) return {project:projectName,workgroupId,event:candidate.event,state:"WORKGROUP_NOT_REGISTERED",eventKey:candidate.eventKey};
   let owner=null, attempt=null, sendReserved=false, delivery=null;
+  const admit=()=>{
+    try {
+      const control=coordinated("admission-check",null,[projectName,...(workgroupId?["--workgroup",workgroupId]:[])]);
+      if(control.ok!==true || control.control?.mode!=="RUNNING") throw new Error("ADMISSION_NOT_RUNNING");
+    } catch(error) { error.deliveryStage="PRE_SEND"; throw error; }
+  };
   try {
     if(candidate.ownerSessionRef?.startsWith("codex:"))
       return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"LOCAL_OWNER_REQUIRES_PULL",ownerSessionRef:candidate.ownerSessionRef,eventKey:candidate.eventKey};
@@ -3482,6 +3510,7 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
       return {project:projectName,workgroupId:workgroupId||null,event:candidate.event,state:"OWNER_ACCOUNT_MISMATCH",ownerSessionRef:owner.id,account:owner.account,eventKey:candidate.eventKey};
     if(Object.values(rt.tasks||{}).some(task=>task.project===projectName && task.sessionId===owner.id && task.watchdogPausedForUserControl))
       return {project:projectName,workgroupId:workgroupId||null,state:"USER_CONTROLLED",ownerSessionRef:owner.id,paused:true,eventKey:candidate.eventKey};
+    admit();
     await assertWebAvailable(owner.account);
     const {page}=await ensurePage(reg,owner,{pauseOnUserControl:true});
     const observed=await observeSession(owner,page,null);
@@ -3497,7 +3526,8 @@ async function maybeNotifyProjectReconcile(reg, projectName, account=null, workg
     rt.projects[projectName]=runtimeProject;
     await saveRuntime(rt);
     sendReserved=true;
-    delivery=await sendMessage(page,projectReconcileMessage(candidate),owner.url);
+    admit();
+    delivery=await sendMessage(page,projectReconcileMessage(candidate),owner.url,null,{project:projectName,workgroupId});
     const latest=await loadRuntime();
     const currentProject={...(latest.projects[projectName]||{})};
     const state=workgroupId ? {...((currentProject.workgroups||{})[workgroupId]||{})} : currentProject;
@@ -3722,17 +3752,22 @@ async function pruneManagedOrphanTabs(reg, project=null, account=null, options={
           observed.profileId===space.profileId && observed.identity===reg.accounts[record.account].identity)
       ));
     if(!scoped.length) continue;
-    const owner=scoped[0];
-    let opened;
-    try { opened=await openBoundTask(reg,owner.project,owner.account,{pauseOnUserControl:true,requireExistingSpace:true,
-      spaceOverride:{spaceName:space.name,spaceId:space.id,profileId:space.profileId}}); }
-    catch { continue; }
-    if(Number(opened.task.spaceId)!==Number(space.id)) continue;
-    const tabs=await opened.task.tabs().catch(()=>[]);
-    const record=scoped.find(item=>reg.accounts[item.account].identity===reg.accounts[owner.account].identity &&
-      projectHomeId(item.projectUrl) && tabs.some(tab=>projectHomeId(tab.url)===projectHomeId(item.projectUrl)))||owner;
-    const reclaimed=await reclaimOrphanManagedPage(reg,opened.task,{...opened.binding,projectUrl:record.projectUrl},owner.account);
-    if(reclaimed) closed.push({spaceId:space.id,spaceName:space.name,page:reclaimed.page});
+    const seen=new Set();
+    for(const record of scoped) {
+      const key=projectHomeId(record.projectUrl);
+      if(seen.has(key) || reg.accounts[record.account].identity!==reg.accounts[scoped[0].account].identity) continue;
+      seen.add(key);
+      let opened;
+      try { opened=await openBoundTask(reg,record.project,record.account,{pauseOnUserControl:true,requireExistingSpace:true,
+        spaceOverride:{spaceName:space.name,spaceId:space.id,profileId:space.profileId}}); }
+      catch { continue; }
+      if(Number(opened.task.spaceId)!==Number(space.id)) continue;
+      const reclaimed=await reclaimOrphanManagedPage(reg,opened.task,{...opened.binding,projectUrl:record.projectUrl},record.account);
+      if(reclaimed) {
+        closed.push({spaceId:space.id,spaceName:space.name,page:reclaimed.page});
+        break; // One close per Space and maintenance round, including ambiguous-close protection.
+      }
+    }
   }
   return closed;
 }
@@ -4533,7 +4568,7 @@ else if(cmd==="watch"){
   const quiet=args.includes("--quiet");
   const results=await watchOnce(reg,project,accountArg,{autoRecover,maxAttempts,maxTotalRecoveries,cooldownSec,aggressive,
     taskId:opt("task-id",null),skipTasks:args.includes("--skip-tasks"),skipLifecycle:args.includes("--skip-lifecycle")});
-  const noteworthy=results.some(r=>["WATCH_ERROR","STATE_STORE_DEFERRED"].includes(r.state) || r.notification?.sent || r.projectLifecycle?.state==="SENT" || r.projectLifecycle?.state==="NOT_SENT" || (r.recovery?.action&&!["NONE","COOLDOWN"].includes(r.recovery.action)));
+  const noteworthy=results.some(r=>["WATCH_ERROR","STATE_STORE_DEFERRED","TERMINAL_TABS_DETACHED","ORPHAN_TABS_RECLAIMED"].includes(r.state) || r.notification?.sent || r.projectLifecycle?.state==="SENT" || r.projectLifecycle?.state==="NOT_SENT" || (r.recovery?.action&&!["NONE","COOLDOWN"].includes(r.recovery.action)));
   if(!quiet || noteworthy) print({at:new Date().toISOString(),project:project||null,iteration:1,autoRecover,results});
 }
 else if(["archive","retire","delete","forget"].includes(cmd)){
@@ -4599,7 +4634,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
   }
   if(cmd==="send"){
     await recordDeliveryStage("TARGET_OBSERVED",{project:chat.project,account:chat.account,sessionId:chat.id,
-      url:await page.url(),page:page.label||null,spaceId:chat.spaceId||null});
+      url:await page.url(),page:page.label||null,spaceId:chat.spaceId||null,profileId:binding.profileId||null});
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
     const requestedModel=opt("model",null), requestedEffort=opt("effort",null);
     const dispatchModel=await applyDispatchModel(page,chat,requestedModel,requestedEffort);
@@ -4753,7 +4788,7 @@ else if(cmd==="new"){
     await page.goto("https://chatgpt.com/",{waitUntil:"load",timeout:20000});
     await openProjectPage(page,p,binding.projectUrl||null);
     await recordDeliveryStage("TARGET_OBSERVED",{project:p,account:a,sessionId:null,
-      url:await page.url(),page:page.label||null,spaceId:task.spaceId||null});
+      url:await page.url(),page:page.label||null,spaceId:task.spaceId||null,profileId:binding.profileId||null});
     await page.waitForSelector(COMPOSER_SELECTOR,{state:"visible",timeout:15000});
     const model=opt("model","Latest"), requestedEffort=opt("effort",null);
     let applied=null;

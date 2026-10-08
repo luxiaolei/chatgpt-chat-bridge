@@ -499,7 +499,7 @@ test('actual native send persists original baseline, intent and source before a 
   const journal=await journalFixture();
   try{
     const f=fixture(x=>x.attempt=journal);await inBrowser(f,async({runNew})=>runNew());
-    assert.equal(f.sends,1);assert.equal(f.admissions,1);
+    assert.equal(f.sends,1);assert.equal(f.admissions,2);
     const files=await readdir(journal.directory);
     for(const name of ['10-TARGET_OBSERVED.json','20-BEFORE_INPUT.json','30-INPUT_VERIFIED.json','40-SEND_INTENT.json','50-SEND_RETURNED.json','70-DELIVERY_CONFIRMED.json'])assert.ok(files.includes(name),name);
     const verified=JSON.parse(await readFile(path.join(journal.directory,'30-INPUT_VERIFIED.json'),'utf8'));

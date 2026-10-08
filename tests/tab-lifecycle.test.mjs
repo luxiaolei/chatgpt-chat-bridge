@@ -17,9 +17,9 @@ async function fixture(status="RESULT_RECORDED",tab={},snapshot={}) {
     saveRegistry=async()=>{f.saved++;};
     imageSessionOccupancy=()=>({occupied:false});
     state=async()=>f.snapshot;
-    listTaskSpaces=async()=>[{id:7,name:'managed',profileId:'P1',ownership:'agent'}];
+    listTaskSpaces=async()=>[{id:7,name:'managed',profileId:'P1',ownership:'agent',createdBy:'agent'}];
     coordinated=command=>{if(command!=='page-reclaim-context')throw Error(command);return {sessionRefs:[],unboundProjectIds:[],unboundAny:false};};
-    openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,tabs:async()=>[f.tab],page:()=>({url:async()=>f.tab.url,evaluate:async()=>"login-a",close:async()=>{f.closed++;}})}});
+    openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,tabs:async()=>f.closed?[]:[f.tab],page:()=>({url:async()=>f.tab.url,evaluate:async()=>"login-a",close:async()=>{f.closed++;}})}});
     return detachTerminalTaskPages;
   `)(f);
   f.out=await detach(f.reg,"P","a");return f;

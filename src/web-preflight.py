@@ -254,15 +254,7 @@ def run(action, config, state, args):
             status = str(task.get("status") or "").upper()
             pending = status == "BLOCKED" and task.get("watchdogPendingNotification")
             if (status not in terminal and capacity_retry_ready(task)) or pending:
-                task_rows.append((str(task.get("taskId") or task_key), task_account(reg, task)))
-        lifecycle_rows = []
-        for name in ([project] if project else reg.get("projects", {})):
-            if name:
-                lifecycle_rows.extend((name, account) for _group, account in reconcile_pending_scopes(reg, runtime, name))
-        lifecycle_rows = list(dict.fromkeys(lifecycle_rows))
-        lifecycle_rows.extend((name, account) for name, account in terminal_detach_candidates(reg, runtime)
-                              if (not project or name == project) and (name, account) not in lifecycle_rows)
-
+                task_rows.append((str(task.get("taskId") or task_key), task_account(reg, task), task.get("project")))
         def wait_for_lane(account):
             stamp_path = state / ("ui-pacing-" + scope(reg, account) + ".last")
             try:
@@ -274,14 +266,27 @@ def run(action, config, state, args):
                 time.sleep(wait)
 
         result = 0
-        for task_id, account in task_rows:
-            if not task_id or cooldown(reg, state, account)["active"]:
+        admitted = {}
+        for task_id, account, name in task_rows:
+            if not task_id or not name or cooldown(reg, state, account)["active"]:
                 continue
             wait_for_lane(account)
-            completed = subprocess.run([script, *command, "--account", account,
-                                        "--task-id", task_id, "--skip-lifecycle"], check=False)
+            key = (name, scope(reg, account))
+            admitted.setdefault(key, (name, account))
+            extra = ["--account", account, "--task-id", task_id, "--skip-lifecycle"]
+            if not project:
+                extra += ["--project", name]
+            completed = subprocess.run([script, *command, *extra], check=False)
             if completed.returncode and not result:
                 result = completed.returncode
+        runtime = read_document(config, state, "runtime")
+        lifecycle_rows = []
+        for name in ([project] if project else reg.get("projects", {})):
+            if name:
+                lifecycle_rows.extend((name, account) for _group, account in reconcile_pending_scopes(reg, runtime, name))
+        lifecycle_rows = list(dict.fromkeys(lifecycle_rows))
+        lifecycle_rows.extend((name, account) for name, account in terminal_detach_candidates(reg, runtime)
+                              if (not project or name == project) and (name, account) not in lifecycle_rows)
         for name, account in lifecycle_rows:
             if cooldown(reg, state, account)["active"]:
                 continue
@@ -292,6 +297,22 @@ def run(action, config, state, args):
             completed = subprocess.run([script, *command, *extra], check=False)
             if completed.returncode and not result:
                 result = completed.returncode
+        if "--dry-run" not in command and "--skip-lifecycle" not in command:
+            for name, account in admitted.values():
+                if cooldown(reg, state, account)["active"]:
+                    continue
+                wait_for_lane(account)
+                completed = subprocess.run([script, "space", "prune", "--all", "--project", name, "--account", account],
+                                           check=False, capture_output=True, text=True)
+                try:
+                    closed = json.loads(completed.stdout).get("closed")
+                except (ValueError, AttributeError):
+                    closed = None
+                if closed or completed.returncode:
+                    print(completed.stdout, end="")
+                    print(completed.stderr, end="", file=sys.stderr)
+                if completed.returncode and not result:
+                    result = completed.returncode
         # No eligible work means no browser wake-up. Orphan cleanup runs with
         # admitted account-scoped maintenance, never through an idle bypass.
         raise SystemExit(result)

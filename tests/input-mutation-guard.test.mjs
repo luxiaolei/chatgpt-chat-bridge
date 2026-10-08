@@ -33,7 +33,7 @@ function fixture(change={}) {
   form.querySelectorAll=s=>s==='button'?buttons:change.attachment&&s.includes('Remove ')?[{}]:[];
   const f={composers,composer,root,buttons,calls,chat,currentUrl:url,login:change.nullLogin?null:change.login??'verified-user',change,closed:0,
     reg:{accounts:change.noIdentity?{}:{a:{identity:'verified-user'}},chats:{[chat.id]:chat},
-      projects:{P:{activeAccount:'a',lifecycle:change.discard?{draftPolicy:'discard'}:{},bindings:{a:{projectUrl:home}}}}}};
+      projects:{P:{activeAccount:'a',lifecycle:change.discard?{draftPolicy:'discard'}:{},bindings:{a:{projectUrl:home,spaceId:2,spaceName:"managed",profileId:"P1"}}}}}};
   composer.outerHTML='<div id="prompt-textarea">'+(change.raw||'')+'</div>';form.outerHTML='<form>'+composer.outerHTML+'</form>';
   if(change.discard&&!change.plainComposer) {
     const doc={get content(){return {size:composer.textContent.length};},textBetween:()=>composer.innerText,
@@ -74,11 +74,12 @@ async function run(f,fn) {
       'const sampleState=state;state=async(...args)=>{const snapshot=await sampleState(...args);if(snapshot.url===url)Object.assign(snapshot,{lastUserId:"22222222-2222-4222-8222-222222222222",userMessageIds:["22222222-2222-4222-8222-222222222222"],lastUserSourceCondition:"BOUND_SOURCE",lastUserSource:{messageId:"22222222-2222-4222-8222-222222222222",conversationId:chat.id,text:"Previous synthetic request"}});return snapshot;};',
       'assertImagePageFree=async()=>{};detectWebRateLimit=async()=>{};recordDeliveryStage=async()=>{};',
       'if(f.change.afterIntent)recordDeliveryStage=async phase=>{if(phase==="DRAFT_DISCARD_INTENT")f.change.afterIntent(f);};',
-      "coordinated=command=>{if(f.change.paused)throw Error('DRAFT_DISCARD_ADMISSION_DENIED');return command==='page-reclaim-context'?{sessionRefs:[],unboundProjectIds:[],unboundAny:false}:{ok:true};};",
+      "coordinated=command=>{if(f.change.paused)throw Error('DRAFT_DISCARD_ADMISSION_DENIED');return command==='page-reclaim-context'?{sessionRefs:[],unboundProjectIds:[],unboundAny:false}:{ok:true,control:{mode:'RUNNING'}};};",
       "saveDraftBackup=async backup=>{f.backup=backup;return {sha256:'synthetic',bytes:1};};",
       "applyModelSpec=async()=>{f.calls.push('model');return {model:'Latest',effort:'High'};};",
       "setEffort=async()=>{f.calls.push('effort');return true;};saveRegistry=async()=>{};touchRuntime=async()=>{};print=()=>{};",
       'openBoundTask=async()=>({task:{spaceId:2},binding:f.reg.projects.P.bindings.a});',
+       'listTaskSpaces=async()=>[{id:2,name:"managed",profileId:"P1",ownership:"agent",createdBy:"agent"}];',
       'if(f.change.reclaim){loadRuntime=async()=>({tasks:{t:{taskId:"t",sessionId:chat.id,project:"P",account:"a",status:"CANCELLED"}}});imageSessionOccupancy=()=>({occupied:false});}',
       'newManagedPage=async()=>page;openProjectPage=async()=>{f.currentUrl=home;};',
       "waitForDelivery=async()=>({url:f.currentUrl,lastUser:message,lastUserId:'33333333-3333-4333-8333-333333333333',lastUserSource:{text:message,messageId:'33333333-3333-4333-8333-333333333333',conversationId:chat.id},lastUserSourceCondition:'BOUND_SOURCE',observedAt:new Date().toISOString(),messageCount:1,composerText:''});",
@@ -86,7 +87,7 @@ async function run(f,fn) {
       "model:async()=>{const positionals=()=>['Latest'],opt=()=>null;"+modelBody+'},',
       "effort:async()=>{const positionals=()=>['High'];"+effortBody+'},',
       "new:async()=>{const project='P',accountArg='a';"+newBody+'},',
-      'reclaim:()=>reclaimIdlePageSlot(reg,"P","a",{spaceId:2,page:()=>page,tabs:async()=>[{label:page.label,url:f.currentUrl,active:true,openedBy:"agent"}]},reg.projects.P.bindings.a),loader:()=>recoverConversationLoadError(page)};'
+      'reclaim:()=>reclaimIdlePageSlot(reg,"P","a",{spaceId:2,page:()=>page,tabs:async()=>f.closed?[]:[{label:page.label,url:f.currentUrl,active:true,openedBy:"agent"}]},reg.projects.P.bindings.a),loader:()=>recoverConversationLoadError(page)};'
     ].join('\n');
     const api=await new AsyncFunction('f','message','url','home',prefix+setup)(f,message,url,home);
     return await fn(api);
