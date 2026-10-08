@@ -42,7 +42,7 @@ Conductor Chat ── chat-bridge ── Worker Chats
 - Read the last assistant response
 - Inspect generation state
 - Select ChatGPT model and thinking effort
-- `GPT-6 Pro` preset: **Latest + Pro** (rightmost thinking slider)
+- `GPT-6 Pro` preset: **GPT-6 + Pro** (rightmost thinking slider)
 - Multi-signal liveness state machine, heartbeat, watchdog, and graded recovery
 - Project/account/Space bindings with one Ego Space per project/account
 - Session lifecycle: archive, retire, delete (explicit confirmation), and local forget
@@ -117,7 +117,7 @@ chat-bridge read review-agent --project "My Project"
 chat-bridge new \
   --project "My Project" \
   --name implementation-agent \
-  --model Latest \
+  --model GPT-6 \
   --effort High \
   --message "You own implementation for GitHub issue #12. Update the issue/PR, then callback the owning controller."
 ```
@@ -206,7 +206,7 @@ chat-bridge task clear HZ-47-W4 --project "My Project"
 Normal model selection:
 
 ```bash
-chat-bridge model implementation-agent Latest --project "My Project"
+chat-bridge model implementation-agent GPT-6 --project "My Project"
 chat-bridge effort implementation-agent "Extra High" --project "My Project"
 ```
 
@@ -216,7 +216,7 @@ Highest preset:
 chat-bridge model implementation-agent "GPT-6 Pro" --project "My Project"
 ```
 
-New chats default to `Latest`; this does not implicitly request Pro or change the UI's default thinking level. The Bridge aliases `GPT-6` and `GPT-6 Pro` select Latest and Latest plus Pro, respectively; the moving `Latest` label alone does not verify an underlying fixed version. `5.6 Pro` and `5.5 Pro` select those older versions plus Pro instead. You can also use `model AGENT Latest --effort High`. Unavailable or ambiguous versions fail explicitly. There is no automatic quota fallback: callers can explicitly choose `5.6 Pro` when Latest's model quota is exhausted. Model quota exhaustion is distinct from conversation-access rate limiting.
+New chats and unspecified queue/rotation models default to `GPT-6`; this does not implicitly request Pro or change the UI's default thinking level. The Bridge presets `GPT-6` and `GPT-6 Pro` select the visible GPT-6 model radio and GPT-6 plus Pro, respectively. Model and Thinking are verified independently; the UI label does not independently prove the underlying backend version. You can also use `model AGENT GPT-6 --effort High`. Explicit legacy `Latest` preferences remain supported where that choice is available; GPT-6 never falls back to Latest. `5.6 Pro` and `5.5 Pro` remain explicit older-version choices. Unavailable or ambiguous choices fail explicitly, without automatic quota fallback. Model quota exhaustion is distinct from conversation-access rate limiting.
 
 `status`, `send`, `ask`, `new`, `model` and `effort` include `modelSelection` with the UI-observed model, effort and raw text; unknown fields remain null. `status` reports configured values separately. Pro uses the slider's actual rightmost endpoint and confirms the displayed effort. Before every `send` or `ask`, the bridge re-applies the session's configured model and effort and confirms the UI selection, so a reattached conversation cannot silently inherit a lower default thinking level.
 

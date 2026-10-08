@@ -100,7 +100,7 @@ Create a new Chat inside a ChatGPT Project:
 ```bash
 chat-bridge new --project "PROJECT NAME" \
   --name research-agent \
-  --model Latest \
+  --model GPT-6 \
   --effort High \
   --message "Initial role and task"
 ```
@@ -178,7 +178,7 @@ A controller may pin actual execution resources in the durable operation:
 
 ```bash
 chat-bridge queue submit --request-id HZ-002 --caller-ref CONTROLLER_SESSION_REF \
-  --role WORKER_ROLE --model Latest --effort High --message "Task envelope"
+  --role WORKER_ROLE --model GPT-6 --effort High --message "Task envelope"
 ```
 
 For normal worker completion, do not hand-code the callback destination. The queue injects the persisted callback contract. The worker reports a durable result:
