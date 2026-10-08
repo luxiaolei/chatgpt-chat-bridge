@@ -228,6 +228,10 @@ class RegistrationFenced(ValueError):
 def fence_rotation_registration(db, state, before, after, registration):
     if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='management_events'").fetchone():
         return
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("registration_delivery_attempt", pathlib.Path(__file__).with_name("delivery_attempt.py"))
+    evidence = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(evidence)
     scopes = {}
     db.row_factory = sqlite3.Row
     for event in db.execute("SELECT id,payload,scope FROM management_events WHERE kind='ROTATION_QUARANTINE' ORDER BY created_at DESC,id DESC"):
@@ -237,7 +241,7 @@ def fence_rotation_registration(db, state, before, after, registration):
         logical = db.execute("SELECT * FROM logical_sessions WHERE logical_ref=?", (body.get("logicalRef"),)).fetchone()
         if (not all(scope[:2]) or event["scope"] != "project:" + scope[0] or not original or not logical
                 or (logical["project"], logical["role"], logical["workgroup_id"]) != scope
-                or body.get("operationSha256") != hashlib.sha256(json.dumps(dict(original), sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+                or not evidence.quarantine_operation_matches(original, body.get("operationSha256"))
                 or body.get("rotationId") != original["rotation_id"]):
             raise ValueError("ROTATION_QUARANTINE_AUDIT_INVALID")
         scopes.setdefault(scope, {"id": event[0], "body": body})
@@ -261,10 +265,6 @@ def fence_rotation_registration(db, state, before, after, registration):
         if not isinstance(registration, dict) or registration.get("sessionId") != cid:
             reject("REGISTRATION_CLAIM_REQUIRED")
         # Load the verifier from this release, not a caller-supplied module path.
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("registration_delivery_attempt", pathlib.Path(__file__).with_name("delivery_attempt.py"))
-        evidence = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(evidence)
         db.row_factory = sqlite3.Row
         try:
             row = evidence.verify_current(state, db, registration.get("attempt"))

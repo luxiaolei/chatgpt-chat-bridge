@@ -2096,7 +2096,7 @@ def rotation_quarantine_event(db, project, role, workgroup=None):
         body = json.loads(row["payload"])
         if body.get("project") == project and body.get("role") == role and (body.get("workgroupId") or None) == workgroup:
             original = db.execute("SELECT * FROM operations WHERE id=?", (body.get("operationId"),)).fetchone()
-            if (not original or body.get("operationSha256") != rotation_digest(dict(original))
+            if (not original or not delivery_attempt_module().quarantine_operation_matches(original, body.get("operationSha256"))
                     or body.get("rotationId") != original["rotation_id"] or not body.get("logicalRef")):
                 raise ValueError("ROTATION_QUARANTINE_AUDIT_INVALID")
             return {"id": row["id"], "createdAt": row["created_at"], "body": body}
