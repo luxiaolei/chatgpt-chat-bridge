@@ -242,6 +242,26 @@ test('renamed getter rejects changed expressions, receivers and uncharacterized 
  }
 });
 
+test('getter local cannot capture builtin arguments before body, capability or draft admission',async()=>{
+ const getterSource=renamedGetterFormat.getter.replace('let e=','let arguments=').replace('(0,I.g)(e,','(0,I.g)(arguments,');
+ for(const mode of ['body','capability','draft']) {
+  let native,transactionReads=0;
+  await assert.rejects(inspectCharacterized(context=>{
+   native=context.native;
+   context.host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+renamedGetterFormat.submit)();
+   context.editor.getText=new Function('I','return {'+getterSource+'};')({g:()=>{native.getterCalls++;return fixture.body;}}).getText;
+   if(mode==='draft') {
+    context.env.discardBackup={document:{synthetic:true}};
+    Object.defineProperty(context.editor.view.state,'tr',{get(){transactionReads++;throw new Error('DISCARD_MUTATION_REACHED');}});
+   }
+  },mode==='capability'),error=>{
+   assert.match(error.message,mode==='draft'?/DRAFT_DISCARD_UNSUPPORTED/:/NATIVE_SUBMISSION_UNVERIFIED/);
+   return true;
+  });
+  assert.equal(native.getterCalls,0);assert.equal(native.serializerCalls,0);assert.equal(transactionReads,0);
+ }
+});
+
 test('uncharacterized getter or serializer stays FORMAT UNSUPPORTED with zero native calls',async()=>{
  for(const field of ['getter','serializer','getterToString','serializerToString']) {
   let native,calls=0;

@@ -2255,7 +2255,7 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
           const getterSource=describe(editor,'getText').source,serializerSource=describe(markdownEditor,'serialize').source;
           const getterIdentifiers=getterSource?.match(getterShape);
           const shapeGetter=getterIdentifiers && getterIdentifiers[1]!==getterIdentifiers[2] &&
-            !['arguments','this'].includes(getterIdentifiers[2]);
+            !getterIdentifiers.slice(1).some(identifier=>['arguments','this'].includes(identifier));
           const format=exactFormat && getterSource===exactFormat.getter?exactFormat:
             (shapeSubmit && shapeGetter && serializerSource===characterizedShape.serializer?characterizedShape:null);
           if(!format || typeof getText!=='function' || typeof serialize!=='function' || serializerSource===null ||
