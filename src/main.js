@@ -827,15 +827,16 @@ async function overflowManagedTask(reg, project, account, binding, options={}) {
 }
 
 async function newManagedPage(reg, project, account, task, binding, excludeChatId=null, options={}) {
+  // Return cleanup promises so their failures cannot enter allocation recovery.
   try {
-    const page=await task.newPage(); await clearCapacityWait(reg,account,binding); return page;
+    const page=await task.newPage(); return clearCapacityWait(reg,account,binding).then(()=>page);
   }
   catch(error) {
     if(!pageBudgetError(error)) throw error;
     const reclaimed=await reclaimIdlePageSlot(reg,project,account,task,binding,excludeChatId) ||
       await reclaimOrphanManagedPage(reg,task,binding,account);
     if(reclaimed) {
-      try { const page=await task.newPage(); await clearCapacityWait(reg,account,binding); return page; }
+      try { const page=await task.newPage(); return clearCapacityWait(reg,account,binding).then(()=>page); }
       catch(errorAfterReclaim) { if(!pageBudgetError(errorAfterReclaim)) throw errorAfterReclaim; }
     }
     const wait=await recordCapacityWait(reg,project,account,binding,
@@ -843,15 +844,16 @@ async function newManagedPage(reg, project, account, task, binding, excludeChatI
     const elapsedSec=(Date.now()-Number(wait.firstAt||Date.now()))/1000;
     const canExpandOverflow=elapsedSec>=CAPACITY_OVERFLOW_AFTER_SEC;
     if(options.allowOverflow && (canExpandOverflow || reg.capacityOverflow?.[capacityScope(reg,account,binding)])) {
+      let allocationError=null;
       try {
         const allocate=async overflow=>{
           try { return await overflow.task.newPage(); }
-          catch(error) { if(!pageBudgetError(error)) throw error; }
+          catch(error) { if(!pageBudgetError(error)) { allocationError=error; throw error; } }
           const reclaimed=await reclaimIdlePageSlot(reg,project,account,overflow.task,overflow.binding,excludeChatId) ||
             await reclaimOrphanManagedPage(reg,overflow.task,overflow.binding,account);
           if(reclaimed) {
             try { return await overflow.task.newPage(); }
-            catch(error) { if(!pageBudgetError(error)) throw error; }
+            catch(error) { if(!pageBudgetError(error)) { allocationError=error; throw error; } }
           }
           return null;
         };
@@ -867,11 +869,12 @@ async function newManagedPage(reg, project, account, task, binding, excludeChatI
           if(!canExpandOverflow) throw new Error("OVERFLOW_SPACE_LIMIT");
           if(created) throw new Error("OVERFLOW_NEW_SPACE_FULL");
           overflow=await overflowManagedTask(reg,project,account,binding,{advance:true});
-          page=await overflow.task.newPage();
+          try { page=await overflow.task.newPage(); }
+          catch(error) { if(!pageBudgetError(error)) allocationError=error; throw error; }
         }
-        await clearCapacityWait(reg,account,binding);
-        return {...overflow,page,overflow:true};
+        return clearCapacityWait(reg,account,binding).then(()=>({...overflow,page,overflow:true}));
       } catch(overflowError) {
+        if(overflowError===allocationError) throw overflowError;
         const detail=String(overflowError?.message||overflowError);
         const refreshed=await recordCapacityWait(reg,project,account,binding,`OVERFLOW_UNAVAILABLE:${detail}`);
         throw capacityWaitError(binding,refreshed,refreshed.reason);
@@ -1274,6 +1277,7 @@ async function ensurePage(reg, chat, options={}) {
   let {binding,task}=await openBoundTask(reg,chat.project,chat.account,{...options,spaceOverride});
   const pages=await pagesOf(task);
   let page=pages.find(p=>p.label===chat.page) || null;
+  let verifyPoolTarget=null;
   // Page labels are recyclable: never navigate somebody else's existing tab.
   if(page && !sameConversationUrl(await page.url().catch(()=>""),chat.url)) page=null;
   if(!page && typeof task.tabs==="function") {
@@ -1282,13 +1286,43 @@ async function ensurePage(reg, chat, options={}) {
     const candidate=existing?pages.find(p=>p.label===existing.label):null;
     if(candidate && sameConversationUrl(await candidate.url().catch(()=>""),chat.url)) page=candidate;
   }
+  if(!page && reg.capacityOverflow?.[capacityScope(reg,chat.account,configured||binding)]) {
+    const primary=Number(task.spaceId)===Number(configured?.spaceId)?{task,binding}:
+      await openBoundTask(reg,chat.project,chat.account,{...options,requireExistingSpace:true,spaceOverride:configured});
+    const head=await overflowManagedTask(reg,chat.project,chat.account,configured||binding,{preview:true,existingOnly:true});
+    const pool=[primary,head];
+    if(head.mapping.previousSpaces?.length)
+      pool.push(await overflowManagedTask(reg,chat.project,chat.account,configured||binding,{preview:true,existingOnly:true,previous:true}));
+    if(new Set(pool.map(entry=>Number(entry.task.spaceId))).size!==pool.length) throw new Error("OVERFLOW_MAPPING_CHANGED");
+    const targets=async()=>{
+      const found=[];
+      for(const entry of pool) for(const tab of await entry.task.tabs())
+        if(sameConversationUrl(tab.url,chat.url,projectKey(configured?.projectUrl||binding.projectUrl))) found.push({entry,tab:{...tab}});
+      return found;
+    };
+    const matches=await targets();
+    if(matches.length>1 || matches.some(({tab})=>tab.openedBy!=="agent"||!tab.label||!tab.targetId)) throw new Error("CONVERSATION_POOL_TAB_UNVERIFIED");
+    if(matches.length) {
+      const target=matches[0];
+      const opened=await openBoundTask(reg,chat.project,chat.account,{...options,requireExistingSpace:true,spaceOverride:target.entry.binding});
+      page=(await pagesOf(opened.task)).find(p=>p.label===target.tab.label)||null;
+      if(!page || !sameConversationUrl(await page.url(),chat.url,projectKey(opened.binding.projectUrl))) throw new Error("CONVERSATION_POOL_TAB_CHANGED");
+      verifyPoolTarget=async()=>{
+        await openBoundTask(reg,chat.project,chat.account,{...options,requireExistingSpace:true,spaceOverride:target.entry.binding});
+        const fresh=await targets();
+        if(fresh.length!==1 || fresh[0].entry.task.spaceId!==opened.task.spaceId || fresh[0].tab.label!==target.tab.label ||
+           fresh[0].tab.openedBy!=="agent" || fresh[0].tab.targetId!==target.tab.targetId) throw new Error("CONVERSATION_POOL_TAB_CHANGED");
+      };
+      await verifyPoolTarget();
+      task=opened.task; binding=opened.binding;
+    }
+  }
   const allocated=!page;
   if(allocated) {
     const allocation=await newManagedPage(reg,chat.project,chat.account,task,binding,chat.id,{allowOverflow:options.allowOverflow===true});
     page=allocation?.page||allocation;
     if(allocation?.overflow) { task=allocation.task; binding=allocation.binding; chat.profileId=binding.profileId; }
   }
-  chat.spaceName=binding.spaceName; chat.spaceId=task.spaceId; chat.lastUsedAt=new Date().toISOString();
   let attached=false;
   try {
     if(allocated) await page.goto(chat.url,{waitUntil:"load",timeout:20000});
@@ -1299,6 +1333,8 @@ async function ensurePage(reg, chat, options={}) {
     if(!allocated || error?.message==="APPROVAL_REQUIRED") throw error;
   }
   if(!attached && allocated) attached=await openConversationFromProject(page,binding,chat.project,chat.id);
+  if(verifyPoolTarget) { await verifyPoolTarget(); chat.profileId=binding.profileId; }
+  chat.spaceName=binding.spaceName; chat.spaceId=task.spaceId; chat.lastUsedAt=new Date().toISOString();
   if(!attached) {
     chat.page=null;
     chat.detachedAt=new Date().toISOString();
