@@ -2135,7 +2135,12 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     }
     const firstFiber=fiber;
     const candidates=new Map(),composerEditors=new Set();
-    let formatRecognized=false,admissionTruncated=false,ancestryIncomplete=false;
+    let formatRecognized=false,admissionTruncated=false,ancestryIncomplete=false,hookScanIncomplete=false;
+    const hookValue=(object,key)=>{
+      const field=property(object,key);
+      if(field.kind==='accessor' || field.kind==='truncated') hookScanIncomplete=true;
+      return field.value;
+    };
     // Pin the characterized native submit format; an unsupported format fails before Send.
     const formats=[
       {submit:"e=>{eg(j.getText(),e)}",getter:"getText(){let e=arguments.length>0&&void 0!==arguments[0]?arguments[0]:this.dictation.document;return(0,T.g)(e,this.plainTextMode?void 0:this.markdownEditor?.serialize)}"},
@@ -2157,9 +2162,9 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
         (identifiers && new Set(identifiers.slice(1)).size===3?characterizedShape:null);
       if(!format) continue;
       if(!format.serializer) formatRecognized=true;
-      let hook=value(fiber,'memoizedState');
-      for(let n=0;hook&&n<64;n++,hook=value(hook,'next')) {
-        const deps=value(value(hook,'memoizedState'),'deps');
+      let hook=hookValue(fiber,'memoizedState');
+      for(let n=0;hook&&n<64;n++,hook=hookValue(hook,'next')) {
+        const deps=hookValue(hookValue(hook,'memoizedState'),'deps');
         if(!Array.isArray(deps)) continue;
         if(deps.length>64) {admissionTruncated=true;break;}
         for(let index=0;index<deps.length;index++) {
@@ -2190,7 +2195,7 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
     }
     // An unvisited ancestor, opaque link or exhausted prototype lookup cannot prove uniqueness.
     if(fiber) ancestryIncomplete=true;
-    if(admissionTruncated || (formatRecognized && ancestryIncomplete)) {
+    if(admissionTruncated || (formatRecognized && (ancestryIncomplete || hookScanIncomplete))) {
       if(discardBackup) throw new Error('DRAFT_DISCARD_UNSUPPORTED');
       return fail();
     }
@@ -2214,8 +2219,9 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
           onSubmit:describe(props.value,'onSubmit'),returnKind:property(current,'return').kind,editors:[],opaque:[]};
         if(!keep(fibers,row)) break;
         if(row.onSubmit.sourceTruncated) {refuse('FUNCTION_SOURCE_LIMIT');break;}
-        for(let hook=value(current,'memoizedState'),index=0;hook&&index<64&&!evidence.truncated;hook=value(hook,'next'),index++) {
-          const deps=value(value(hook,'memoizedState'),'deps');
+        let hook=hookValue(current,'memoizedState'),index=0;
+        for(;hook&&index<64&&!evidence.truncated;hook=hookValue(hook,'next'),index++) {
+          const deps=hookValue(hookValue(hook,'memoizedState'),'deps');
           if(!Array.isArray(deps)) continue;
           for(let dep=0;dep<Math.min(value(deps,'length'),64)&&!evidence.truncated;dep++) {
             const editor=value(deps,String(dep));
@@ -2233,8 +2239,10 @@ async function nativeSubmissionProbe({selector,request,expectedIdentity,capabili
             if(Object.values(item.methods).some(field=>field.sourceTruncated) || item.serializer.sourceTruncated) refuse('FUNCTION_SOURCE_LIMIT');
           }
         }
+        if(hook) hookScanIncomplete=true;
       }
       if(ancestryIncomplete) refuse('FIBER_SCAN_INCOMPLETE');
+      if(hookScanIncomplete) refuse('HOOK_SCAN_INCOMPLETE');
       return {unsupportedFormat:evidence};
     }
     if(composerEditors.size!==1 || candidates.size!==1 || typeof doc.textBetween!=='function') {

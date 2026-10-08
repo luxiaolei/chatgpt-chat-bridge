@@ -328,6 +328,97 @@ test('NSV2-R2 capability and body require a complete bounded ancestor scan befor
  }
 });
 
+// Only synthetic hook/editor dependencies; the characterized native methods stay unchanged.
+function configureHookScanField(context,field,kind,{sameEditor=false,counts={opaqueCalls:0}}={}) {
+ const {host,editor}=context,fiber=host.__reactFiber$fixture,first=fiber.memoizedState;
+ const hidden={memoizedState:{deps:[sameEditor?editor:{...editor}]},next:null};
+ let owner,key,linked;
+ if(field==='entry') {
+  fiber.return={memoizedProps:fiber.memoizedProps,return:null};
+  owner=fiber.return;key='memoizedState';linked=hidden;
+ } else if(field==='next') {owner=first;key='next';linked=hidden;}
+ else {
+  first.next={next:null};
+  if(field==='state') {owner=first.next;key='memoizedState';linked=hidden.memoizedState;}
+  else {first.next.memoizedState={};owner=first.next.memoizedState;key='deps';linked=hidden.memoizedState.deps;}
+ }
+ if(kind==='accessor') Object.defineProperty(owner,key,{get(){counts.opaqueCalls++;return linked;}});
+ else {
+  const depth=kind==='prototype-8'?8:7;
+  for(let i=0;i<depth;i++) {const parent={};Object.setPrototypeOf(owner,parent);owner=parent;}
+  owner[key]=linked;
+ }
+ return counts;
+}
+
+test('NSV2-R2-HOOK opaque or exhausted hook scan fields cannot hide a second editor',async t=>{
+ const observations=[];
+ for(const capabilityOnly of [true,false]) for(const field of ['next','entry','state','deps']) for(const kind of ['accessor','prototype-8']) {
+  let native;const counts={opaqueCalls:0};
+  const outcome=await inspectCharacterized(context=>{
+   native=context.native;configureHookScanField(context,field,kind,{counts});
+  },capabilityOnly).then(witness=>({status:'ACCEPTED',valid:capabilityOnly?witness.supported:witness.body===fixture.body}),
+   error=>({status:'REJECTED',error:error.message}));
+  observations.push({capabilityOnly,field,kind,...counts,getterCalls:native.getterCalls,serializerCalls:native.serializerCalls,...outcome});
+ }
+ t.diagnostic(JSON.stringify(observations));
+ for(const row of observations) {
+  assert.equal(row.opaqueCalls,0,JSON.stringify(row));
+  assert.equal(row.status,'REJECTED',JSON.stringify(row));
+  assert.match(row.error,/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(row.getterCalls,0);assert.equal(row.serializerCalls,0);
+ }
+});
+
+test('NSV2-R2-HOOK finite data links preserve compatibility at prototype and hook bounds',async t=>{
+ const observations=[];
+ for(const capabilityOnly of [true,false]) for(const mode of ['entry','next','state','deps','complete-64','incomplete-65','cycle']) {
+  let native;const counts={opaqueCalls:0};
+  const outcome=await inspectCharacterized(context=>{
+   native=context.native;
+   if(['entry','next','state','deps'].includes(mode)) configureHookScanField(context,mode,'prototype-7',{sameEditor:true,counts});
+   else {
+    const first=context.host.__reactFiber$fixture.memoizedState;
+    let hook=first;
+    for(let i=1;i<64;i++) {hook.next={memoizedState:{deps:[context.editor]}};hook=hook.next;}
+    if(mode==='incomplete-65') hook.next={memoizedState:{deps:[{...context.editor}]}};
+    if(mode==='cycle') hook.next=first;
+   }
+  },capabilityOnly).then(witness=>({status:'ACCEPTED',valid:capabilityOnly?witness.supported:witness.body===fixture.body}),
+   error=>({status:'REJECTED',error:error.message}));
+  observations.push({capabilityOnly,mode,...counts,getterCalls:native.getterCalls,serializerCalls:native.serializerCalls,...outcome});
+ }
+ t.diagnostic(JSON.stringify(observations));
+ for(const row of observations) {
+  const rejected=['incomplete-65','cycle'].includes(row.mode);
+  assert.equal(row.status,rejected?'REJECTED':'ACCEPTED',JSON.stringify(row));
+  assert.equal(row.opaqueCalls,0);
+  if(rejected) assert.match(row.error,/NATIVE_SUBMISSION_UNVERIFIED/);
+  else assert.equal(row.valid,true);
+  assert.equal(row.getterCalls,rejected||row.capabilityOnly?0:1);
+  assert.equal(row.serializerCalls,rejected||row.capabilityOnly?0:1);
+ }
+});
+
+test('NSV2-R2-HOOK unknown FORMAT diagnostics retain incomplete hook scans without executing opaque links',async t=>{
+ const observations=[];
+ for(const field of ['next','entry','state','deps']) for(const kind of ['accessor','prototype-8']) {
+  let captured,native;const counts={opaqueCalls:0};
+  await assert.rejects(inspectCharacterized(context=>{
+   captured=context.env;native=context.native;
+   configureHookScanField(context,field,kind,{counts});
+   context.host.__reactFiber$fixture.memoizedProps.onSubmit=()=>{};
+  },true),/NATIVE_SUBMISSION_UNVERIFIED_UNSUPPORTED/);
+  observations.push({field,kind,...counts,getterCalls:native.getterCalls,serializerCalls:native.serializerCalls,
+   truncated:captured.retained.backup.truncated,limit:captured.retained.backup.limit});
+ }
+ t.diagnostic(JSON.stringify(observations));
+ for(const row of observations) {
+  assert.equal(row.opaqueCalls,0);assert.equal(row.getterCalls,0);assert.equal(row.serializerCalls,0);
+  assert.equal(row.truncated,true,JSON.stringify(row));assert.equal(row.limit,'HOOK_SCAN_INCOMPLETE',JSON.stringify(row));
+ }
+});
+
 test('admission refuses truncated editor dependencies, hooks and serializer source',async()=>{
  for(const mode of ['dependencies','hooks']) {
   let native;
