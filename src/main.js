@@ -3315,16 +3315,20 @@ async function ensureProjectLocation(reg, projectName, account, options={}) {
   if(!accountRecord?.identity) return {ok:false,status:"NEEDS_LOGIN",project:projectName,account};
   const current=pr.bindings?.[account]||null;
   if(current?.projectUrl && bindingObserved(reg,account,current)) {
-    const {task,spaceName,profileId}=await accountManagedTask(reg,account,current?.profileId||null);
-    const binding={...current,spaceName,profileId,spaceId:task.spaceId};
-    const reused=current.controlPage?await reclaimOrphanManagedPage(reg,task,binding,account,current):null;
-    const page=reused?.handle||await newManagedPage(reg,projectName,account,task,binding);
     try {
-      const url=await openProjectPage(page,projectName,current.projectUrl);
-      current.spaceName=spaceName;
-      current.profileId=profileId;
-      current.spaceId=task.spaceId;
-      current.controlPage=page.label;
+      const {task,binding}=await openBoundTask(reg,projectName,account,
+        {spaceOverride:current,requireExistingSpace:true,pauseOnUserControl:true});
+      const page=(await pagesOf(task)).find(item=>item.label===current.controlPage);
+      if(!page) throw new Error("PROJECT_HOME_UNAVAILABLE");
+      const tab=(await task.tabs()).find(item=>item.label===page.label);
+      if(tab?.openedBy!=="agent") throw new Error("PROJECT_HOME_IN_USER_CONTROL");
+      // Read-only home reuse must not depend on permission to close an uncertain page.
+      await assertInputSafe(page,accountRecord.identity,current.projectUrl,{reclaim:true});
+      await waitForProjectReady(page,projectName,15000);
+      const observed=await state(page,false,null,true),url=observed.url;
+      if(projectHomeId(url)!==projectKey(current.projectId||current.projectUrl)) throw new Error("PROJECT_HOME_UNAVAILABLE");
+      if(observed.generating!==false || observed.approvalRequired!==false) throw new Error("CHAT_BUSY");
+      await assertInputSafe(page,accountRecord.identity,current.projectUrl,{reclaim:true});
       current.projectUrl=url;
       current.projectBase=url.replace(/\/project$/,'');
       current.projectId=projectIdFromUrl(url);
@@ -3332,10 +3336,10 @@ async function ensureProjectLocation(reg, projectName, account, options={}) {
       await saveRegistry(reg);
       const readiness=bindingExecutionReadiness(pr,current);
       return {ok:readiness.ready,status:readiness.ready?"READY":"CONTENT_NOT_READY",accessReady:true,
-        project:projectName,account,projectId:current.projectId,projectUrl:url,spaceName,created:false,
+        project:projectName,account,projectId:current.projectId,projectUrl:url,spaceName:binding.spaceName,created:false,
         missing:readiness.missing,requirements:readiness.requirements||null,readiness:readiness.readiness||null};
     } catch(error) {
-      if(!options.create) return {ok:false,status:"PROJECT_NOT_ACCESSIBLE",project:projectName,account,error:String(error.message||error)};
+      return {ok:false,status:"PROJECT_NOT_ACCESSIBLE",project:projectName,account,error:String(error.message||error)};
     }
   }
   const {task,spaceName,profileId}=await accountManagedTask(reg,account,current?.profileId||null);

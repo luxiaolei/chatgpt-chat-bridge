@@ -61,15 +61,17 @@ test("Project Ensure preserves existing conversation and draft tabs on both setu
     const reg={accounts:{a:{identity:"one"}},projects:{P:{bindings:bound?{a:{projectUrl}}:{}}}};
     const ensure=await new AsyncFunction("projectRecord","bindingObserved","accountManagedTask","pagesOf",
       "newManagedPage","openProjectPage","saveRegistry","createProjectViaUI","bindingFor","touchRuntime",
-      "projectIdFromUrl","bindingExecutionReadiness",extract("ensureProjectLocation","syncProject")+"; return ensureProjectLocation;"
+      "projectIdFromUrl","bindingExecutionReadiness","openBoundTask",extract("ensureProjectLocation","syncProject")+"; return ensureProjectLocation;"
     )((r,p)=>r.projects[p],()=>bound,async()=>({task,spaceName:"managed",profileId:"P1"}),async()=>[existing],
       async(_r,_p,_a,t)=>t.newPage(),async page=>{
         assert.equal(page,setup,"must not navigate a pre-existing conversation");return projectUrl;
       },async()=>{},async()=>{throw Error("existing project must be reused");},(r,p,a)=>r.projects[p].bindings[a]||= {account:a},
-      async()=>{},()=>"g-p-"+"a".repeat(32),()=>({ready:true,missing:[]}));
-    assert.equal((await ensure(reg,"P","a")).status,"READY");
+      async()=>{},()=>"g-p-"+"a".repeat(32),()=>({ready:true,missing:[]}),async()=>({task,binding:reg.projects.P.bindings.a}));
+    const result=await ensure(reg,"P","a");
+    assert.equal(result.status,bound?"PROJECT_NOT_ACCESSIBLE":"READY");
+    if(bound)assert.equal(result.error,"PROJECT_HOME_UNAVAILABLE");
     assert.deepEqual(existing,before);
-    assert.equal(reg.projects.P.bindings.a.controlPage,"p3");
+    assert.equal(reg.projects.P.bindings.a.controlPage,bound?undefined:"p3");
   }
 });
 
@@ -210,34 +212,45 @@ test("sync ignores sidebar chats from other Projects and preserves existing atta
   assert.equal(saved,1);
 });
 
-test("repeated ensure reuses only its safe inactive control home without retaining another page",async()=>{
-  for(const name of ["control-routing","page-pool","liveness-policy","task-policy","web-policy","model-policy","session-policy"])await import(`../src/${name}.js`);
-  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor,home="https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project";
-  for(const unsafe of [null,"draft","approval","generating","active","user","UNKNOWN","unbound-Project","wrong-Project","wrong-Space","other-control","registered-session","unplaced-live","fresh-active"]) {
+test("bound ensure reads its exact home without reclaim or allocation, including active and UNKNOWN",async()=>{
+  const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  const home="https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project";
+  for(const unsafe of [null,"active","UNKNOWN","draft","approval","generating","user","wrong-Project","missing-page","wrong-Space","login","readiness","late-url","late-draft","unknown-generation","attachment"]) {
     const binding={account:"a",spaceName:"managed",spaceId:7,profileId:"P1",projectUrl:home,controlPage:"p1"};
-    const f={reg:{accounts:{a:{identity:"login-a"}},projects:{P:{bindings:{a:binding}}},chats:{}},binding,unsafe,allocations:0,closes:0,retained:["p1"],saved:0,navigated:[],runtime:{tasks:{}}};
-    if(unsafe==="other-control")f.reg.projects.Q={bindings:{a:{...binding,projectUrl:home.replace("a".repeat(32),"b".repeat(32))}}};
-    if(unsafe==="registered-session")f.reg.chats.s={id:"s",spaceName:"managed",spaceId:7,page:"p1"};
-    if(unsafe==="unplaced-live")f.runtime.tasks.t={project:"P",account:"a",status:"RUNNING"};
-    const ensure=await new AsyncFunction("f","home",source.split('const cmd=args[0] || "help";')[0]+`
-      loadRuntime=async()=>normalizeRuntime(f.runtime);
-      imageSessionOccupancy=()=>({occupied:false});bindingObserved=()=>true;
-      saveRegistry=async()=>{f.saved++;};
-      coordinated=command=>{if(command!=='page-reclaim-context')throw Error(command);return {sessionRefs:[],unboundProjectIds:f.unsafe==='unbound-Project'?['g-p-'+ 'a'.repeat(32)]:[],unboundAny:f.unsafe==='UNKNOWN'};};
-      state=async()=>({url,approvalRequired:f.unsafe==='approval',generating:f.unsafe==='generating',composerCount:1,composerAttachmentsEmpty:true,composerRawText:f.unsafe==='draft'?'keep human draft':''});
-      assertInputSafe=async()=> 'login-a';
-      listTaskSpaces=async()=>[{id:7,name:'managed',profileId:'P1',ownership:'agent',createdBy:'agent'}];
-      const url=f.unsafe==='wrong-Project'?home.replace('a'.repeat(32),'b'.repeat(32)):home;
-      const pages=[{label:'p1',url:async()=>url,close:async()=>{f.closes++;}}];let reads=0;
-      const task={spaceId:f.unsafe==='wrong-Space'?9:7,pages:async()=>pages,tabs:async()=>{const fresh=reads++>0;return pages.map(p=>({label:p.label,url:p.label==='p1'?url:home,active:p.label==='p1'&&(f.unsafe==='active'||f.unsafe==='fresh-active'&&fresh),openedBy:f.unsafe==='user'?'user':'agent'}));},newPage:async()=>{const label='p'+(++f.allocations+1);f.retained.push(label);const p={label,url:async()=>home,close:async()=>{f.closes++;}};pages.push(p);return p;}};
-      openBoundTask=async(_r,_p,_a,options)=>{if(!options.requireExistingSpace||!options.pauseOnUserControl)throw Error('verified existing Space required');return {task,binding:{...f.binding,...options.spaceOverride}};};
-      accountManagedTask=async()=>({task,spaceName:'managed',profileId:'P1'});
-      openProjectPage=async page=>{f.navigated.push(page.label);return home;};
-      return ensureProjectLocation;
-    `)(f,home);
-    assert.equal((await ensure(f.reg,"P","a")).status,"READY",unsafe);
-    if(!unsafe){assert.equal((await ensure(f.reg,"P","a")).status,"READY");assert.equal(f.allocations,0);assert.deepEqual(f.retained,["p1"]);assert.equal(binding.controlPage,"p1");assert.equal(f.saved,2);}
-    else {assert.equal(f.allocations,1,unsafe);assert.deepEqual(f.navigated,["p2"],unsafe);}
-    assert.equal(f.closes,0,unsafe);
+    const preserved={draft:unsafe==="draft"?"keep human draft":"",attachment:unsafe==="attachment"};
+    const before=structuredClone(preserved),calls={allocations:0,reclaim:0,navigations:0,closes:0,saved:0,input:0,waits:0};
+    const reg={accounts:{a:{identity:"login-a"}},projects:{P:{bindings:{a:binding}}}};
+    let url=unsafe==="wrong-Project"?home.replace("a".repeat(32),"b".repeat(32)):home;
+    const page={label:"p1",url:async()=>url,close:async()=>{calls.closes++;},goto:async()=>{calls.navigations++;},reload:async()=>{calls.navigations++;},fill:async()=>{throw Error("draft mutation forbidden");}};
+    const task={spaceId:7,tabs:async()=>[{label:"p1",url,openedBy:unsafe==="user"?"user":"agent",active:unsafe==="active"}]};
+    const ensure=await new AsyncFunction("projectRecord","bindingObserved","openBoundTask","pagesOf","assertInputSafe","waitForProjectReady","state","projectHomeId","projectKey","projectIdFromUrl","saveRegistry","bindingExecutionReadiness","newManagedPage","reclaimOrphanManagedPage","accountManagedTask","openProjectPage",extract("ensureProjectLocation","syncProject")+";return ensureProjectLocation;")(
+      (r,p)=>r.projects[p],()=>true,async(_r,_p,_a,options)=>{
+        assert.equal(options.spaceOverride,binding);assert.equal(options.requireExistingSpace,true);assert.equal(options.pauseOnUserControl,true);
+        if(unsafe==="wrong-Space")throw Error("SPACE_ID_MISMATCH");return {task,binding};
+      },async()=>unsafe==="missing-page"?[]:[page],async(p,identity,target,options)=>{
+        calls.input++;assert.equal(p,page);assert.equal(identity,"login-a");assert.equal(target,home);assert.deepEqual(options,{reclaim:true});
+        if(url!==home)throw Error("DELIVERY_TARGET_MISMATCH");
+        if(unsafe==="login")throw Error("INPUT_LOGIN_MISMATCH");
+        if(preserved.draft)throw Error("USER_DRAFT_PRESENT");
+        if(preserved.attachment)throw Error("USER_DRAFT_PRESENT");
+        if(["approval","generating"].includes(unsafe))throw Error(unsafe==="approval"?"APPROVAL_REQUIRED":"CHAT_BUSY");
+      },async()=>{
+        calls.waits++;if(unsafe==="readiness")throw Error("Project UI did not become ready");
+        if(unsafe==="late-url")url=home.replace(/project$/,"c/11111111-1111-4111-8111-111111111111");
+        if(unsafe==="late-draft")preserved.draft="new human draft";
+      },async()=>({url,generating:unsafe==="unknown-generation"?undefined:false,approvalRequired:false}),
+      value=>/\/project$/.test(value)?String(value).match(/g-p-[0-9a-f]{32}/)?.[0]:null,
+      value=>String(value).match(/g-p-[0-9a-f]{32}/)?.[0],value=>String(value).match(/g-p-[0-9a-f]{32}/)?.[0],
+      async()=>{calls.saved++;},()=>({ready:true,missing:[]}),
+      async()=>{calls.allocations++;throw Error("allocation forbidden");},async()=>{calls.reclaim++;throw Error("reclaim forbidden");},
+      async()=>{throw Error("Space allocation forbidden");},async()=>{calls.navigations++;throw Error("navigation forbidden");});
+    const good=[null,"active","UNKNOWN"].includes(unsafe);
+    const result=await ensure(reg,"P","a",{create:true,confirm:true});
+    assert.equal(result.status,good?"READY":"PROJECT_NOT_ACCESSIBLE",unsafe);
+    if(good){assert.equal((await ensure(reg,"P","a")).status,"READY");assert.equal(calls.saved,2);assert.equal(calls.input,4);assert.equal(calls.waits,2);}
+    else {assert.equal(calls.saved,0);assert.match(result.error,/PROJECT_HOME_|SPACE_ID_MISMATCH|DELIVERY_TARGET_MISMATCH|INPUT_LOGIN_MISMATCH|USER_DRAFT_PRESENT|APPROVAL_REQUIRED|CHAT_BUSY|Project UI did not become ready/,unsafe);}
+    assert.equal(calls.allocations,0,unsafe);assert.equal(calls.reclaim,0,unsafe);assert.equal(calls.navigations,0,unsafe);assert.equal(calls.closes,0,unsafe);
+    assert.deepEqual(preserved,unsafe==="late-draft"?{...before,draft:"new human draft"}:before,unsafe);
+    assert.equal(binding.controlPage,"p1");
   }
 });
