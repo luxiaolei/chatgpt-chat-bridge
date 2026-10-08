@@ -170,6 +170,98 @@ test('characterized submit shape tolerates identifier renaming without accepting
  }),error=>{assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');return true;});
 });
 
+const renamedGetterFormat=JSON.parse(await readFile(new URL('./native-submission-renamed-getter-fixture.json',import.meta.url),'utf8'));
+
+test('observed renamed getter retains the complete native serializer contract',async()=>{
+ for(const key of ['submit','getter','serializerSource'])
+  assert.equal(crypto.createHash('sha256').update(renamedGetterFormat[key]).digest('hex'),renamedGetterFormat[key+'Sha256']);
+ assert.equal(renamedGetterFormat.serializerSource,characterizedShape.serializerSource);
+ for(const capabilityOnly of [false,true]) {
+  let native;
+  const witness=await inspectCharacterized(context=>{
+   native=context.native;
+   context.host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+renamedGetterFormat.submit)();
+   context.editor.getText=new Function('I','return {'+renamedGetterFormat.getter+'};')({g:(doc,serialize)=>{
+    native.getterCalls++;assert.equal(doc,context.doc);return serialize(doc);
+   }}).getText;
+  },capabilityOnly);
+  assert.equal(capabilityOnly?witness.supported:witness.body,capabilityOnly?true:fixture.body);
+  assert.equal(witness.getterSource,renamedGetterFormat.getter);
+  assert.equal(native.getterCalls,capabilityOnly?0:1);assert.equal(native.serializerCalls,capabilityOnly?0:1);
+ }
+});
+
+test('getter contract tolerates renamed locals only with the complete characterized serializer',async()=>{
+ for(const capabilityOnly of [false,true]) for(const [docName,moduleName,submit] of [
+  ['q','Chunk','v=>submit(editor.getText(),v)'],['$doc','_module','$e=>_send($editor.getText(),$e)'],
+  ['e','I','e=>up(rT.getText(),e)'],
+ ]) {
+  let native;
+  const getterSource=renamedGetterFormat.getter.replace('let e=','let '+docName+'=').replace('(0,I.g)(e,','(0,'+moduleName+'.g)('+docName+',');
+  const witness=await inspectCharacterized(context=>{
+   native=context.native;
+   context.host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+submit)();
+   context.editor.getText=new Function(moduleName,'return {'+getterSource+'};')({g:(doc,serialize)=>{
+    native.getterCalls++;assert.equal(doc,context.doc);return serialize(doc);
+   }}).getText;
+  },capabilityOnly);
+  assert.equal(capabilityOnly?witness.supported:witness.body,capabilityOnly?true:fixture.body);
+  assert.equal(witness.getterSource,getterSource);
+  assert.equal(native.getterCalls,capabilityOnly?0:1);assert.equal(native.serializerCalls,capabilityOnly?0:1);
+ }
+});
+
+test('renamed getter rejects changed expressions, receivers and uncharacterized serializer without calls',async()=>{
+ const original=renamedGetterFormat.getter;
+ const getters=[
+  original.replace('I.g','I.h'),original.replace('I.g','e.g'),original.replace('I.g','this.g'),
+  original.replace('I.g','arguments.g'),original.replace('I.g','I["g"]'),
+  original.replace('return(0','sideEffect();return(0'),original.replace('document;','otherDocument;'),
+  original.replace('(e,this','(other,this'),original.replace('arguments[0]:','arguments[1]:'),
+  original.replace('this.plainTextMode?void 0:','this.plainTextMode?null:'),
+  original.replace('?.serialize','?.serialize.bind(this)'),original.replace('?.serialize)}','?.serialize).trim()}'),
+ ];
+ for(const capabilityOnly of [false,true]) for(const getterSource of getters) {
+  let native;
+  await assert.rejects(inspectCharacterized(context=>{
+   native=context.native;
+   context.host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+renamedGetterFormat.submit)();
+   context.editor.getText=new Function('I','return {'+getterSource+'};')({g:()=>{native.getterCalls++;return fixture.body;}}).getText;
+  },capabilityOnly),error=>{assert.equal(error.code,'NATIVE_SUBMISSION_UNSUPPORTED');return true;});
+  assert.equal(native.getterCalls,0);assert.equal(native.serializerCalls,0);
+ }
+ for(const submit of [renamedGetterFormat.submit,'e=>up(rT.getText(),e)']) {
+  let native;
+  await assert.rejects(inspectCharacterized(context=>{
+   native=context.native;
+   context.host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+submit)();
+   context.editor.getText=new Function('I','return {'+original+'};')({g:()=>{native.getterCalls++;return fixture.body;}}).getText;
+   context.editor.markdownEditor.serialize=()=>{native.serializerCalls++;return fixture.body;};
+  },true),/NATIVE_SUBMISSION_UNVERIFIED/);
+  assert.equal(native.getterCalls,0);assert.equal(native.serializerCalls,0);
+ }
+});
+
+test('getter local cannot capture builtin arguments before body, capability or draft admission',async()=>{
+ const getterSource=renamedGetterFormat.getter.replace('let e=','let arguments=').replace('(0,I.g)(e,','(0,I.g)(arguments,');
+ for(const mode of ['body','capability','draft']) {
+  let native,transactionReads=0;
+  await assert.rejects(inspectCharacterized(context=>{
+   native=context.native;
+   context.host.__reactFiber$fixture.memoizedProps.onSubmit=new Function('return '+renamedGetterFormat.submit)();
+   context.editor.getText=new Function('I','return {'+getterSource+'};')({g:()=>{native.getterCalls++;return fixture.body;}}).getText;
+   if(mode==='draft') {
+    context.env.discardBackup={document:{synthetic:true}};
+    Object.defineProperty(context.editor.view.state,'tr',{get(){transactionReads++;throw new Error('DISCARD_MUTATION_REACHED');}});
+   }
+  },mode==='capability'),error=>{
+   assert.match(error.message,mode==='draft'?/DRAFT_DISCARD_UNSUPPORTED/:/NATIVE_SUBMISSION_UNVERIFIED/);
+   return true;
+  });
+  assert.equal(native.getterCalls,0);assert.equal(native.serializerCalls,0);assert.equal(transactionReads,0);
+ }
+});
+
 test('uncharacterized getter or serializer stays FORMAT UNSUPPORTED with zero native calls',async()=>{
  for(const field of ['getter','serializer','getterToString','serializerToString']) {
   let native,calls=0;
