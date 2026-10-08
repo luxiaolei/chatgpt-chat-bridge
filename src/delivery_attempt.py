@@ -11,6 +11,18 @@ FORMAT = "chat-bridge-delivery-attempt-v1"
 MAX_READ_BYTES = 16 * 1024 * 1024
 
 
+def quarantine_operation_matches(original, expected):
+    row = dict(original)
+    digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    if digest(row) == expected:
+        return True
+    # PR159 added a NULL column; legacy audits still cover every original field.
+    if "reclaim_route" in row and row["reclaim_route"] is None:
+        del row["reclaim_route"]
+        return digest(row) == expected
+    return False
+
+
 def route_snapshot(reg, row):
     """Capture before the first child; never backfill an uncertain old send."""
     identity = (reg.get("accounts", {}).get(row["account_alias"]) or {}).get("identity")

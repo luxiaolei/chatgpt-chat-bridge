@@ -71,7 +71,32 @@ with tempfile.TemporaryDirectory(prefix="bridge-quarantine-") as root:
     assert evidence["verifiedExpiredClaim"]["expired"] is True
     assert evidence["verifiedExpiredClaim"]["operationId"]==registration["attempt"]["operationId"]
   def prepare():return c.rotation_prepare(db,{"project":"P","role":"lead","quarantineEvent":event})
-  if case=="legacy-before-prepare":fenced(put(late,base=reg))
+  if case.startswith("audit-schema-"):
+   body=json.loads(db.execute("SELECT payload FROM management_events WHERE id=?",(event,)).fetchone()[0])
+   legacy={k:v for k,v in original.items() if k!="reclaim_route"}
+   body["operationSha256"]=c.rotation_digest(legacy)
+   db.execute("UPDATE management_events SET payload=? WHERE id=?",(json.dumps(body),event));db.commit()
+   if case=="audit-schema-nonnull-route":
+    db.execute("UPDATE operations SET reclaim_route='{}' WHERE id=?",(old["operationId"],));db.commit()
+   elif case=="audit-schema-original-drift":
+    db.execute("UPDATE operations SET message=message||' changed' WHERE id=?",(old["operationId"],));db.commit()
+   original=dict(db.execute("SELECT * FROM operations WHERE id=?",(old["operationId"],)).fetchone())
+   base=c.registry(db);updated=copy.deepcopy(base);updated["chats"][owner]["lastUsedAt"]="fixture-observation"
+   before=dump();projection=(config/"registry.json").read_bytes()
+   saved=subprocess.run([sys.executable,"src/state-store.py","put",str(config),str(state),"registry"],input=json.dumps({"base":base,"next":updated}),text=True,capture_output=True)
+   if case in {"audit-schema-nonnull-route","audit-schema-original-drift"}:
+    assert saved.returncode!=0 and "ROTATION_QUARANTINE_AUDIT_INVALID" in saved.stderr,saved.stderr
+    rejected(lambda:c.rotation_quarantine_event(db,"P","lead"),"AUDIT_INVALID")
+    assert dump()==before and (config/"registry.json").read_bytes()==projection
+   else:
+    assert saved.returncode==0,saved.stderr
+    assert c.rotation_quarantine_event(db,"P","lead")["id"]==event
+    assert c.registry(db)["chats"][owner]["lastUsedAt"]=="fixture-observation"
+    if case=="audit-schema-prepare":
+     cp(owner,"after");assert prepare()["state"]=="ROTATING"
+    fenced(put(late,base=c.registry(db)))
+   assert db.execute("SELECT payload FROM management_events WHERE id=?",(event,)).fetchone()[0]==json.dumps(body)
+  elif case=="legacy-before-prepare":fenced(put(late,base=reg))
   elif case=="stale-checkpoint":rejected(prepare,"CHECKPOINT")
   elif case=="unauthorized-quarantine":
    os.environ["CHAT_BRIDGE_FROM_ACCOUNT_ID"]="f"*64
@@ -239,7 +264,7 @@ with tempfile.TemporaryDirectory(prefix="bridge-quarantine-") as root:
 print("PASS",case)
 `;
 
-for(const name of ["positive-chain","readonly-preview","quarantine-race","legacy-before-prepare","stale-checkpoint","wrong-logical-ref","prepare-race","finish-unknown","finish-stale-claim","stale-attempt","stale-claimed-at","wrong-epoch","wrong-event","wrong-owner","forged-descriptor","wrong-body","wrong-origin","missing-descriptor","ack-no-origin","ack-extra-active","unauthorized-quarantine","wrong-prepare-event","wrong-handoff","unauthorized-prepare","old-unknown-descriptor","unbounded-descriptor","wrong-project-url","wrong-cid-url","wrong-registration-account","wrong-role","ack-wrong-caller","ack-empty-verification","ack-wrong-operation","public-readonly-preview","finish-stale-management","finish-stale-callback","candidate-already-registered","generated-public-ack","pending-observation"]) {
+for(const name of ["audit-schema-save","audit-schema-prepare","audit-schema-nonnull-route","audit-schema-original-drift","positive-chain","readonly-preview","quarantine-race","legacy-before-prepare","stale-checkpoint","wrong-logical-ref","prepare-race","finish-unknown","finish-stale-claim","stale-attempt","stale-claimed-at","wrong-epoch","wrong-event","wrong-owner","forged-descriptor","wrong-body","wrong-origin","missing-descriptor","ack-no-origin","ack-extra-active","unauthorized-quarantine","wrong-prepare-event","wrong-handoff","unauthorized-prepare","old-unknown-descriptor","unbounded-descriptor","wrong-project-url","wrong-cid-url","wrong-registration-account","wrong-role","ack-wrong-caller","ack-empty-verification","ack-wrong-operation","public-readonly-preview","finish-stale-management","finish-stale-callback","candidate-already-registered","generated-public-ack","pending-observation"]) {
   test("actual SQLite rotation quarantine: "+name,()=>{
     const env={...process.env,PYTHONDONTWRITEBYTECODE:"1"};
     // Only the private fixture child loses inherited origin; the parent stays unchanged.
