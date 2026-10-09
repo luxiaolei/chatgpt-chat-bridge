@@ -469,6 +469,11 @@ The local-only `queue delivery-attempts --operation ID` returns file hashes and
 explicit evidence/UNKNOWN limits, not a new recovery or acceptance action. It
 returns at most the latest 128 claim directories and flags truncation. Direct
 non-queue consumers are not silently assigned a new operation or sender ticket.
+An external direct sender can explicitly opt into the same private phase writer
+with a hash-bound caller request file, deterministic request ID and pre-Send
+deadline/revocation guard. Its separate namespace preserves the original caller
+claim, native UID and full source even when stdout is empty; the exact contract
+and strict-reader limits are in [direct-send-requests.md](direct-send-requests.md).
 
 ### Quarantining a legacy rotation without a provable successor
 

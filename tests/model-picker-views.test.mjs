@@ -344,20 +344,21 @@ test('model readiness uses a validated fixed tagged result while unknown selecto
   }
  }
 });
-test('final receipt keeps readiness code and diagnostic while the producer send boundary remains monotonic',()=>{
+test('final receipt keeps readiness code and diagnostic while the producer send boundary remains monotonic',async()=>{
  const start=source.lastIndexOf('  const payload={ok:false,deliveryStage:');
  const end=source.indexOf('  throw error;',start)+'  throw error;'.length;
  assert.ok(start>0&&end>start);
  const receiptSource=source.slice(start,end);
  assert.match(receiptSource,/sendAttempted\|\|error\?\.deliveryStage==="SEND_ATTEMPTED"/);
- const emit=new Function('error','sendAttempted','console','let pageAllocationRequest=null;'+receiptSource);
- const capture=(error,attempted)=>{let receipt;assert.throws(()=>emit(error,attempted,{error:text=>{receipt=JSON.parse(text);}}),actual=>actual===error);return receipt;};
+ const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+ const emit=new AsyncFunction('error','sendAttempted','console','let pageAllocationRequest=null;const directRequestJournal=null;'+receiptSource);
+ const capture=async(error,attempted)=>{let receipt;await assert.rejects(()=>emit(error,attempted,{error:text=>{receipt=JSON.parse(text);}}),actual=>actual===error);return receipt;};
  const error=new Error('EFFORT_SELECTOR_NOT_READY');error.code=error.message;
- assert.deepEqual(capture(error,false),{ok:false,deliveryStage:'PRE_SEND',code:'EFFORT_SELECTOR_NOT_READY'});
+ assert.deepEqual(await capture(error,false),{ok:false,deliveryStage:'PRE_SEND',code:'EFFORT_SELECTOR_NOT_READY'});
  error.deliveryStage='PRE_SEND';
- assert.deepEqual(capture(error,true),{ok:false,deliveryStage:'SEND_ATTEMPTED',code:'EFFORT_SELECTOR_NOT_READY'});
+ assert.deepEqual(await capture(error,true),{ok:false,deliveryStage:'SEND_ATTEMPTED',code:'EFFORT_SELECTOR_NOT_READY'});
  const unknown=new Error('Other failure: EFFORT_SELECTOR_NOT_READY');unknown.code='UNRELATED';
- assert.equal(capture(unknown,false).code,'UNRELATED');assert.equal(unknown.message,'Other failure: EFFORT_SELECTOR_NOT_READY');
+ assert.equal((await capture(unknown,false)).code,'UNRELATED');assert.equal(unknown.message,'Other failure: EFFORT_SELECTOR_NOT_READY');
 });
 
 test('unknown native readiness observation errors are never recoded or retried as selector readiness',async()=>{

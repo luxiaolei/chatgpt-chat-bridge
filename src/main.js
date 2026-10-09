@@ -93,13 +93,34 @@ const TOPOLOGY=globalThis.__CHAT_BRIDGE_TOPOLOGY__;
 const WEB_COOLDOWN_PATH = pathMod.join(STATE_DIR, "web-cooldown.json");
 const taskAccounts=new Map();
 let deliveryAttemptPromise=null;
+let directRequestJournal=null;
+function assertDirectRequestCurrent(){directRequestJournal?.assertCurrent();}
+async function prepareDirectRequest(chat){
+  if(!opt("request-file",null))return;
+  if(globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__)throw new Error("DIRECT_REQUEST_QUEUE_CONFLICT");
+  const binding=bindingFor(reg,chat.project,chat.account),identity=reg.accounts?.[chat.account]?.identity;
+  const projectId=projectKey(binding.projectUrl),sessionRef=chat.id;
+  if(!identity||!binding.profileId||!projectId||projectKey(chat.url)!==projectId||convId(chat.url)!==sessionRef)
+    throw new Error("DIRECT_REQUEST_ROUTE_UNPROVEN");
+  if(!COORDINATOR_PATH)throw new Error("DELIVERY_EVIDENCE_RUNTIME_MISSING");
+  const module=await import(pathMod.join(pathMod.dirname(COORDINATOR_PATH),"delivery-attempt.mjs"));
+  directRequestJournal=await module.openDirectRequest(STATE_DIR,{requestId:opt("request-id",null),requestFile:opt("request-file"),expectedHash:opt("expected-hash",null)},
+    {project:chat.project,account:chat.account,accountId:accountScope(reg,chat.account),sessionRef,
+      targetUrl:"https://chatgpt.com/g/"+projectId+"/c/"+sessionRef,callerRef:opt("caller-ref",null),taskId:opt("task",null),
+      messageSha256:crypto.createHash("sha256").update(positionals(2).join(" ")).digest("hex"),
+      requestedModel:opt("model",null),requestedEffort:opt("effort",null),
+      route:{projectId,profileId:binding.profileId,identityHash:crypto.createHash("sha256").update(identity).digest("hex")}});
+  assertDirectRequestCurrent();
+}
 async function recordDeliveryStage(phase,data={},message=null) {
   const context=globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__;
-  if(!context) return null; // Direct callers retain their existing receipt contract.
-  if(!COORDINATOR_PATH) throw new Error("DELIVERY_EVIDENCE_RUNTIME_MISSING");
-  deliveryAttemptPromise ||= import(pathMod.join(pathMod.dirname(COORDINATOR_PATH),"delivery-attempt.mjs"))
-    .then(module=>module.openAttempt(STATE_DIR,context));
-  const journal=await deliveryAttemptPromise;
+  if(!context&&!directRequestJournal)return null;
+  if(context){
+    if(!COORDINATOR_PATH) throw new Error("DELIVERY_EVIDENCE_RUNTIME_MISSING");
+    deliveryAttemptPromise ||= import(pathMod.join(pathMod.dirname(COORDINATOR_PATH),"delivery-attempt.mjs"))
+      .then(module=>module.openAttempt(STATE_DIR,context));
+  }
+  const journal=directRequestJournal||await deliveryAttemptPromise;
   if(phase==="TARGET_OBSERVED" && (data.project!==journal.manifest.project || data.account!==journal.manifest.account ||
      (journal.manifest.sessionRef && data.sessionId!==journal.manifest.sessionRef)))
     throw new Error("DELIVERY_ATTEMPT_TARGET_MISMATCH");
@@ -369,7 +390,7 @@ function boolValue(value, def=false) {
 }
 function positionals(start=0) {
   const booleans="aggressive all allow-duplicate-role background confirm create current-controller dry-run overflow quiet reload-home resume-watch skip-lifecycle skip-tasks strict-model".split(" ");
-  const valued="account affinity-key after auto-reconcile baseline-assistant-count baseline-assistant-hash baseline-assistant-id caller-ref candidate completion-mode controller cooldown dispatched-at draft-policy effort escalation-to expected-hash github id image-path instruction issue label limit max-overflow-spaces max-recovery max-total-recovery message mime-type min-gap-sec model name operation original-message page profile project project-id reconcile-role reply-to reply-to-session request-id resource-policy-version role root-controller session space stall-sec status target-id task task-id terminate-after-reload-unknown timeout title turn-id type url workgroup".split(" ");
+  const valued="account affinity-key after auto-reconcile baseline-assistant-count baseline-assistant-hash baseline-assistant-id caller-ref candidate completion-mode controller cooldown dispatched-at draft-policy effort escalation-to expected-hash github id image-path instruction issue label limit max-overflow-spaces max-recovery max-total-recovery message mime-type min-gap-sec model name operation original-message page profile project project-id reconcile-role reply-to reply-to-session request-file request-id resource-policy-version role root-controller session space stall-sec status target-id task task-id terminate-after-reload-unknown timeout title turn-id type url workgroup".split(" ");
   const out=[];
   for (let i=start;i<args.length;i++) {
     if (args[i].startsWith("--")) {
@@ -546,6 +567,7 @@ let pageAllocationRequest=null;
 async function recordAllocationStage(phase,data) {
   if(globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__) return recordDeliveryStage(phase,data);
   pageAllocationRequest ||= opt("request-id",null)||crypto.randomUUID();
+  if(directRequestJournal)await recordDeliveryStage(phase,data);
   return coordinated("page-allocation-record",{requestId:pageAllocationRequest,phase,data,callerRef:opt("caller-ref",null)});
 }
 async function allocateManagedPage(task,binding,project,account) {
@@ -2195,6 +2217,7 @@ async function triggerSend(page, targetUrl=null, lifecycleScope=null) {
   if(snapshot.approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
   if(targetUrl) assertInputTarget(snapshot,targetUrl);
   const admit=()=>{
+    assertDirectRequestCurrent();
     assertRecoveryTaskCurrent(lifecycleScope);
     if(lifecycleScope) {
       const control=coordinated("admission-check",null,[lifecycleScope.project,...(lifecycleScope.workgroupId?["--workgroup",lifecycleScope.workgroupId]:[])]);
@@ -2202,6 +2225,7 @@ async function triggerSend(page, targetUrl=null, lifecycleScope=null) {
     }
     if(globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__) coordinated("delivery-admission",globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__);
     assertRecoveryTaskCurrent(lifecycleScope);
+    assertDirectRequestCurrent();
   };
   // The exclusive, synced intent is an uncertainty barrier, not a claim that
   // the UI click happened. A crash from this point never permits replay.
@@ -2247,6 +2271,7 @@ function postSendObservation(before, after, witness, condition=null, observation
   return {phase:'POST_SEND_CONFIRMATION',capturedAt:new Date().toISOString(),observedAt,
     missingCondition:condition||rejection.condition||(after?'POST_SEND_EXCEPTION':'POST_SEND_STATE_UNAVAILABLE'),
     snapshotAvailable:!!after,observationFailed,
+    ...(before?.directObservationWindow?{observationWindow:before.directObservationWindow}:{}),
     sourceCondition:after?.lastUserSourceCondition||null,
     temporarySourceProof:sourceContinuityReceipt(before,after),
     temporarySourceFirstConflict:before?.nativeSourceContinuity?.firstConflict||before?.nativeRegisteredSourceConflict||null,
@@ -2281,6 +2306,7 @@ async function saveDraftBackup(backup, directoryName="draft-backups") {
 }
 
 async function assertInputSafe(page, expectedIdentity=null, targetUrl=null, options={}) {
+  assertDirectRequestCurrent();
   const snapshot=await state(page,false,null,true);
   const routes=Object.values(reg.chats||{}).filter(chat=>sameConversationUrl(chat.url,snapshot.url));
   const identity=expectedIdentity || (routes.length===1?reg.accounts?.[routes[0].account]?.identity:null);
@@ -2329,12 +2355,14 @@ async function assertInputSafe(page, expectedIdentity=null, targetUrl=null, opti
     if(fresh.approvalRequired!==false || fresh.generating!==false) throw new Error("CHAT_BUSY");
     assertComposerSafe({...fresh,composerRawText:""});
     await recordDeliveryStage("DRAFT_DISCARD_INTENT",{sha256:retained.sha256});
+    assertDirectRequestCurrent();
     await page.evaluate(nativeSubmissionProbe,{selector:COMPOSER_SELECTOR,expectedIdentity:identity,discardBackup:backup});
     const cleared=await state(page,false,null,true);
     assertInputTarget(cleared,targetUrl,options.reclaim===true); assertComposerSafe(cleared);
     if(await readLogin()!==identity) throw new Error("INPUT_LOGIN_MISMATCH");
     await recordDeliveryStage("DRAFT_DISCARDED",{sha256:retained.sha256});
   }
+  assertDirectRequestCurrent();
   return identity;
 }
 
@@ -2685,16 +2713,20 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null, lif
     assertRecoveryTaskCurrent(lifecycleScope);
     await recordDeliveryStage("BEFORE_INPUT",{snapshot:deliveryStageSnapshot(before,page),targetUrl:before.targetUrl},msg);
     assertRecoveryTaskCurrent(lifecycleScope);
+    assertDirectRequestCurrent();
     try { await page.fill(COMPOSER_SELECTOR,msg); }
     catch {
       if((await state(page,false,"approval")).approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
       await assertInputSafe(page,identity,inputTarget);
       await activateComposer(page);
       await assertInputSafe(page,identity,inputTarget);
+      assertDirectRequestCurrent();
       await page.keyboard.press("ControlOrMeta+A");
       assertInputTarget(await state(page,false,"approval"),inputTarget);
+      assertDirectRequestCurrent();
       await page.keyboard.press("Backspace");
       assertInputTarget(await state(page,false,"approval"),inputTarget);
+      assertDirectRequestCurrent();
       await page.keyboard.insertText(msg);
     }
     await page.waitForTimeout(80);
@@ -2705,13 +2737,16 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null, lif
     before.nativeWitness=witness;
     await recordDeliveryStage("INPUT_VERIFIED",{nativeWitness:nativeWitnessReceipt(witness),nativeBody:witness?.body||null});
     attempts.push(await triggerSend(page,inputTarget,lifecycleScope));
-    await recordDeliveryStage("SEND_RETURNED",{control:attempts[0]});
-    const after=await waitForDelivery(page,before,8000,observation);
+    if(directRequestJournal){const startedAt=Date.now();before.directObservationWindow={startedAt,deadlineAt:startedAt+8000,timeoutMs:8000};}
+    await recordDeliveryStage("SEND_RETURNED",{control:attempts[0],...(directRequestJournal?{observationWindow:before.directObservationWindow}:{})});
+    const after=await waitForDelivery(page,before,directRequestJournal?Math.max(0,before.directObservationWindow.deadlineAt-Date.now()):8000,observation);
     observation.latest=after;
     await detectWebRateLimit(page,"send-after");
     const rejection={};
-    if(!deliveryObserved(before,after,undefined,rejection)) {
-      const err=new Error(`DELIVERY_UNCONFIRMED: composer=${after.composerPresent?"present":"missing"} text=${String(after.composerText||"").trim()?"nonempty":"empty"} attempts=${attempts.join(",")}`);
+    if(directRequestJournal && (!Number.isFinite(Date.parse(after?.observedAt))||Date.parse(after.observedAt)<before.directObservationWindow.startedAt||
+       Date.parse(after.observedAt)>before.directObservationWindow.deadlineAt))rejection.condition="DIRECT_OBSERVATION_OUTSIDE_WINDOW";
+    if(rejection.condition||!deliveryObserved(before,after,undefined,rejection)) {
+      const err=new Error(`DELIVERY_UNCONFIRMED: composer=${after?.composerPresent?"present":"missing"} text=${String(after?.composerText||"").trim()?"nonempty":"empty"} attempts=${attempts.join(",")}`);
       err.code="DELIVERY_UNCONFIRMED";err.deliveryCondition=rejection.condition;
       throw err;
     }
@@ -2720,7 +2755,9 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null, lif
       sourceConversationId:after.lastUserSource?.conversationId||null,...(continuity?{sourceBinding:continuity}:{}),
       ...(terminalLfBodyBinding(before,after)?{bodyBinding:terminalLfBodyBinding(before,after)}:{})});
     const delivery={delivered:true,attempts,lastUserId:after.lastUserId,url:after.url,messageCount:after.messageCount,nativeWitness:nativeReceipt};
-    await recordDeliveryStage("DELIVERY_CONFIRMED",delivery);
+    await recordDeliveryStage("DELIVERY_CONFIRMED",directRequestJournal?{...delivery,
+      nativeWitness:nativeReceipt?{...nativeReceipt,postSend:{...postSendObservation(before,after,witness),missingCondition:null}}:null,
+      nativeBody:witness?.body||null,before:deliveryStageSnapshot(before,page),snapshot:deliveryStageSnapshot(after,page)}:delivery);
     if(continuity?.format==='registered-temporary-conversation-v1') {
       const {sourceBinding,...latest}=nativeReceipt;
       registered.nativeLastWitness=latest;
@@ -2735,7 +2772,8 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null, lif
     }
     error.deliveryStage ||= attempts.length?"SEND_ATTEMPTED":"PRE_SEND";
     await recordDeliveryStage("ERROR",{code:String(error.code||"SEND_ERROR").slice(0,200),
-      deliveryStage:error.deliveryStage,nativeWitness:error.nativeWitness||null}).catch(()=>{});
+      deliveryStage:error.deliveryStage,nativeWitness:error.nativeWitness||null,
+      ...(directRequestJournal?{nativeBody:witness?.body||null,before:deliveryStageSnapshot(before,page),snapshot:deliveryStageSnapshot(observation.latest,page)}:{})}).catch(()=>{});
     throw error;
   }
 }
@@ -4563,6 +4601,7 @@ const reg=await loadRegistry().catch(error=>{
 const project=opt("project",cmd==="watch"?null:reg.defaultProject);
 const accountArg=opt("account",null);
 try {
+if(opt("request-file",null)&&(cmd!=="send"||globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__))throw new Error("DIRECT_REQUEST_SEND_ONLY");
 
 if(cmd==="image") {
   const prepared=globalThis.__CHAT_BRIDGE_IMAGE_PREPARED__;
@@ -4926,7 +4965,8 @@ else if(["read","status"].includes(cmd) && reg.chats[convId(args[1])]?.status===
 else if(["read","evidence","status","send","ask","stream","model","effort","stop","retry","recover","resend"].includes(cmd)){
   const key=args[1]; if(!key) throw new Error("chat key required");
   const chat=resolveChat(reg,key,project,accountArg);
-  const background=args.includes("--background")||cmd==="evidence";
+  if(cmd==="send")await prepareDirectRequest(chat);
+  const background=args.includes("--background")||cmd==="evidence"||!!directRequestJournal;
   if(["send","ask","stream","model","effort","stop","retry","recover","resend"].includes(cmd)) assertImageSessionFree(reg,chat);
   if(["send","ask","stream","retry","recover","resend"].includes(cmd) && !background)
     globalThis.__CHAT_BRIDGE_INPUT_RESUMED_USER_CONTROL__=await clearUserControlPause(chat);
@@ -4969,7 +5009,9 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
       url:await page.url(),page:page.label||null,spaceId:chat.spaceId||null,profileId:binding.profileId||null});
     const msg=positionals(2).join(" ");if(!msg)throw new Error("message required");
     const requestedModel=opt("model",null), requestedEffort=opt("effort",null);
+    assertDirectRequestCurrent();
     const dispatchModel=await applyDispatchModel(page,chat,requestedModel,requestedEffort);
+    if(directRequestJournal)await recordDeliveryStage("OBSERVED",{stage:"MODEL_SELECTED",modelSelection:dispatchModel});
     const taskOpt=opt("task",null), taskId=taskOpt?assertTaskId(taskOpt):null; let tracked=null, priorTask=null;
     if(taskId){
       const before=await state(page), rt=await loadRuntime(), old=rt.tasks[taskId]||{};
@@ -5039,6 +5081,7 @@ else if(["read","evidence","status","send","ask","stream","model","effort","stop
       }
     }
     print({ok:true,delivered:true,delivery,upload,chat:chat.name,taskId:taskId||null,state:observed.sessionState,
+      ...(directRequestJournal?{directRequest:directRequestJournal.reference}:{}),
       ...(runtimeCacheDeferred?{runtimeCacheDeferred:true}:{}),
       modelSelection:dispatchModel?{
         model:dispatchModel.model||dispatchModel.observed?.model||null,
@@ -5174,6 +5217,7 @@ commandSucceeded=true;
   const payload={ok:false,deliveryStage:(sendAttempted||error?.deliveryStage==="SEND_ATTEMPTED")?"SEND_ATTEMPTED":"PRE_SEND",
     code:String(error?.code||error?.message||"BRIDGE_ERROR").slice(0,200)};
   if(error?.nativeWitness) payload.nativeWitness=error.nativeWitness;
+  if(directRequestJournal)payload.directRequest=directRequestJournal.reference;
   if(error?.nativeAdapter) payload.nativeAdapter=error.nativeAdapter;
   if(error?.nativeFormatEvidence) payload.nativeFormatEvidence=error.nativeFormatEvidence;
   if(error?.allocationState) payload.allocationState=error.allocationState;
@@ -5184,6 +5228,7 @@ commandSucceeded=true;
   if(error?.reason) payload.reason=String(error.reason).slice(0,500);
   if(error?.retryAfterSec!=null) payload.retryAfterSec=Number(error.retryAfterSec);
   if(error?.nextRetryAt) payload.nextRetryAt=error.nextRetryAt;
+  if(directRequestJournal)await recordDeliveryStage("ERROR",{code:payload.code,deliveryStage:payload.deliveryStage}).catch(()=>{});
   console.error?.(JSON.stringify(payload));
   throw error;
 } finally {
