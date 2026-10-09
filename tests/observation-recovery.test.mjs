@@ -5,7 +5,7 @@ import '../src/task-policy.js';
 const source=await readFile('src/main.js','utf8');
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const start=source.indexOf('async function reattachTask(');
-const code='const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(start,source.indexOf('\nasync function ensurePage',start));
+const code='const cleanupAllocatedPage=async(_r,_t,p,v)=>closeEmptyPage(p,await p.url(),v);const handoffAllocatedPage=async()=>{};const allocateManagedPage=(t)=>t.newPage(); const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(start,source.indexOf('\nasync function ensurePage',start));
 async function fixture(overrides={}) {
   const chat={id:'sid',project:'P',account:'a',role:'critic',spaceName:'user-space',spaceId:0,page:'p0',url:'https://chatgpt.com/g/g-p-'+'a'.repeat(32)+'/c/sid'};
   const binding={spaceName:'chat-bridge-agent-a',profileId:'Profile 1',projectUrl:'https://chatgpt.com/g/g-p-'+'a'.repeat(32)+'/project'};
@@ -109,7 +109,7 @@ test('message selection excludes zero-area hidden history clones but retains off
 });
 
 const observerStart=source.indexOf("async function observeOperation(");
-const observerCode=source.slice(observerStart,source.indexOf("\nasync function ensurePage",observerStart));
+const observerCode='const handoffAllocatedPage=async()=>{};const allocateManagedPage=(t)=>t.newPage();'+source.slice(observerStart,source.indexOf("\nasync function ensurePage",observerStart));
 async function operationFixture(change={}) {
   const cid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", projectId="g-p-"+"a".repeat(32);
   const scope={operationId:"op",taskId:"legacy-no-runtime",project:"P",account:"a",accountId:"scope-a",

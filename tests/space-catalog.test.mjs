@@ -154,7 +154,7 @@ test("space scan persists actual login and projects without changing routing bin
   }
 });
 
-test("restore closes a probe tab when the saved Space has a different login",async()=>{
+test("restore never allocates a probe for an unregistered saved login",async()=>{
   for(const file of ["control-routing","page-pool","liveness-policy","task-policy","web-policy","model-policy","session-policy"])
     await import(`../src/${file}.js`);
   const dir=await mkdtemp(path.join(tmpdir(),"bridge-restore-"));
@@ -175,8 +175,8 @@ test("restore closes a probe tab when the saved Space has a different login",asy
     const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
     await assert.rejects(new AsyncFunction("listTaskSpaces","claimTaskSpace","taskSpace","console",source)(
       async()=>[{id:1,name:"Manual",ownership:"agent"}],async()=>{throw Error("unexpected claim")},async()=>task,{log:()=>{}}
-    ),/SPACE_ACCOUNT_CHANGED/);
-    assert.equal(closed,1);
+    ),/SPACE_RESTORE_ACCOUNT_UNVERIFIED/);
+    assert.equal(closed,0);
   } finally {
     keys.forEach((k,i)=>{globalThis[k]=previous[i]});
     await rm(dir,{recursive:true,force:true});

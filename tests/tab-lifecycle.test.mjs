@@ -12,6 +12,7 @@ async function fixture(status="RESULT_RECORDED",tab={},snapshot={}) {
     runtime:{tasks:{t1:{taskId:"t1",project:"P",account:"a",sessionId:cid,status,updatedAt:"2020-01-01T00:00:00Z"}}},
     tab:{label:"p1",url:chat.url,active:false,openedBy:"agent",...tab},snapshot:{url:chat.url,inputReady:true,approvalRequired:false,generating:false,composerCount:1,composerAttachmentsEmpty:true,composerRawText:"",...snapshot}};
   const detach=await new AsyncFunction("f",prefix+`
+    releasePhysicalPage=async(_r,_t,page)=>page.close();
     const reg=f.reg;
     loadRuntime=async()=>f.runtime;
     saveRegistry=async()=>{f.saved++;};

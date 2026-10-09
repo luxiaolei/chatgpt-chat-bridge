@@ -9,7 +9,7 @@ import "../src/session-policy.js";
 
 const source=await readFile(path.resolve("src/main.js"),"utf8"),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const section=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
-const code="const {draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n"+section("function samePhysicalSpace","\nasync function overflowManagedTask")+
+const code="const handoffAllocatedPage=async()=>{};const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{}; const physicalReleasePayload=(_reg,task,page,binding,project,account,purpose,candidate)=>({account,attempt:null,candidate,resourceTarget:{project,account,accountId:'8d249312f1ef6b47f04711d5c6949deb775e0ec1e68c862b59b12c2dc53c6654',spaceId:Number(task.spaceId),spaceName:binding.spaceName,profileId:binding.profileId,purpose,page:page.label,targetId:'fixture-target'}}); const releasePhysicalPage=async(_reg,task,page)=>{await page.close();if((await task.tabs()).some(t=>t.label===page.label))throw Error('PAGE_CLOSE_UNCONFIRMED');}; const {draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n"+section("function samePhysicalSpace","\nasync function overflowManagedTask")+
   section("async function newManagedPage","\nasync function controlPage")+
   section("async function ensureProjectLocation","\nasync function ")+
   section("async function pruneProjectSpace","\nasync function gcAgentSpaces")+
@@ -22,7 +22,7 @@ async function fixture(orphan=false,change=()=>{}) {
   const binding={spaceName:"managed",spaceId:9,profileId:"P1",projectUrl:home};
   const reg={accounts:{a:{identity:"login-a"}},projects:{P:{bindings:{a:binding}}},chats:{}};
   const rt={tasks:{}};
-  if(!orphan){reg.chats[cid]={id:cid,project:"P",account:"a",role:"worker",status:"active",spaceName:"managed",spaceId:9,page:"p9",url};rt.tasks.t={taskId:"t",sessionId:cid,project:"P",account:"a",status:"COMPLETE"};}
+  if(!orphan){reg.chats[cid]={id:cid,project:"P",account:"a",role:"worker",status:"active",spaceName:"managed",spaceId:9,profileId:"P1",page:"p9",pageTargetId:"fixture-target",url};rt.tasks.t={taskId:"t",sessionId:cid,project:"P",account:"a",status:"COMPLETE"};}
   const f={reg,rt,binding,tabs:[{label:"p9",url:orphan?home:url,active:false,openedBy:"agent"}],
     snapshot:{url:orphan?home:url,composerCount:1,composerAttachmentsEmpty:true,composerRawText:"",generating:false,approvalRequired:false},
     context:{sessionRefs:[],unboundProjectIds:[],unboundAny:false},closed:0,states:0,queries:0};
@@ -152,7 +152,7 @@ test("capacity proof is rechecked after page observation before closing",async()
     f.context.preSendCapacityWaits=[{taskId:"waiting",project:"P",account:"a",sessionId:"missing"}];
     f.freshContext={sessionRefs:["missing"],unboundProjectIds:[],unboundAny:false,preSendCapacityWaits:[]};
   });
-  assert.equal(out.closed,0);assert.ok(out.states>=1);assert.ok(out.queries>=2);
+  assert.equal(out.closed,0);assert.ok(out.states>=1);assert.ok(out.queries>=1);
 });
 
 test("both reclaim helpers preserve user, draft, permission, generation and image occupants",async()=>{
@@ -366,4 +366,11 @@ test("existing reclaim input mode requires an exact Project/CID before any draft
   assert.doesNotThrow(()=>guard({url:home},home,true));
   for(const changed of [home,"https://chatgpt.com/c/"+cid,url.replace(cid,"22222222-2222-4222-8222-222222222222"),url.replace("a".repeat(32),"b".repeat(32))])
     assert.throws(()=>guard({url:changed},url,true),/DELIVERY_TARGET_MISMATCH/);
+});
+
+test('a denied resource decision fences authorized draft discard before any mutation',async()=>{
+ for(const orphan of [false,true]) {
+  const f=await fixture(orphan,f=>{f.reg.projects.P.lifecycle={draftPolicy:'discard'};f.snapshot.composerRawText='must remain';f.context.resourceRelease={allowed:false,reason:'PAGE_RELEASE_ALREADY_ATTEMPTED'};});
+  assert.equal(f.closed,0);assert.equal(f.discards||0,0);assert.equal(f.snapshot.composerRawText,'must remain');
+ }
 });

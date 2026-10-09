@@ -158,7 +158,7 @@ case "$CMD" in
   operation-evidence|reattach|send|ask|stream|new|read|evidence|status|sync|resend|model|effort|stop|retry|recover|archive|retire|delete|projects|discover|list|event|task|project)
     ORIGIN_ROUTED=1 ;;
   space)
-    [[ "$SUB" == "show" || "$SUB" == "prune" || "$SUB" == "consolidate" ]] && ORIGIN_ROUTED=1 ;;
+    [[ "$SUB" == "show" || "$SUB" == "prune" || "$SUB" == "release" || "$SUB" == "consolidate" ]] && ORIGIN_ROUTED=1 ;;
 esac
 if (( ORIGIN_ROUTED )) && [[ -n "${CHAT_BRIDGE_FROM_ACCOUNT_ID:-}" ]]; then
   ORIGIN_ACCOUNT="$(python3 "$PREFLIGHT" origin-account "$CONFIG_DIR" "$STATE_DIR" "$@")"
@@ -206,7 +206,7 @@ case "$CMD" in
     TOUCH_UI=1
     ;;
   space)
-    [[ "$SUB" == "prune" || "$SUB" == "scan" || "$SUB" == "restore" || "$SUB" == "gc" || "$SUB" == "consolidate" ]] && TOUCH_UI=1
+    [[ "$SUB" == "prune" || "$SUB" == "release" || "$SUB" == "scan" || "$SUB" == "restore" || "$SUB" == "gc" || "$SUB" == "consolidate" ]] && TOUCH_UI=1
     ;;
   project)
     [[ "$SUB" == "ensure" ]] && TOUCH_UI=1
@@ -220,7 +220,7 @@ case "$CMD" in
     HEAVY_UI=1
     ;;
   space)
-    [[ ( "$SUB" == "gc" || "$SUB" == "consolidate" ) && "$*" == *"--confirm"* ]] && HEAVY_UI=1
+    [[ ( "$SUB" == "gc" || "$SUB" == "release" || "$SUB" == "consolidate" ) && "$*" == *"--confirm"* ]] && HEAVY_UI=1
     ;;
   project)
     [[ "$SUB" == "ensure" && "$*" == *"--create"* && "$*" == *"--confirm"* ]] && HEAVY_UI=1

@@ -13,6 +13,7 @@ async function harness(f={}) {
   f.calls=[];
   f.runtime ||= {tasks:{},sessions:{},projects:{}};
   return await new AsyncFunction("f",source+`
+    releasePhysicalPage=async(_r,_t,page)=>page.close();assertPhysicalPageAvailable=()=>{};
     const reg=f.reg||{};
     loadRuntime=async()=>structuredClone(f.runtime);
     saveRuntime=async value=>{f.runtime=structuredClone(value);f.calls.push('save');};

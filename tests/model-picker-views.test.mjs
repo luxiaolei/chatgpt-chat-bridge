@@ -350,7 +350,7 @@ test('final receipt keeps readiness code and diagnostic while the producer send 
  assert.ok(start>0&&end>start);
  const receiptSource=source.slice(start,end);
  assert.match(receiptSource,/sendAttempted\|\|error\?\.deliveryStage==="SEND_ATTEMPTED"/);
- const emit=new Function('error','sendAttempted','console',receiptSource);
+ const emit=new Function('error','sendAttempted','console','let pageAllocationRequest=null;'+receiptSource);
  const capture=(error,attempted)=>{let receipt;assert.throws(()=>emit(error,attempted,{error:text=>{receipt=JSON.parse(text);}}),actual=>actual===error);return receipt;};
  const error=new Error('EFFORT_SELECTOR_NOT_READY');error.code=error.message;
  assert.deepEqual(capture(error,false),{ok:false,deliveryStage:'PRE_SEND',code:'EFFORT_SELECTOR_NOT_READY'});

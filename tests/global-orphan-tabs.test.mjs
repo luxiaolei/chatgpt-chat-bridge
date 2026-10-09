@@ -12,6 +12,7 @@ async function fixture(change=()=>{}) {
     context:{sessionRefs:[],unboundProjectIds:[],unboundAny:false},snapshot:{approvalRequired:false,generating:false,composerCount:1,composerAttachmentsEmpty:true,composerRawText:""}};
   change(f);
   const run=await new AsyncFunction("f","name",source+`
+    releasePhysicalPage=async(_r,t,page)=>{await page.close();if((await t.tabs()).some(tab=>tab.label===page.label))throw Error('PAGE_CLOSE_UNCONFIRMED');};
     loadRuntime=async()=>f.runtime;
     listTaskSpaces=async()=>f.spaces||[{id:7,name,profileId:'P1',ownership:'agent',createdBy:'agent'}];
     imageSessionOccupancy=()=>({occupied:false});

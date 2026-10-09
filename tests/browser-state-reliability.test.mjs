@@ -94,7 +94,7 @@ test("actual DOM attachment-only drafts protect shared reclaim, control reuse an
     Object.assign(page,{label:"p9",url:async()=>url,close:async()=>{closes++;}});
     const task={spaceId:9,page:()=>page,pages:async()=>[page],tabs:async()=>closes?[]:[{label:"p9",url,active:false,openedBy:"agent"}]};
     const api=await new AsyncFunction("loadRuntime","state","saveRegistry","imageSessionOccupancy","activeTaskStatus","composerIsEmpty","pageDetachCandidates","orphanManagedPageCandidates","sameConversationUrl","projectHomeId","coordinated","openBoundTask","registry","assertComposerSafe","projectKey","listTaskSpaces",
-      "const reg=registry;const {draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n"+section("function samePhysicalSpace","\nasync function overflowManagedTask")+
+      "const physicalReleasePayload=(_r,_t,page,_b,_p,account,purpose,candidate)=>({account,candidate,resourceTarget:{purpose,page:page.label}});const releasePhysicalPage=async(_r,_t,page)=>page.close();const reg=registry;const {draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n"+section("function samePhysicalSpace","\nasync function overflowManagedTask")+
       section("function assertInputTarget(","\nasync function saveDraftBackup")+section("async function assertInputSafe(","\nasync function closeEmptyPage")+section("async function closeEmptyPage(","\nasync function nativeSubmissionWitness")+";return {reclaimIdlePageSlot,reclaimOrphanManagedPage,closeEmptyPage};")(
       async()=>rt,state,async()=>{saves++;},()=>({occupied:false}),activeTaskStatus,composerIsEmpty,
       globalThis.__CHAT_BRIDGE_PAGE_POOL__.pageDetachCandidates,globalThis.__CHAT_BRIDGE_PAGE_POOL__.orphanManagedPageCandidates,
