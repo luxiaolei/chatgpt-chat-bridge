@@ -504,6 +504,11 @@ file/hash index. This does not start Ego, reconcile, register a candidate or res
 The synced `SEND_INTENT` is an uncertainty barrier, not proof that the click ran.
 Missing stages or empty output never prove absence of delivery. A timeout stays
 UNKNOWN even if cleanup captures a successful-looking receipt. Prior attempts are
-not overwritten. Direct non-queue callers retain their existing receipt contract;
-this journal is not a native parent/alias capability or an RPC execution ticket.
+not overwritten. This journal is not a native parent/alias capability or an RPC
+execution ticket. Direct non-queue callers retain their existing receipt contract
+by default;
+`send --request-file ABS_JSON --request-id ID --expected-hash SHA256` explicitly
+opts into a caller-bound private journal and deadline/revocation checks. Read
+`docs/direct-send-requests.md` for the byte contract and strict same-claim reader;
+empty stdout/timeout never grants replay, and owner fields add no authority.
 Files are private and may contain complete source; do not upload them to GitHub.
