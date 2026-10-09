@@ -64,7 +64,7 @@ test('ensure blocks replacement of a disappeared target after uncertain close bu
       const chat={id:'11111111-1111-4111-8111-111111111111',project:'P',account:'a',url:home.replace('/project','/c/11111111-1111-4111-8111-111111111111'),page:'p9',pageTargetId:'target-one',spaceId:9,pageSpaceId:9,spaceName:'managed',profileId:'P1'};
       const page={label:'new-page',targetId:'new-target',goto:async()=>{},url:async()=>chat.url};let opens=0,creates=0;
       const ensure=await new AsyncFunction('coordinated','accountScope','openBoundTask','pagesOf','newManagedPage','waitForConversationReady','sameConversationUrl','saveRegistry','handoffAllocatedPage',source.slice(start,end)+';return ensurePage;')(
-        f.call,()=>scope,async()=>{opens++;return {binding:f.registry.projects.P.bindings.a,task:{spaceId:9}};},async()=>[],async()=>{creates++;return {page};},async()=>{},(a,b)=>a===b,async()=>{},async()=>{});
+        f.call,()=>scope,async()=>{opens++;return {binding:f.registry.projects.P.bindings.a,task:{spaceId:9,tabs:async()=>[]}};},async()=>[],async()=>{creates++;return {page};},async()=>{},(a,b)=>a===b,async()=>{},async()=>{});
       if(['INTENT','UNKNOWN'].includes(phase)) {
         await assert.rejects(()=>ensure(f.registry,chat),/PAGE_TARGET_RELEASE_FENCED/);assert.equal(opens,0);assert.equal(creates,0);
       } else { await ensure(f.registry,chat);assert.equal(opens,1);assert.equal(creates,1);assert.equal(chat.pageTargetId,'new-target'); }

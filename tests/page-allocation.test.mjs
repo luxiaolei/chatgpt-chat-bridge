@@ -15,13 +15,15 @@ async function fixture(change=()=>{}) {
     tab:{label:'p9',targetId:'exact-native-target',url:home,openedBy:'agent'},
     sample:{url:home,generating:false,approvalRequired:false,composerCount:1,composerRawText:'',composerAttachmentsEmpty:true}};
   await change(f);
-  f.page={label:'p9',targetId:f.pageTargetId??'exact-native-target',url:async()=>f.tab.url,
+  f.page={label:'p9',spaceId:9,targetId:f.pageTargetId??'exact-native-target',url:async()=>f.tab.url,
     evaluate:async()=>true};
+  f.tab.page=f.page;
   const task={spaceId:9,tabs:async()=>f.gone?[]:[f.tab],newPage:async()=>{f.created++;assert.equal(f.records.at(-1).phase,'ALLOCATION_INTENT');if(f.creationError)throw f.creationError;return f.page;},
+    page:()=>{f.lazyCalls=(f.lazyCalls||0)+1;throw Error('lazy label handle must not be used');},
     cdp:async(method,params)=>{if(method==='Target.closeTarget'){assert.equal(params.targetId,'exact-native-target');f.closed++;if(f.closeError)throw f.closeError;f.gone=true;return 'closeResponse' in f?f.closeResponse:{success:true};}if(f.nativeError)throw f.nativeError;return 'nativeResponse' in f?f.nativeResponse:{targetInfos:f.gone?[]:[f.tab]};}};
   const ensureStart=source.indexOf('async function ensureProjectLocation'),ensureEnd=source.indexOf('\nasync function syncProject',ensureStart);
-  const api=await new AsyncFunction('recordDeliveryStage','pageBudgetError','listTaskSpaces','stored','coordinated','projectHomeId','projectKey','assertInputSafe','state','composerIsEmpty','samePhysicalSpace','accountScope','opt','reg','crypto','projectRecord','accountManagedTask','openProjectPage','bindingFor','saveRegistry','touchRuntime','bindingExecutionReadiness','projectIdFromUrl',
-    'const globalThis={__CHAT_BRIDGE_DELIVERY_ATTEMPT__:'+(f.direct?'null':'{}')+'};let sendAttempted=false;const bindingObserved=()=>false;const newManagedPage=(_reg,p,a,t,b)=>allocateManagedPage(t,b,p,a);'+source.slice(start,end)+source.slice(ensureStart,ensureEnd)+';return {allocateManagedPage,cleanupAllocatedPage,cleanupFailedAllocation,ensureProjectLocation,handoffAllocatedPage};')(
+  const api=await new AsyncFunction('recordDeliveryStage','pageBudgetError','listTaskSpaces','stored','coordinated','projectHomeId','projectKey','assertInputSafe','state','composerIsEmpty','samePhysicalSpace','accountScope','opt','reg','crypto','projectRecord','accountManagedTask','openProjectPage','bindingFor','saveRegistry','touchRuntime','bindingExecutionReadiness','projectIdFromUrl','taskSpace',
+    'const globalThis={__CHAT_BRIDGE_DELIVERY_ATTEMPT__:'+(f.direct?'null':'{}')+'};let sendAttempted=false;const bindingObserved=()=>false;const newManagedPage=(_reg,p,a,t,b)=>allocateManagedPage(t,b,p,a);'+source.slice(start,end)+source.slice(ensureStart,ensureEnd)+';return {allocateManagedPage,cleanupAllocatedPage,cleanupFailedAllocation,ensureProjectLocation,handoffAllocatedPage,releaseManagementPage};')(
     async(phase,data)=>{f.records.push({phase,data:structuredClone(data)});if(f.recordError===phase)throw Error('disk write refused');},
     e=>e.message==='page budget reached',async()=>[{id:9,name:'managed',profileId:'P1',ownership:'agent',createdBy:'agent'}],
     (_command,kind)=>kind==='registry'?reg:{tasks:{},sessions:{}},(command,payload)=>{
@@ -34,7 +36,7 @@ async function fixture(change=()=>{}) {
     s=>s.composerCount===1&&s.composerRawText===''&&s.composerAttachmentsEmpty===true,
     (a,b)=>a.spaceId===b.spaceId||a.spaceName===b.spaceName,()=>f.realScope||'login-hash',()=>null,reg,crypto,
     (r,p)=>r.projects[p],async()=>({task,spaceName:'managed',profileId:'P1'}),async()=>{if(f.projectFound)return home;throw Error('project not found');},
-    (r,p,a)=>r.projects[p].bindings[a]||={},async()=>{},async()=>{if(f.runtimeError)throw f.runtimeError;},()=>({ready:true}),()=> 'g-p-'+'a'.repeat(32));
+    (r,p,a)=>r.projects[p].bindings[a]||={},async()=>{},async()=>{if(f.runtimeError)throw f.runtimeError;},()=>({ready:true}),()=> 'g-p-'+'a'.repeat(32),async id=>{assert.equal(id,9);return task;});
   return {...f,f,api,task};
 }
 test('allocation persists intent before calling native and distinguishes a budget refusal from an unknown allocation',async()=>{
@@ -52,6 +54,16 @@ test('failed allocation cleanup closes only its unchanged owned idle target and 
   const outcome=Error('navigation failed');await x.api.cleanupFailedAllocation(x.reg,x.task,page,outcome);
   assert.equal(outcome.pageCleanup.state,'RELEASED');assert.equal(x.f.closed,1);
   assert.deepEqual(x.f.records.map(r=>r.phase),['ALLOCATION_INTENT','PAGE_ALLOCATED','PAGE_RELEASE_INTENT','PAGE_RELEASED']);
+});
+test('management release uses the native bound tab Page rather than a lazy label handle and refuses invalid binding',async()=>{
+  const x=await fixture();
+  await x.api.releaseManagementPage(x.reg,'P','a','managed','p9','exact-native-target',true);
+  assert.equal(x.f.closed,1);assert.equal(x.f.lazyCalls||0,0);assert.equal(x.f.created,0);
+  for(const patch of [f=>{f.tab.page=null;},f=>{f.page.targetId='other';},f=>{f.page.spaceId=8;},f=>{f.page.label='other';},f=>{f.page.evaluate=null;}]) {
+    const y=await fixture();patch(y.f);
+    await assert.rejects(()=>y.api.releaseManagementPage(y.reg,'P','a','managed','p9','exact-native-target',true),/PAGE_BOUND_TARGET_UNVERIFIED/);
+    assert.equal(y.f.closed,0);assert.equal(y.f.intentPersisted||false,false);assert.equal(y.f.lazyCalls||0,0);
+  }
 });
 test('native inventory must confirm the captured target before close and only an explicit success acknowledges close',async()=>{
   for(const patch of [f=>{f.nativeError=Error('Target domain unavailable');},...[undefined,{}, {targetInfos:[]},{targetInfos:[{targetId:'other'}]},{targetInfos:[null,{targetId:'exact-native-target'}]},{targetInfos:[{targetId:'exact-native-target'},{targetId:'exact-native-target'}]}].map(response=>f=>{f.nativeResponse=response;})]) {

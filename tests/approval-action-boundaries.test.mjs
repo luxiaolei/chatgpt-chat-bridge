@@ -26,12 +26,12 @@ test('real readiness path preserves pending approval before missing-composer loa
   const f={chat,calls:[],reg:{chats:{[chat.id]:chat},projects:{P:{bindings:{a:{spaceName:'managed'}}}}},
     rt:{tasks:{T:{taskId:'T',project:'P',sessionId:chat.id,status:'RUNNING',watchErrorCount:2,recoveryAttempts:0}},sessions:{},projects:{}}};
   let clock=Date.now(); f.clock=class extends Date {static now(){clock+=1000;return clock;}};
-  f.page={label:'p1',url:async()=>url,waitForSelector:async()=>{throw Error('composer absent');},waitForTimeout:async()=>{},
+  f.page={label:'p1',spaceId:7,targetId:'native-p1',url:async()=>url,waitForSelector:async()=>{throw Error('composer absent');},waitForTimeout:async()=>{},
     evaluate:async()=>{f.calls.push('load-error-DOM-evaluate');return {loadError:true,count:1};},
     focus:async()=>f.calls.push('focus-retry'),keyboard:{press:async k=>f.calls.push('key-'+k)}};
   const api=await build(f,`
     const Date=f.clock;
-    openBoundTask=async()=>({binding:{spaceName:'managed',spaceId:7},task:{spaceId:7,tabs:async()=>[{label:'p1',openedBy:'agent',url:f.chat.url}]}});
+    openBoundTask=async()=>({binding:{spaceName:'managed',spaceId:7},task:{spaceId:7,tabs:async()=>[{label:'p1',targetId:f.page.targetId,page:f.page,openedBy:'agent',url:f.chat.url}]}});
     pagesOf=async()=>[f.page];
     state=async()=>{f.calls.push('approval-state-read');return ${JSON.stringify(pending)};};
   `);

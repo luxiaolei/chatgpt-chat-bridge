@@ -10,7 +10,7 @@ import copy,json,runpy,sqlite3
 m=runpy.run_path('src/coordinator.py')
 db=sqlite3.connect(':memory:');db.row_factory=sqlite3.Row
 db.execute('CREATE TABLE documents(kind TEXT PRIMARY KEY,payload TEXT)')
-chat={'id':'s','project':'P','account':'a','page':'old','spaceName':'user-space'}
+chat={'id':'s','project':'P','account':'a','page':'old','spaceName':'user-space','pageTargetId':'stale-native-target'}
 task={'taskId':'T','sessionId':'s','project':'P','account':'a','status':'RUNNING','watchdogPausedForUserControl':True}
 binding={'spaceName':'chat-bridge-agent-a','profileId':'Profile 1'}
 reg={'chats':{'s':chat},'accounts':{'a':{'identity':'login-a'}},'projects':{'P':{'bindings':{'a':binding}}}}
@@ -25,10 +25,21 @@ for field in ['expectedTask','expectedBinding','expectedChat']:
  try:m['reattach_commit'](db,bad);raise AssertionError('accepted stale state')
  except ValueError:pass
  assert [tuple(x) for x in before]==[tuple(x) for x in db.execute('SELECT * FROM documents ORDER BY kind')]
+for target in ['', ' ', None, 12]:
+ bad=copy.deepcopy(payload);bad['attachment']['pageTargetId']=target
+ try:m['reattach_commit'](db,bad);raise AssertionError('accepted invalid target')
+ except ValueError:pass
+ assert [tuple(x) for x in before]==[tuple(x) for x in db.execute('SELECT * FROM documents ORDER BY kind')]
 result=m['reattach_commit'](db,payload)
+assert 'pageTargetId' not in result['chat']
 assert result['chat']['page']=='p7' and 'watchdogPausedForUserControl' not in result['task']
 after=json.loads(db.execute("SELECT payload FROM documents WHERE kind='runtime'").fetchone()[0])
 assert after['tasks']['other']['watchdogPausedForUserControl'] and after['projects']['P']['watchdogPausedForUserControl']
+for k,v in [('registry',reg),('runtime',rt)]:db.execute('UPDATE documents SET payload=? WHERE kind=?',(json.dumps(v),k))
+db.commit()
+payload['attachment']['pageTargetId']='native-p7'
+result=m['reattach_commit'](db,payload)
+assert result['chat']['pageTargetId']=='native-p7'
 print('atomic reattach checks passed')
 `;
   const r=spawnSync('python3',['-c',code],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);assert.match(r.stdout,/passed/);
@@ -70,7 +81,7 @@ db.executescript("""CREATE TABLE documents(kind TEXT PRIMARY KEY,payload TEXT);
 CREATE TABLE logical_sessions(logical_ref TEXT PRIMARY KEY,project TEXT,role TEXT,current_session_ref TEXT,workgroup_id TEXT,epoch INTEGER,state TEXT,pending_session_ref TEXT,handoff_hash TEXT,rotation_id TEXT,updated_at TEXT);
 CREATE TABLE operations(status TEXT,session_ref TEXT,caller_ref TEXT);
 CREATE TABLE control_state(scope TEXT,mode TEXT,epoch INTEGER);""")
-chat={'id':sid,'project':'P','account':'a','role':'conductor','status':'active','page':None,'spaceName':'chat-bridge-agent-a','attachmentEpoch':6}
+chat={'id':sid,'project':'P','account':'a','role':'conductor','status':'active','page':None,'spaceName':'chat-bridge-agent-a','attachmentEpoch':6,'pageTargetId':'stale-native-target'}
 binding={'spaceName':'chat-bridge-agent-a','spaceId':2,'profileId':'P1','projectUrl':'https://chatgpt.com/g/'+pid+'/project'}
 overflow={'spaceName':'chat-bridge-agent-a-overflow','spaceId':9,'profileId':'P1','identity':'login-a','account':'a','createdAt':'old'}
 reg={'chats':{sid:chat},'accounts':{'a':{'identity':'login-a'}},'projects':{'P':{'rootController':'conductor','bindings':{'a':binding}}},'capacityOverflow':{'login-a|P1':overflow}}
@@ -107,7 +118,7 @@ for field,value in [('spaceName','chat-bridge-agent-foreign'),('identity','forei
  try:m['controller_placement_commit'](db,bad);raise AssertionError('accepted foreign mapping')
  except ValueError:pass
  assert snapshot()==before
-for field,value in [('spaceName','chat-bridge-agent-foreign'),('spaceId',16),('profileId','P3'),('attachmentEpoch',8),('pageSpaceId',16)]:
+for field,value in [('pageTargetId',''),('pageTargetId',' '),('pageTargetId',None),('pageTargetId',12),('spaceName','chat-bridge-agent-foreign'),('spaceId',16),('profileId','P3'),('attachmentEpoch',8),('pageSpaceId',16)]:
  bad=copy.deepcopy(payload);bad['attachment'][field]=value
  try:m['controller_placement_commit'](db,bad);raise AssertionError('accepted foreign attachment')
  except ValueError:pass
@@ -130,13 +141,13 @@ try:m['controller_placement_context'](db,sid);raise AssertionError('accepted tas
 except ValueError:pass
 db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(reg),));db.commit()
 result=m['controller_placement_commit'](db,payload)
-assert result['chat']['attachmentEpoch']==7 and result['chat']['page']=='p7'
+assert result['chat']['attachmentEpoch']==7 and result['chat']['page']=='p7' and 'pageTargetId' not in result['chat']
 after=snapshot()
 assert after[0][1]==before[0][1] and after[1:]==before[1:]
-saved=json.loads(after[0][0][1]);expected=copy.deepcopy(reg);expected['chats'][sid].update(payload['attachment']);assert saved==expected
+saved=json.loads(after[0][0][1]);expected=copy.deepcopy(reg);expected['chats'][sid].update(payload['attachment']);expected['chats'][sid].pop('pageTargetId');assert saved==expected
 pool=copy.deepcopy(reg);pool['capacityOverflow']['login-a|P1']={**copy.deepcopy(overflow),'spaceName':overflow['spaceName']+'-2','spaceId':10,'previousSpaces':[copy.deepcopy(overflow)]}
 db.execute("UPDATE documents SET payload=? WHERE kind='registry'",(json.dumps(pool),));db.commit()
-context=m['controller_placement_context'](db,sid);payload={**copy.deepcopy(context),'overflowCandidate':copy.deepcopy(context['expectedOverflow']),'attachment':{**payload['attachment'],'spaceName':overflow['spaceName']+'-2','spaceId':10,'pageSpaceId':10},'observation':payload['observation']}
+context=m['controller_placement_context'](db,sid);payload={**copy.deepcopy(context),'overflowCandidate':copy.deepcopy(context['expectedOverflow']),'attachment':{**payload['attachment'],'spaceName':overflow['spaceName']+'-2','spaceId':10,'pageSpaceId':10,'pageTargetId':'native-pool-target'},'observation':payload['observation']}
 before=snapshot()
 for discard in [True,False]:
  bad=copy.deepcopy(payload)
@@ -146,7 +157,7 @@ for discard in [True,False]:
  except ValueError:pass
  assert snapshot()==before
 m['controller_placement_commit'](db,payload)
-saved=json.loads(db.execute("SELECT payload FROM documents WHERE kind='registry'").fetchone()[0]);assert saved['capacityOverflow']==pool['capacityOverflow']
+saved=json.loads(db.execute("SELECT payload FROM documents WHERE kind='registry'").fetchone()[0]);assert saved['capacityOverflow']==pool['capacityOverflow'] and saved['chats'][sid]['pageTargetId']=='native-pool-target'
 print('current controller placement checks passed')
 `;
   const r=spawnSync('python3',['-c',code],{encoding:'utf8'});assert.equal(r.status,0,r.stderr);assert.match(r.stdout,/passed/);
@@ -160,9 +171,9 @@ test('confirmed controller UI path never retries/sends/resumes and rejects draft
   const context={sessionId:chat.id,expectedChat:chat,expectedBinding:binding,expectedController:{epoch:3,state:'ACTIVE'},accountIdentity:'login-a',expectedOverflow:null};
   const reg={chats:{[chat.id]:chat},projects:{P:{bindings:{a:binding}}},accounts:{a:{identity:'login-a'}}};
   let snapshot,commits,reads,actions,stale,tabs,info;
-  const page={label:'p7',url:async()=>chat.url,waitForFunction:async()=>{},evaluate:async()=> 'login-a'};
+  const page={label:'p7',spaceId:9,targetId:'target-p7',url:async()=>chat.url,waitForFunction:async()=>{},evaluate:async()=> 'login-a'};
   const api=await new AsyncFunction('stored','coordinated','loadRuntime','activeTaskStatus','bindingFor','assertWebAvailable','overflowManagedTask','listTaskSpaces','taskSpace','taskAccounts','accountScope','sameConversationUrl','waitForConversationReady','projectKey','state','observeSession','emitTaskEvent',
-    'const handoffAllocatedPage=async()=>{};const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(a,z)+';return reattachTask;')(
+    source.slice(source.indexOf('function boundManagedPage('),source.indexOf('\nfunction samePhysicalSpace',source.indexOf('function boundManagedPage(')))+'const handoffAllocatedPage=async()=>{};const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(a,z)+';return reattachTask;')(
     ()=>reg,(cmd,payload)=>{
       if(cmd==='controller-placement-context'){reads++;const c=structuredClone(context);if(stale&&reads>1)c.expectedController.epoch++;return c;}
       assert.equal(cmd,'controller-placement-commit');commits++;return {chat:{...chat,...payload.attachment},controller:context.expectedController};
@@ -171,11 +182,14 @@ test('confirmed controller UI path never retries/sends/resumes and rejects draft
     new Map(),()=> 'login-a',(x,y)=>x===y,async()=>{actions++;throw Error('unexpected Retry-capable readiness');},
     ()=> 'g-p-'+ 'a'.repeat(32),async()=>snapshot,async()=>{actions++;throw Error('unexpected observe/resume');},async()=>{actions++;throw Error('unexpected event');});
   const reset=()=>{snapshot={composerPresent:true,composerText:'',composerCount:1,composerAttachmentsEmpty:true,composerRawText:'',errorTexts:[],approvalRequired:false,generating:false};commits=reads=actions=0;stale=false;
-    tabs=[{url:chat.url,label:'p7',openedBy:'agent'}];info={id:9,name:binding.spaceName,profileId:'P1',ownership:'agent',createdBy:'agent'};};
+    tabs=[{url:chat.url,label:'p7',targetId:page.targetId,page,openedBy:'agent'}];info={id:9,name:binding.spaceName,profileId:'P1',ownership:'agent',createdBy:'agent'};};
   reset();const placed=await api(reg,chat,null,{confirm:true,currentController:true});
-  assert.equal(placed.messageSent,false);assert.equal(placed.resumeWatch,false);assert.equal(commits,1);assert.equal(actions,0);
+  assert.equal(placed.messageSent,false);assert.equal(placed.resumeWatch,false);assert.equal(commits,1);assert.equal(actions,0);assert.equal(reg.chats[chat.id].pageTargetId,page.targetId);
   for(const patch of [{composerRawText:'draft'},{composerRawText:' '},{composerCount:2},{composerRawText:undefined},{generating:true},{approvalRequired:true},{composerPresent:false}]){
     reset();Object.assign(snapshot,patch);await assert.rejects(()=>api(reg,chat,null,{confirm:true,currentController:true}));assert.equal(commits,0);assert.equal(actions,0);
+  }
+  for(const patch of [()=>{tabs[0].page=null;},()=>{tabs[0].targetId='other-target';},()=>{tabs[0].page={...page,spaceId:8};}]){
+    reset();patch();await assert.rejects(()=>api(reg,chat,null,{confirm:true,currentController:true}),/PAGE_BOUND_TARGET_UNVERIFIED/);assert.equal(commits,0);assert.equal(actions,0);
   }
   reset();stale=true;await assert.rejects(()=>api(reg,chat,null,{confirm:true,currentController:true}),/OWNER_CHANGED/);assert.equal(commits,0);assert.equal(actions,0);
   reset();tabs[0].openedBy='user';await assert.rejects(()=>api(reg,chat,null,{confirm:true,currentController:true}),/USER_CONTROL/);assert.equal(actions,0);

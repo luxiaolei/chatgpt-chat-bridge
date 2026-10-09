@@ -85,3 +85,22 @@ for(const [title,ownership] of [['missing',undefined],['unknown','unknown']]) {
   assert.match(f.error?.message||'',/SPACE_OWNERSHIP_UNVERIFIED/);assert.equal(f.calls.length,1);assert.equal(f.accounts.size,0);
  });
 }
+
+test('Project observation repair refuses an existing home with no native bound Page without replacement allocation',async()=>{
+ const home='https://chatgpt.com/g/g-p-'+'a'.repeat(32)+'/project',spaceName='chat-bridge-agent-a';
+ const bound=source.slice(source.indexOf('function boundManagedPage('),source.indexOf('\nfunction samePhysicalSpace('));
+ const repairCode=source.slice(source.indexOf('async function repairProjectObservation('),source.indexOf('\nfunction bindingExecutionReadiness('));
+ for(const patch of [tab=>{tab.page=null;},tab=>{tab.page.targetId='other';},tab=>{tab.page.spaceId=8;},tab=>{tab.page.label='other';},tab=>{tab.page.evaluate=null;},tab=>{tab.openedBy='user';},tab=>{tab.inventoryError=true;}]) {
+  const calls={created:0,saved:0,closed:0,read:0};
+  const page={label:'p1',targetId:'native-p1',spaceId:7,url:async()=>{calls.read++;return home;},evaluate:async()=>{calls.read++;return {id:'login-a'};}};
+  const tab={label:'p1',targetId:page.targetId,page,url:home,openedBy:'agent'};patch(tab);
+  const reg={accounts:{a:{identity:'login-a'}},spaces:{}},binding={spaceName,spaceId:7,profileId:'Profile 1',projectUrl:home};
+  const before=structuredClone({reg,binding}),values={SPACE_CATALOG,listTaskSpaces:async()=>[{id:7,name:spaceName,profileId:'Profile 1',ownership:'agent',createdBy:'agent'}],
+   taskSpace:async()=>({spaceId:7,tabs:async()=>{if(tab.inventoryError)throw Error('inventory unavailable');return [tab];},page:()=>{throw Error('lazy Page handle forbidden');}}),
+   taskAccounts:new Map(),accountScope:()=> 'login-a',projectKey:value=>value?.match(/g-p-[a-f0-9]{32}/)?.[0],projectHomeId:value=>value===home?'g-p-'+'a'.repeat(32):null,
+   allocateManagedPage:async()=>{calls.created++;throw Error('replacement forbidden');},closeEmptyPage:async()=>{calls.closed++;},saveRegistry:async()=>{calls.saved++;},handoffAllocatedPage:async()=>{}};
+  const repair=await new AsyncFunction(...Object.keys(values),bound+repairCode+';return repairProjectObservation;')(...Object.values(values));
+  await assert.rejects(()=>repair(reg,'P','a',binding),/PAGE_BOUND_TARGET_UNVERIFIED|inventory unavailable/);
+  assert.deepEqual(calls,{created:0,saved:0,closed:0,read:0});assert.deepEqual({reg,binding},before);
+ }
+});

@@ -5,7 +5,7 @@ import path from "node:path";
 
 test("shared physical Space protection includes controls and active task pages", async()=>{
   const source=await readFile(path.resolve("src/main.js"),"utf8");
-  const begin=source.indexOf("function samePhysicalSpace");
+  const begin=source.indexOf("function boundManagedPage");
   const end=source.indexOf("async function reclaimIdlePageSlot",begin);
   assert.ok(begin>=0 && end>begin);
   const helper=source.slice(begin,end);

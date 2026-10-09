@@ -26,18 +26,24 @@ async function run(change={}) {
   if(change.wrongProfile)spaces[1].profileId='P2';
   if(change.userSpace)spaces[1].ownership='user';
   if(change.wrongID)spaces[1].id=99;
+  for(const [id,tabs] of inventory) for(const tab of tabs) tab.page={label:tab.label,targetId:tab.targetId,spaceId:id,evaluate:async()=>{},
+    url:async()=>change.pageRace&&tab===target?home:tab.url,goto:async()=>{calls.goto++;}};
+  if(change.missingBoundPage)delete target.page;
+  if(change.wrongBoundTarget)target.page.targetId='unrelated-target';
   let targetReads=0;
   const tasks=new Map([2,41,32].map(id=>[id,{spaceId:id,name:spaces.find(s=>s.id===id)?.name,
-    tabs:async()=>{if(id===targetSpace&&++targetReads===2){if(change.targetRace)inventory.get(id)[4]={...target,targetId:'changed'};if(change.targetInPlace)target.targetId='changed';}return inventory.get(id);},
-    pages:async()=>{
-      if(id===targetSpace&&change.lateTargetRace)inventory.get(id)[4]={...target,targetId:'recycled-target'};
-      if(id===targetSpace&&change.lateOwnershipRace)inventory.get(id)[4]={...target,openedBy:'user'};
-      return inventory.get(id).filter(t=>t.label).map(t=>({label:t.label,url:async()=>change.pageRace&&t===target?home:t.url,goto:async()=>{calls.goto++;}}));
-    },
+    tabs:async()=>{if(id===targetSpace&&++targetReads===2){
+      if(change.targetRace)inventory.get(id)[4]={...target,targetId:'changed'};
+      if(change.targetInPlace)target.targetId='changed';
+      if(change.lateTargetRace)inventory.get(id)[4]={...target,targetId:'recycled-target'};
+      if(change.lateOwnershipRace)inventory.get(id)[4]={...target,openedBy:'user'};
+    }return inventory.get(id);},
+    page:()=>{throw Error('lazy Page handle must not be used');},
+    pages:async()=>inventory.get(id).map(tab=>tab.page),
     newPage:async()=>{calls.created++;throw Error('unexpected creation');}}]));
   const taskAccounts=new Map();
   const api=await new AsyncFunction('crypto','slug','listTaskSpaces','taskSpace','taskAccounts','accountScope','saveRegistry','openBoundTask','pagesOf','sameConversationUrl','projectKey','newManagedPage','waitForConversationReady','openConversationFromProject',
-    section('function capacityScope','\nfunction capacityBackoffSec')+section('function managedSpacePlan','\nasync function accountManagedTask')+section('async function overflowManagedTask','\nasync function newManagedPage')+'const handoffAllocatedPage=async()=>{};const assertPhysicalPageAvailable=()=>{};'+section('async function ensurePage','\nfunction hashText')+';return ensurePage;')(
+    source.slice(source.indexOf('function boundManagedPage('),source.indexOf('\nfunction samePhysicalSpace',source.indexOf('function boundManagedPage(')))+section('function capacityScope','\nfunction capacityBackoffSec')+section('function managedSpacePlan','\nasync function accountManagedTask')+section('async function overflowManagedTask','\nasync function newManagedPage')+'const handoffAllocatedPage=async()=>{};const assertPhysicalPageAvailable=()=>{};'+section('async function ensurePage','\nfunction hashText')+';return ensurePage;')(
     crypto,x=>x,async()=>spaces,async id=>{assert.equal(typeof id,'number');calls.spaces.push(id);return tasks.get(id);},taskAccounts,()=> 'scope-a',async()=>{calls.saved++;},
     async(_r,_p,_a,options={})=>{const b=options.spaceOverride||binding;calls.opened.push({id:b.spaceId,requireExisting:options.requireExistingSpace});const s=spaces.find(s=>s.id===b.spaceId&&s.name===b.spaceName);if(!s||s.profileId!==b.profileId||s.ownership!=='agent')throw Error('space changed');return {task:tasks.get(b.spaceId),binding:b};},
     async task=>task.pages(),globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,value=>value?.match(/g-p-[a-f0-9]{32}/)?.[0],
@@ -55,14 +61,14 @@ async function run(change={}) {
 
 test('normal observation and watch reuse the unique original CID in the full verified existing pool',async()=>{
   for(const change of [{},{targetSpace:32},{fromOverflow:true,targetSpace:2}]) {
-    const f=await run(change);assert.ifError(f.error);assert.equal(f.result.task.spaceId,change.targetSpace||41);assert.equal(f.chat.page,'p4');assert.equal(f.chat.id,cid);
+    const f=await run(change);assert.ifError(f.error);assert.equal(f.result.task.spaceId,change.targetSpace||41);assert.equal(f.chat.page,'p4');assert.equal(f.chat.id,cid);assert.equal(f.chat.pageTargetId,'original-target');
     assert.equal(f.calls.created,0);assert.equal(f.calls.saved,1);assert.equal(f.calls.opened.at(-1).requireExisting,true);
   }
 });
 
 test('pool rediscovery rejects duplicate, unowned, foreign or changed original targets without allocating',async()=>{
-  for(const change of [{duplicate:true},{unowned:true},{unlabelled:true},{missingTargetId:true},{wrongProfile:true},{userSpace:true},{wrongID:true},{targetRace:true},{targetInPlace:true},{pageRace:true},{lateTargetRace:true},{lateOwnershipRace:true},{waitTargetRace:true},{waitOwnershipRace:true},{waitSpaceOwnership:true},{waitSpaceProfile:true}]) {
-    const f=await run(change);assert.match(f.error?.message||'',/CONVERSATION_POOL_TAB_|OVERFLOW_|SPACE_IN_USER_CONTROL|space changed/,JSON.stringify(change));assert.equal(f.calls.created,0);assert.equal(f.calls.saved,0);assert.deepEqual(f.chat,f.before.chats[cid]);
+  for(const change of [{duplicate:true},{unowned:true},{unlabelled:true},{missingTargetId:true},{wrongProfile:true},{userSpace:true},{wrongID:true},{targetRace:true},{targetInPlace:true},{pageRace:true},{lateTargetRace:true},{lateOwnershipRace:true},{waitTargetRace:true},{waitOwnershipRace:true},{waitSpaceOwnership:true},{waitSpaceProfile:true},{missingBoundPage:true},{wrongBoundTarget:true}]) {
+    const f=await run(change);assert.match(f.error?.message||'',/CONVERSATION_POOL_TAB_|PAGE_BOUND_TARGET_UNVERIFIED|OVERFLOW_|SPACE_IN_USER_CONTROL|space changed/,JSON.stringify(change));assert.equal(f.calls.created,0);assert.equal(f.calls.saved,0);assert.deepEqual(f.chat,f.before.chats[cid]);
   }
 });
 

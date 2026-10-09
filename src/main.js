@@ -444,10 +444,10 @@ async function repairProjectObservation(reg, project, account, binding) {
   taskAccounts.set(Number(task.spaceId),account);
   const targetId=projectKey(binding.projectId||binding.projectUrl);
   if(!targetId) throw new Error(`PROJECT_OBSERVATION_REPAIR_FAILED: ${project} / ${account}`);
-  const tabs=typeof task.tabs==="function"?await task.tabs().catch(()=>[]):[];
+  const tabs=await task.tabs();
   let page=null, session=null;
   for(const tab of tabs.filter(item=>item.label&&projectHomeId(item.url)===targetId)){
-    const candidate=task.page(tab.label);
+    const candidate=boundManagedPage(task,tab);
     const url=await Promise.race([candidate.url(),new Promise(resolve=>setTimeout(()=>resolve(""),3000))]).catch(()=>"");
     const observed=projectHomeId(url)===targetId?await Promise.race([candidate.evaluate(async()=>{
       const response=await fetch("/api/auth/session",{credentials:"same-origin",signal:AbortSignal.timeout(5000)});
@@ -649,9 +649,9 @@ async function releaseManagementPage(reg,project,account,spaceName,label,targetI
   if(spaces.length!==1 || spaces[0].ownership!=="agent" || spaces[0].createdBy!=="agent") throw new Error("PAGE_RELEASE_SPACE_UNVERIFIED");
   const info=spaces[0],task=await taskSpace(info.id),tab=(await task.tabs()).find(tab=>tab.label===label);
   if(tab?.targetId!==targetId || tab.openedBy!=="agent") throw new Error("PAGE_RELEASE_TARGET_CHANGED");
-  const page=task.page(label),binding={spaceName,profileId:info.profileId};
+  const page=boundManagedPage(task,tab),binding={spaceName,profileId:info.profileId};
   const payload=physicalReleasePayload(reg,task,page,binding,project,account,"MANAGEMENT_TERMINATION");
-  payload.confirm=true;payload.resourceTarget.url=tab.url;
+  payload.confirm=true;payload.resourceTarget.url=tab.url;payload.resourceTarget.targetId=targetId;
   return {ok:true,...await releasePhysicalPage(reg,task,page,payload)};
 }
 
@@ -689,6 +689,14 @@ async function cleanupFailedAllocation(reg,task,page,outcome) {
     outcome.pageCleanup={...allocation,state:error.allocationState==="UNKNOWN"?"UNKNOWN":"RETAINED",reason:String(error.message||error)};
     outcome.allocationState=outcome.pageCleanup.state;
   }
+}
+
+function boundManagedPage(task,tab) {
+  const page=tab?.page;
+  if(!tab?.label || typeof tab.targetId!=="string" || !tab.targetId.trim() || tab.openedBy!=="agent" ||
+     !page || page.label!==tab.label || page.targetId!==tab.targetId || Number(page.spaceId)!==Number(task.spaceId) ||
+     typeof page.url!=="function" || typeof page.evaluate!=="function") throw new Error("PAGE_BOUND_TARGET_UNVERIFIED");
+  return page;
 }
 
 function samePhysicalSpace(record, binding, task) {
@@ -763,9 +771,9 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
       !t.watchdogPendingNotification && !t.externalResponsePending && !t.watchdogPausedForUserControl);
   }).filter(chat=>sameConversationUrl(tabs.find(t=>t.label===chat.page)?.url,chat.url,targetProject))) {
     let page=null;
-    try { page=task.page(candidate.page); }
-    catch { continue; } // A missing handle is not proof that the tab was closed.
     const tab=tabs.find(item=>item.label===candidate.page);
+    try { page=boundManagedPage(task,tab); }
+    catch { continue; } // A missing handle is not proof that the tab was closed.
     if(!tab || tab.openedBy!=="agent") continue;
     const snapshot=await state(page).catch(()=>null);
     if(!snapshot || snapshot.approvalRequired!==false || snapshot.generating!==false) continue;
@@ -873,14 +881,16 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseC
     hasLiveTasks:false,
     protectedPageLabels:[...protectedPages],
   });
-  for(const page of candidates.filter(page=>{
+  for(const candidate of candidates.filter(page=>{
     const tab=tabs.find(t=>t.label===page.label);
     if(reuseControlBinding) return page.label===reuseControlBinding.controlPage && !!projectHomeId(binding.projectUrl) &&
       projectHomeId(tab?.url)===projectHomeId(binding.projectUrl);
     return /^(about:blank|chrome:\/\/newtab\/?$)$/i.test(String(tab?.url||"")) ||
       !!projectHomeId(binding.projectUrl) && projectHomeId(tab?.url)===projectHomeId(binding.projectUrl);
   })) {
-    const tab=tabs.find(t=>t.label===page.label), blank=/^(about:blank|chrome:\/\/newtab\/?$)$/i.test(tab.url);
+    const tab=tabs.find(t=>t.label===candidate.label), blank=/^(about:blank|chrome:\/\/newtab\/?$)$/i.test(tab.url);
+    let page;
+    try { page=boundManagedPage(task,tab); } catch { continue; }
     const alias=account||binding.account;
     const project=Object.entries(reg.projects||{}).find(([,p])=>p.bindings?.[alias]?.projectUrl===binding.projectUrl)?.[0];
     const release=physicalReleasePayload(reg,task,page,binding,project,alias,"ORPHAN_IDLE");
@@ -1242,7 +1252,7 @@ async function reattachTask(reg, chat, taskId, options={}) {
   if(placing && matching.some(x=>x.openedBy!=="agent")) throw new Error("CONTROLLER_PLACEMENT_TARGET_IN_USER_CONTROL");
   const candidates=placing?matching:tabs.filter(x=>String(x.url||"").includes("/c/"+chat.id) && x.openedBy==="agent");
   if(candidates.length>1) throw new Error("REATTACH_AMBIGUOUS_TARGET");
-  let page=candidates.length?task.page(candidates[0].label):null;
+  let page=candidates.length?boundManagedPage(task,candidates[0]):null;
   if(!page) {
     page=await allocateManagedPage(task,binding,chat.project,chat.account); // Recovery preserves every existing tab.
     await page.goto(chat.url,{waitUntil:"domcontentloaded",timeout:20000});
@@ -1267,11 +1277,11 @@ async function reattachTask(reg, chat, taskId, options={}) {
     throw new Error("CONTROLLER_PLACEMENT_TARGET_BUSY_OR_APPROVAL");
   const old={spaceName:expectedChat.spaceName,spaceId:expectedChat.spaceId,page:expectedChat.page};
   const next={...chat,spaceName:binding.spaceName,spaceId:task.spaceId,pageSpaceId:task.spaceId,
-    page:page.label,profileId:binding.profileId,attachmentEpoch:Number(expectedChat.attachmentEpoch||0)+1};
+    page:page.label,pageTargetId:page.targetId,profileId:binding.profileId,attachmentEpoch:Number(expectedChat.attachmentEpoch||0)+1};
   if(placing) {
     const committed=coordinated("controller-placement-commit",{...context,overflowCandidate,
       attachment:{spaceName:next.spaceName,spaceId:next.spaceId,pageSpaceId:next.pageSpaceId,page:next.page,
-        profileId:next.profileId,attachmentEpoch:next.attachmentEpoch},
+        profileId:next.profileId,pageTargetId:next.pageTargetId,attachmentEpoch:next.attachmentEpoch},
       observation:{url,accountIdentity:observedIdentity,composerPresent:snapshot.composerPresent,
         composerCount:snapshot.composerCount,composerRawText:snapshot.composerRawText,
         generating:snapshot.generating,approvalRequired:snapshot.approvalRequired}});
@@ -1282,7 +1292,7 @@ async function reattachTask(reg, chat, taskId, options={}) {
   }
   const committed=coordinated("reattach-commit",{taskId,sessionId:chat.id,expectedChat,expectedTask:live,
     attachment:{spaceName:next.spaceName,spaceId:next.spaceId,pageSpaceId:next.pageSpaceId,page:next.page,
-      profileId:next.profileId,attachmentEpoch:next.attachmentEpoch},
+      profileId:next.profileId,pageTargetId:next.pageTargetId,attachmentEpoch:next.attachmentEpoch},
     accountIdentity:identity,expectedBinding,resumeWatch:options.resumeWatch===true});
   reg.chats[chat.id]=committed.chat;
   await handoffAllocatedPage(page);
@@ -1326,7 +1336,7 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
   const matching=targets.filter(x=>x.openedBy==="agent");
   if(pendingSession && (matching.length!==1 || tabs.filter(x=>sameConversationUrl(x.url,scope.url)).length!==1))
     throw new Error("OPERATION_OBSERVATION_PENDING_TAB_UNVERIFIED");
-  let page=matching.length?task.page(matching[0].label):null;
+  let page=matching.length?boundManagedPage(task,matching[0]):null;
   let overflowTarget=null, observationPool=null, allocated=false;
   if(!page) {
     // Only open the already identified conversation; never reclaim existing pages.
@@ -1359,7 +1369,7 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
       if(candidates.length) {
         if(freshTargets.length!==1 || freshTargets[0].label!==candidates[0].tab.label || freshTargets[0].openedBy!=="agent")
           throw new Error("OPERATION_OBSERVATION_TAB_UNVERIFIED");
-        page=task.page(freshTargets[0].label);
+        page=boundManagedPage(task,freshTargets[0]);
       } else {
         if(freshTargets.length) throw new Error("OPERATION_OBSERVATION_TAB_UNVERIFIED");
         if(freshTabs.length>=budget) throw error;
@@ -1449,15 +1459,15 @@ async function ensurePage(reg, chat, options={}) {
   const spaceOverride=chat.spaceName && configured?.spaceName!==chat.spaceName
     ? {spaceName:chat.spaceName,spaceId:chat.spaceId,profileId:chat.profileId||null} : null;
   let {binding,task}=await openBoundTask(reg,chat.project,chat.account,{...options,spaceOverride});
-  const pages=await pagesOf(task);
-  let page=pages.find(p=>p.label===chat.page) || null;
+  const tabs=await task.tabs();
+  const saved=tabs.find(tab=>tab.label===chat.page && tab.openedBy==="agent" && sameConversationUrl(tab.url,chat.url));
+  let page=saved?boundManagedPage(task,saved):null;
   let verifyPoolTarget=null;
   // Page labels are recyclable: never navigate somebody else's existing tab.
   if(page && !sameConversationUrl(await page.url().catch(()=>""),chat.url)) page=null;
-  if(!page && typeof task.tabs==="function") {
-    const tabs=await task.tabs().catch(()=>[]);
+  if(!page) {
     const existing=tabs.find(tab=>tab.openedBy==="agent" && sameConversationUrl(tab.url,chat.url));
-    const candidate=existing?pages.find(p=>p.label===existing.label):null;
+    const candidate=existing?boundManagedPage(task,existing):null;
     if(candidate && sameConversationUrl(await candidate.url().catch(()=>""),chat.url)) page=candidate;
   }
   if(!page && reg.capacityOverflow?.[capacityScope(reg,chat.account,configured||binding)]) {
@@ -1479,8 +1489,10 @@ async function ensurePage(reg, chat, options={}) {
     if(matches.length) {
       const target=matches[0];
       const opened=await openBoundTask(reg,chat.project,chat.account,{...options,requireExistingSpace:true,spaceOverride:target.entry.binding});
-      page=(await pagesOf(opened.task)).find(p=>p.label===target.tab.label)||null;
-      if(!page || !sameConversationUrl(await page.url(),chat.url,projectKey(opened.binding.projectUrl))) throw new Error("CONVERSATION_POOL_TAB_CHANGED");
+      const current=(await opened.task.tabs()).find(tab=>tab.label===target.tab.label);
+      if(current?.targetId!==target.tab.targetId) throw new Error("CONVERSATION_POOL_TAB_CHANGED");
+      page=boundManagedPage(opened.task,current);
+      if(!sameConversationUrl(await page.url(),chat.url,projectKey(opened.binding.projectUrl))) throw new Error("CONVERSATION_POOL_TAB_CHANGED");
       verifyPoolTarget=async()=>{
         await openBoundTask(reg,chat.project,chat.account,{...options,requireExistingSpace:true,spaceOverride:target.entry.binding});
         const fresh=await targets();

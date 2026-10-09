@@ -17,7 +17,7 @@ const out=mkdtempSync(path.join(process.env.TMPDIR||'/tmp','bridge-controller-pl
 mkdirSync(out,{recursive:true,mode:0o700});chmodSync(out,0o700);
 const source=readFileSync(path.join(repo,'src/main.js'),'utf8');
 const section=(start,end)=>{const a=source.indexOf(start),z=source.indexOf(end,a);assert(a>=0&&z>a);return source.slice(a,z);};
-const code='const handoffAllocatedPage=async()=>{};const allocateManagedPage=(t)=>t.newPage(); const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+section('function managedSpacePlan','\nasync function accountManagedTask')+
+const code=source.slice(source.indexOf('function boundManagedPage('),source.indexOf('\nfunction samePhysicalSpace',source.indexOf('function boundManagedPage(')))+'const handoffAllocatedPage=async()=>{};const allocateManagedPage=(t)=>t.newPage(); const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+section('function managedSpacePlan','\nasync function accountManagedTask')+
  section('async function overflowManagedTask','\nasync function newManagedPage')+
  section('async function reattachTask','\nasync function observeOperation');
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
@@ -68,7 +68,7 @@ async function runFlow(name,opts={}) {
  if(opts.foreignProfile&&opts.mapped)spaces[2].profileId='Profile 3';
  if(opts.userOwnership&&opts.mapped)spaces[2].ownership='user';
  const calls=[];const page=domPage(opts.actualComposer??'',opts.foreignLogin?'foreign-login':'login-a',opts);page.goto=async()=>calls.push('goto');
- const taskSpace=async(target,options)=>{calls.push(['taskSpace',target,options]);let s=spaces.find(s=>s.id===target||s.name===target);if(!s){s={id:17,name:target,profileId:options.profileId,ownership:'agent',createdBy:'agent'};spaces.push(s);}return {spaceId:s.id,tabs:async()=>opts.userTab?[{url,label:'p7',openedBy:'user'}]:[],page:()=>page,newPage:async()=>{calls.push('newPage');return page;}};};
+ const taskSpace=async(target,options)=>{calls.push(['taskSpace',target,options]);let s=spaces.find(s=>s.id===target||s.name===target);if(!s){s={id:17,name:target,profileId:options.profileId,ownership:'agent',createdBy:'agent'};spaces.push(s);}return {spaceId:s.id,tabs:async()=>opts.userTab?[{url,label:'p7',openedBy:'user'}]:[],page:()=>page,newPage:async()=>{calls.push('newPage');page.spaceId=s.id;page.targetId='native-'+s.id+'-p7';return page;}};};
  let readCount=0;const coordinated=(cmd,payload)=>{calls.push(cmd);if(cmd==='controller-placement-context'&&++readCount===2&&opts.ownerRace){f.db.exec('UPDATE logical_sessions SET epoch=4');}return f.coordinated(cmd,payload);};
  const defaultState={composerPresent:true,composerText:'',composerCount:1,composerAttachmentsEmpty:true,composerRawText:'',generating:false,approvalRequired:false,errorTexts:[]};
  const api=await new AsyncFunction('crypto','managedSpacePlan_unused','stored','coordinated','loadRuntime','activeTaskStatus','bindingFor','assertWebAvailable','listTaskSpaces','taskSpace','taskAccounts','accountScope','stateBaselines','saveRegistry','sameConversationUrl','waitForConversationReady','projectKey','state','observeSession','emitTaskEvent','slug',code+';return reattachTask;')(
@@ -80,7 +80,7 @@ async function runFlow(name,opts={}) {
  for(const table of ['operations','control_state','image_jobs','events'])assert.deepEqual(preserved[table],original[table],table);
  assert.deepEqual(f.raw('runtime'),f.rt);assert.deepEqual(after.chats.qa,f.reg.chats.qa);assert.deepEqual(after.projects,f.reg.projects);
  const expected=structuredClone(f.reg);expected.capacityOverflow[key]=after.capacityOverflow[key];
- if(attached)Object.assign(expected.chats[sid],{spaceName:overflowName,spaceId:17,pageSpaceId:17,profileId:binding.profileId,page:'p7',attachmentEpoch:7});
+ if(attached)Object.assign(expected.chats[sid],{spaceName:overflowName,spaceId:17,pageSpaceId:17,profileId:binding.profileId,page:'p7',pageTargetId:'native-17-p7',attachmentEpoch:7});
  assert.deepEqual(after,expected,'registry changed outside the mapping/attachment scopes');
  if(!opts.ownerRace)assert.deepEqual(preserved.logical_sessions,original.logical_sessions);
  if(opts.expectError){assert(error?.includes(opts.expectError),name+': '+error);assert(!attached);assert(!changedMapping,'failure persisted overflow mapping');}

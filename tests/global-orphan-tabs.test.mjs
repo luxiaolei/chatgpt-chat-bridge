@@ -19,7 +19,7 @@ async function fixture(change=()=>{}) {
     state=async page=>{(f.observedPages||=[]).push(page.label);return {...f.snapshot,...f.snapshots?.[page.label],url:await page.url()};};
     assertInputSafe=async(page,identity,url,options)=>{f.guardCalls=(f.guardCalls||0)+1;if(f.guardError)throw f.guardError;f.beforeCloseGuard?.(page);return identity;};
     coordinated=command=>{if(command!=='page-reclaim-context')throw Error(command);f.queries++;return f.context;};
-    const pages=f.tabs.map(tab=>({label:tab.label,url:async()=>tab.url,close:async()=>{f.closed.push(tab.label);if(f.closeError)throw f.closeError;if(!f.closeUnconfirmed)f.tabs=f.tabs.filter(t=>t.label!==tab.label);}}));
+    const pages=f.tabs.map(tab=>tab.page={label:tab.label,targetId:tab.targetId||='native-'+tab.label,spaceId:f.expectedSpaceId||7,evaluate:async()=>{},url:async()=>tab.url,close:async()=>{f.closed.push(tab.label);if(f.closeError)throw f.closeError;if(!f.closeUnconfirmed)f.tabs=f.tabs.filter(t=>t.label!==tab.label);}});
     openBoundTask=async(_r,_p,_a,options)=>{
       f.opens=(f.opens||0)+1;if(f.pausedProject===_p)throw Error('paused');if(!options.requireExistingSpace||options.spaceOverride.spaceId!==(f.expectedSpaceId||7))throw Error('exact existing Space required');
       return {binding:{...f.binding,...options.spaceOverride},task:{spaceId:f.expectedSpaceId||7,pages:async()=>pages,tabs:async()=>f.tabs}};
