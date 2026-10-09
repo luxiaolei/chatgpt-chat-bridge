@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import path from "node:path";
+import {isDeepStrictEqual} from "node:util";
 import "../src/task-policy.js";
 import "../src/page-pool.js";
 import "../src/session-policy.js";
@@ -31,7 +32,7 @@ async function fixture(orphan=false,change=()=>{}) {
     newPage:async()=>{f.allocations=(f.allocations||0)+1;if(f.entry==="allocate"&&f.allocations>1)return {label:"p10"};throw Error("page budget reached");}};
   const api=await new AsyncFunction("loadRuntime","state","saveRegistry","imageSessionOccupancy","pageDetachCandidates","orphanManagedPageCandidates","activeTaskStatus","composerIsEmpty","sameConversationUrl","projectHomeId","coordinated",
     "activeAccount","openBoundTask","projectRecord","bindingObserved","accountManagedTask","openProjectPage","bindingExecutionReadiness","pageBudgetError","clearCapacityWait","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError",
-    "listTaskSpaces","process","assertInputSafe",code+";return {reclaimIdlePageSlot,reclaimOrphanManagedPage,newManagedPage,pruneProjectSpace,ensureProjectLocation,detachTerminalTaskPages};")(
+    "listTaskSpaces","process","pagesOf","assertInputSafe","isDeepStrictEqual",code+";return {reclaimIdlePageSlot,reclaimOrphanManagedPage,newManagedPage,pruneProjectSpace,ensureProjectLocation,detachTerminalTaskPages};")(
     async()=>rt,async()=>{f.states++;const sample=f.states>1&&f.closingSnapshot?f.closingSnapshot:f.snapshot;if(f.afterState)await f.afterState();return sample?{...sample,url:f.pageUrl??sample.url}:sample;},async()=>{},()=>({occupied:!!f.image}),
     globalThis.__CHAT_BRIDGE_PAGE_POOL__.pageDetachCandidates,globalThis.__CHAT_BRIDGE_PAGE_POOL__.orphanManagedPageCandidates,
     globalThis.__CHAT_BRIDGE_TASK_POLICY__.activeTaskStatus,globalThis.__CHAT_BRIDGE_TASK_POLICY__.composerIsEmpty,
@@ -46,8 +47,8 @@ async function fixture(orphan=false,change=()=>{}) {
     async()=>({task,spaceName:"managed",profileId:"P1"}),async()=>home,()=>({ready:true}),
     error=>error.message==="page budget reached",async()=>{},async()=>({firstAt:Date.now()}),120,
     async()=>{throw Error("unexpected overflow");},()=>Object.assign(Error("capacity waiting"),{code:"CAPACITY_WAIT"}),
-    async()=>f.available||[{id:9,name:f.terminalOverflow?"overflow":"managed",profileId:"P1",ownership:"agent",createdBy:"agent"}],{env:{}},
-    async(_page,_identity,_url,options)=>{f.inputChecks=(f.inputChecks||0)+1;if(f.inputError)throw Error(f.inputError);if(options.discardDraft===true){f.discards=(f.discards||0)+1;if(f.discardError)throw Error("discard unconfirmed");f.snapshot.composerRawText="";}return _identity;}
+    async()=>f.available||[{id:9,name:f.terminalOverflow?"overflow":"managed",profileId:"P1",ownership:"agent",createdBy:"agent"}],{env:{}},t=>t.pages(),
+    async(_page,_identity,_url,options)=>{f.inputChecks=(f.inputChecks||0)+1;if(f.inputError)throw Error(f.inputError);if(options.discardDraft===true){f.discards=(f.discards||0)+1;if(f.discardError)throw Error("discard unconfirmed");f.snapshot.composerRawText="";}return _identity;},isDeepStrictEqual
   );
   f.result=f.entry==="allocate"?await api.newManagedPage(reg,"P","a",task,binding):f.entry==="terminal"?await api.detachTerminalTaskPages(reg,"P","a"):f.entry==="prune"?await api.pruneProjectSpace(reg,"P","a"):f.entry==="ensure"?await api.ensureProjectLocation(reg,"P","a",{create:true,confirm:true}):
     orphan?await api.reclaimOrphanManagedPage(reg,task,binding,"a"):await api.reclaimIdlePageSlot(reg,"P","a",task,binding);
@@ -199,12 +200,11 @@ test("public prune cannot bypass shared UNKNOWN or actual Project protections",a
   assert.equal(observed.closed,1);
 });
 
-test("project ensure --create never allocates again after a reclaim or capacity error",async()=>{
-  for(const uncertain of [true,false]) {
-    let observed;
-    await assert.rejects(()=>fixture(false,f=>{f.entry="ensure";if(uncertain)f.closeError=Error("close acknowledgement unknown");else f.snapshot.generating=true;observed=f;}),uncertain?/acknowledgement unknown/:/capacity waiting/);
-    assert.equal(observed.allocations,1);assert.equal(observed.closed,uncertain?1:0);
-  }
+test("bound project ensure --create refuses a missing home without reclaim or allocation",async()=>{
+  const observed=await fixture(false,f=>{f.entry="ensure";f.snapshot.generating=true;});
+  assert.equal(observed.result.status,"PROJECT_NOT_ACCESSIBLE");
+  assert.equal(observed.result.error,"PROJECT_HOME_UNAVAILABLE");
+  assert.equal(observed.allocations||0,0);assert.equal(observed.closed,0);
 });
 
 test("terminal detach uses its exact physical Space and guarded conversation without bypassing grace",async()=>{

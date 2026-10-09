@@ -69,7 +69,15 @@ def merge_runtime_volatile(kind, path, current, new):
     return new if new_time >= current_time else current
 
 
-def apply(document, base, next_value, kind=None):
+def apply(document, base, next_value, kind=None, read_paths=()):
+    if not isinstance(read_paths, (list, tuple)):
+        raise ValueError("readPaths must be paths")
+    for path in read_paths:
+        if (kind != "registry" or not isinstance(path, list) or not path
+                or any(not isinstance(key, str) or not key for key in path)):
+            raise ValueError("invalid registry read path")
+        if value_at(document, path) != value_at(base, path):
+            raise ValueError("STATE_CONFLICT: " + "/".join(path))
     for path, old, new in differences(base, next_value):
         current = value_at(document, path)
         if current != old and current != new:
@@ -403,7 +411,8 @@ def main():
             begin_immediate(db, timeout=max(0, deadline - time.monotonic()))
             current = json.loads(db.execute("SELECT payload FROM documents WHERE kind=?", (kind,)).fetchone()[0])
             before = json.loads(json.dumps(current))
-            current = apply(current, payload["base"], payload["next"], kind=kind)
+            current = apply(current, payload["base"], payload["next"], kind=kind,
+                            read_paths=payload.get("readPaths", ()))
             if kind == "registry":
                 try:
                     db.phase = "REGISTRATION_FENCE"
