@@ -3323,6 +3323,7 @@ async function ensureProjectLocation(reg, projectName, account, options={}) {
       if(!page) throw new Error("PROJECT_HOME_UNAVAILABLE");
       const tab=(await task.tabs()).find(item=>item.label===page.label);
       if(tab?.openedBy!=="agent") throw new Error("PROJECT_HOME_IN_USER_CONTROL");
+      if(typeof tab.targetId!=="string" || !tab.targetId.trim()) throw new Error("PROJECT_HOME_TARGET_UNVERIFIED");
       const homeTab=structuredClone(tab);
       // Read-only home reuse must not depend on permission to close an uncertain page.
       await assertInputSafe(page,accountRecord.identity,current.projectUrl,{reclaim:true});

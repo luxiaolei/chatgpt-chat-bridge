@@ -216,7 +216,7 @@ test("sync ignores sidebar chats from other Projects and preserves existing atta
 test("bound ensure reads its exact home without reclaim or allocation, including active and UNKNOWN",async()=>{
   const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
   const home="https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project";
-  for(const unsafe of [null,"active","UNKNOWN","draft","approval","generating","user","wrong-Project","missing-page","wrong-Space","login","readiness","late-url","late-draft","unknown-generation","attachment","late-user","late-page","late-profile","late-target","late-identity","late-binding","late-requirements"]) {
+  for(const unsafe of [null,"active","UNKNOWN","draft","approval","generating","user","wrong-Project","missing-page","wrong-Space","login","readiness","late-url","late-draft","unknown-generation","attachment","late-user","late-page","late-profile","late-target","late-identity","late-binding","late-requirements","missing-target","empty-target","whitespace-target","invalid-target"]) {
     const binding={account:"a",spaceName:"managed",spaceId:7,profileId:"P1",projectUrl:home,controlPage:"p1"};
     const preserved={draft:unsafe==="draft"?"keep human draft":"",attachment:unsafe==="attachment"};
     const before=structuredClone(preserved),calls={allocations:0,reclaim:0,navigations:0,closes:0,saved:0,input:0,waits:0};
@@ -224,6 +224,10 @@ test("bound ensure reads its exact home without reclaim or allocation, including
     let url=unsafe==="wrong-Project"?home.replace("a".repeat(32),"b".repeat(32)):home;
     const page={label:"p1",url:async()=>url,close:async()=>{calls.closes++;},goto:async()=>{calls.navigations++;},reload:async()=>{calls.navigations++;},fill:async()=>{throw Error("draft mutation forbidden");}};
     let ownership=unsafe==="user"?"user":"agent",missing=false,profile="P1",targetId="target-one";
+    if(unsafe==="missing-target")targetId=null;
+    if(unsafe==="empty-target")targetId="";
+    if(unsafe==="whitespace-target")targetId=" ";
+    if(unsafe==="invalid-target")targetId=7;
     const task={spaceId:7,tabs:async()=>[{label:"p1",url,targetId,openedBy:ownership,active:unsafe==="active"}]};
     const ensure=await new AsyncFunction("projectRecord","bindingObserved","openBoundTask","pagesOf","assertInputSafe","waitForProjectReady","state","projectHomeId","projectKey","projectIdFromUrl","saveRegistry","bindingExecutionReadiness","newManagedPage","reclaimOrphanManagedPage","accountManagedTask","openProjectPage","isDeepStrictEqual",extract("ensureProjectLocation","syncProject")+";return ensureProjectLocation;")(
       (r,p)=>r.projects[p],()=>true,async(_r,_p,_a,options)=>{
