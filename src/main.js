@@ -349,11 +349,11 @@ async function loadRegistry() {
   stateBaselines.set(registry,structuredClone(raw));
   return registry;
 }
-async function saveRegistry(reg, registration=null) {
+async function saveRegistry(reg, registration=null, readPaths=null) {
   const next=normalizeRegistry(reg),base=stateBaselines.get(reg);
   if(!base) throw new Error("registry state must be loaded before save");
-  if(!registration && isDeepStrictEqual(base,next)) return;
-  stored("put","registry",{base,next,...(registration?{registration}:{})});
+  if(!registration && !readPaths && isDeepStrictEqual(base,next)) return;
+  stored("put","registry",{base,next,...(registration?{registration}:{}),...(readPaths?{readPaths}:{})});
   stateBaselines.set(reg,structuredClone(next));
 }
 function opt(name, def=null) {
@@ -3316,12 +3316,14 @@ async function ensureProjectLocation(reg, projectName, account, options={}) {
   const current=pr.bindings?.[account]||null;
   if(current?.projectUrl && bindingObserved(reg,account,current)) {
     try {
+      const admission=structuredClone([accountRecord,pr]);
       const {task,binding}=await openBoundTask(reg,projectName,account,
         {spaceOverride:current,requireExistingSpace:true,pauseOnUserControl:true});
       const page=(await pagesOf(task)).find(item=>item.label===current.controlPage);
       if(!page) throw new Error("PROJECT_HOME_UNAVAILABLE");
       const tab=(await task.tabs()).find(item=>item.label===page.label);
       if(tab?.openedBy!=="agent") throw new Error("PROJECT_HOME_IN_USER_CONTROL");
+      const homeTab=structuredClone(tab);
       // Read-only home reuse must not depend on permission to close an uncertain page.
       await assertInputSafe(page,accountRecord.identity,current.projectUrl,{reclaim:true});
       await waitForProjectReady(page,projectName,15000);
@@ -3329,11 +3331,19 @@ async function ensureProjectLocation(reg, projectName, account, options={}) {
       if(projectHomeId(url)!==projectKey(current.projectId||current.projectUrl)) throw new Error("PROJECT_HOME_UNAVAILABLE");
       if(observed.generating!==false || observed.approvalRequired!==false) throw new Error("CHAT_BUSY");
       await assertInputSafe(page,accountRecord.identity,current.projectUrl,{reclaim:true});
+      const {task:freshTask}=await openBoundTask(reg,projectName,account,
+        {spaceOverride:admission[1].bindings[account],requireExistingSpace:true,pauseOnUserControl:true});
+      const freshPage=(await pagesOf(freshTask)).find(item=>item.label===homeTab.label);
+      const freshTab=(await freshTask.tabs()).find(item=>item.label===homeTab.label);
+      if(!freshPage || freshTab?.openedBy!=="agent" || freshTab.url!==homeTab.url || freshTab.targetId!==homeTab.targetId)
+        throw new Error("PROJECT_HOME_CHANGED");
+      if(!isDeepStrictEqual([reg.accounts?.[account],reg.projects?.[projectName]],admission))
+        throw new Error("PROJECT_HOME_ADMISSION_CHANGED");
       current.projectUrl=url;
       current.projectBase=url.replace(/\/project$/,'');
       current.projectId=projectIdFromUrl(url);
       current.verifiedAt=new Date().toISOString();
-      await saveRegistry(reg);
+      await saveRegistry(reg,null,[["accounts",account],["projects",projectName]]);
       const readiness=bindingExecutionReadiness(pr,current);
       return {ok:readiness.ready,status:readiness.ready?"READY":"CONTENT_NOT_READY",accessReady:true,
         project:projectName,account,projectId:current.projectId,projectUrl:url,spaceName:binding.spaceName,created:false,

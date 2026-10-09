@@ -7,6 +7,39 @@ import { spawnSync, spawn } from 'node:child_process';
 
 const script = path.resolve('src/state-store.py');
 
+test('registry observation CAS guards read account and Project fields inside the public transaction',async()=>{
+  const root=await mkdtemp(path.join(tmpdir(),'bridge-store-observation-'));
+  const config=path.join(root,'config'),state=path.join(root,'state');
+  await mkdir(config);await mkdir(state);
+  const initial={accounts:{a:{identity:'one'}},projects:{P:{bindings:{a:{spaceId:7,profileId:'P1',controlPage:'p1'}}},Q:{name:'other'}}};
+  await writeFile(path.join(config,'registry.json'),JSON.stringify(initial));
+  await writeFile(path.join(state,'runtime.json'),'{}');
+  const call=(command,payload)=>spawnSync('python3',[script,command,config,state,'registry'],
+    {encoding:'utf8',input:payload===undefined?undefined:JSON.stringify(payload)});
+  const readPaths=[['accounts','a'],['projects','P']];
+  try {
+    let base=JSON.parse(call('get').stdout);
+    for(const change of [d=>{d.accounts.a.identity='two';},d=>{d.projects.P.bindings.a.spaceId=8;},d=>{d.projects.P.requiredTools=['new-tool'];}]){
+      const concurrent=structuredClone(base);change(concurrent);
+      assert.equal(call('put',{base,next:concurrent}).status,0);
+      const stale=structuredClone(base);stale.projects.P.bindings.a.verifiedAt='checked-old-page';
+      const refused=call('put',{base,next:stale,readPaths});
+      assert.notEqual(refused.status,0);assert.match(refused.stderr,/STATE_CONFLICT/);
+      assert.deepEqual(JSON.parse(call('peek').stdout),concurrent);
+      // Even an unchanged write must check the original read admission.
+      assert.notEqual(call('put',{base,next:base,readPaths}).status,0);
+      base=concurrent;
+    }
+    const concurrent=structuredClone(base);concurrent.projects.Q.name='independently updated';
+    assert.equal(call('put',{base,next:concurrent}).status,0);
+    const checked=structuredClone(base);checked.projects.P.bindings.a.verifiedAt='fresh';
+    const saved=call('put',{base,next:checked,readPaths});assert.equal(saved.status,0,saved.stderr);
+    assert.equal(JSON.parse(saved.stdout).projects.Q.name,'independently updated');
+    assert.equal(JSON.parse(saved.stdout).projects.P.bindings.a.verifiedAt,'fresh');
+    for(const invalid of [null,{},['accounts'],[[1]]])assert.notEqual(call('put',{base:JSON.parse(saved.stdout),next:JSON.parse(saved.stdout),readPaths:invalid}).status,0);
+  }finally{await rm(root,{recursive:true,force:true});}
+});
+
 test('added empty objects survive the public SQLite merge and cannot overwrite a concurrent object',async()=>{
   const root=await mkdtemp(path.join(tmpdir(),'bridge-store-empty-'));
   const config=path.join(root,'config'),state=path.join(root,'state');
