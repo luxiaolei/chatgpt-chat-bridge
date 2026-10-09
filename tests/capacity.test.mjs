@@ -164,10 +164,12 @@ test('a detached conversation reuses the bounded pool and preserves its CID duri
   const source=await readFile('src/main.js','utf8'),a=source.indexOf('async function ensurePage'),z=source.indexOf('\nfunction hashText',a),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
   const url='https://chatgpt.com/g/g-p-'+'a'.repeat(32)+'/c/11111111-1111-4111-8111-111111111111',chat={id:url.split('/').at(-1),project:'P',account:'a',url,page:null},original=structuredClone(chat);
   const binding={spaceName:'chat-bridge-agent-a',spaceId:1,profileId:'P1'},overflow={spaceName:binding.spaceName+'-overflow-2',spaceId:10,profileId:'P1'},page={label:'next',goto:async target=>assert.equal(target,url),url:async()=>url};
-  const ensure=await new AsyncFunction('openBoundTask','pagesOf','sameConversationUrl','newManagedPage','waitForConversationReady','saveRegistry','openConversationFromProject',source.slice(a,z)+';return ensurePage;')(
-    async()=>({binding,task:{spaceId:1}}),async()=>[],(a,b)=>a===b,async(_r,p,account,_t,_b,id,options)=>{assert.equal(options.allowOverflow,true);assert.equal(id,chat.id);return {page,task:{spaceId:10},binding:overflow,overflow:true};},async()=>{},async()=>{},()=>{throw Error('unexpected fallback');});
+  let handedOff=0;
+  const ensure=await new AsyncFunction('openBoundTask','pagesOf','sameConversationUrl','newManagedPage','waitForConversationReady','saveRegistry','openConversationFromProject','handoffAllocatedPage','cleanupFailedAllocation',source.slice(a,z)+';return ensurePage;')(
+    async()=>({binding,task:{spaceId:1}}),async()=>[],(a,b)=>a===b,async(_r,p,account,_t,_b,id,options)=>{assert.equal(options.allowOverflow,true);assert.equal(id,chat.id);return {page,task:{spaceId:10},binding:overflow,overflow:true};},async()=>{},async()=>{},()=>{throw Error('unexpected fallback');},async target=>{assert.equal(target,page);handedOff++;},async()=>{throw Error('unexpected cleanup');});
   await ensure({projects:{P:{bindings:{a:binding}}}},chat,{allowOverflow:true});
   assert.equal(chat.id,original.id);assert.equal(chat.url,original.url);assert.equal(chat.page,'next');assert.equal(chat.spaceId,10);assert.equal(chat.spaceName,overflow.spaceName);
+  assert.equal(handedOff,1);
 });
 
 test("overflow exhaustion keeps resource waiting without recursion or another reclaim",async()=>{
