@@ -105,7 +105,7 @@ grep -q 'CONVERSATION_REATTACH_FAILED' "$ROOT/src/main.js"
 grep -q 'DELIVERY_UNCONFIRMED' "$ROOT/src/main.js"
 grep -q 'deliveryObserved' "$ROOT/src/main.js"
 grep -q 'activateComposer' "$ROOT/src/main.js"
-grep -Fq 'waitForDelivery(page,before,8000,observation)' "$ROOT/src/main.js"
+grep -Fq 'waitForDelivery(page,before,directRequestJournal?Math.max(0,before.directObservationWindow.deadlineAt-Date.now()):8000,observation)' "$ROOT/src/main.js"
 
 grep -q 'action == "scope"' "$ROOT/src/web-preflight.py"
 grep -q 'PACE_SCOPE=' "$ROOT/bin/chat-bridge"
