@@ -4,6 +4,10 @@
       .includes(String(value || "").toUpperCase());
   }
 
+  function externalReconcileOnly(task = {}) {
+    return task.completionMode === "external" && String(task.status || "").toUpperCase() === "UNKNOWN";
+  }
+
   function normalizeCompletionMode(value = "durable") {
     const mode = String(value || "durable").trim().toLowerCase();
     if (!["durable", "external"].includes(mode)) {
@@ -64,6 +68,7 @@
 
   globalObject.__CHAT_BRIDGE_TASK_POLICY__ = {
     activeTaskStatus,
+    externalReconcileOnly,
     normalizeCompletionMode,
     assertTaskId,
     assertActiveTaskTarget,

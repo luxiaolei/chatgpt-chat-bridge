@@ -69,7 +69,7 @@ if(!LIVENESS) throw new Error("chat-bridge liveness policy module was not loaded
 const { stallThresholdSec, livenessBudget } = LIVENESS;
 const TASK_POLICY = globalThis.__CHAT_BRIDGE_TASK_POLICY__;
 if(!TASK_POLICY) throw new Error("chat-bridge task policy module was not loaded");
-const { activeTaskStatus, normalizeCompletionMode, assertTaskId, assertActiveTaskTarget, activeSessionConflict, composerIsEmpty, draftDiscardProject, assertComposerSafe, isPreSendDefer } = TASK_POLICY;
+const { activeTaskStatus, externalReconcileOnly, normalizeCompletionMode, assertTaskId, assertActiveTaskTarget, activeSessionConflict, composerIsEmpty, draftDiscardProject, assertComposerSafe, isPreSendDefer } = TASK_POLICY;
 const LIFECYCLE_POLICY = globalThis.__CHAT_BRIDGE_LIFECYCLE_POLICY__ || {
   normalizeLifecycle(project={}) {
     return {autoReconcile:false,reconcileRole:project.rootController||"conductor",minGapSec:300,instruction:null};
@@ -2181,12 +2181,21 @@ async function activateComposer(page) {
   await page.focus(COMPOSER_SELECTOR);
 }
 
+function assertRecoveryTaskCurrent(scope) {
+  if(!scope?.taskId) return;
+  const live=normalizeRuntime(stored("peek","runtime")).tasks[scope.taskId];
+  if(!live || !activeTaskStatus(live.status) || externalReconcileOnly(live) || live.watchdogPausedForUserControl ||
+      live.sessionId!==scope.sessionId || live.project!==scope.project || live.account!==scope.account)
+    throw new Error("RECOVERY_TASK_CHANGED");
+}
+
 async function triggerSend(page, targetUrl=null, lifecycleScope=null) {
   const hasSend=await page.evaluate(()=>!!document.querySelector('button[data-testid="send-button"]'));
   const snapshot=await state(page,false,"approval");
   if(snapshot.approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
   if(targetUrl) assertInputTarget(snapshot,targetUrl);
   const admit=()=>{
+    assertRecoveryTaskCurrent(lifecycleScope);
     if(lifecycleScope) {
       const control=coordinated("admission-check",null,[lifecycleScope.project,...(lifecycleScope.workgroupId?["--workgroup",lifecycleScope.workgroupId]:[])]);
       if(control.ok!==true || control.control?.mode!=="RUNNING") throw new Error("ADMISSION_NOT_RUNNING");
@@ -2602,6 +2611,7 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null, lif
   const attempts=[], observation={latest:null};
   let witness=null, before=null;
   try {
+    assertRecoveryTaskCurrent(lifecycleScope);
     await assertImagePageFree(page);
     await detectWebRateLimit(page,"send-before");
     before=await state(page,"ids");
@@ -2671,7 +2681,9 @@ async function sendMessage(page, msg, targetUrl=null, expectedIdentity=null, lif
       if(before.lastUserSource.conversationId!==convId(inputTarget)) fail();
       Object.assign(before,{expectedMessage:msg,targetUrl:targetUrl||before.url,expectedIdentity:identity,nativeSourceChat:structuredClone(registered)});
     }
+    assertRecoveryTaskCurrent(lifecycleScope);
     await recordDeliveryStage("BEFORE_INPUT",{snapshot:deliveryStageSnapshot(before,page),targetUrl:before.targetUrl},msg);
+    assertRecoveryTaskCurrent(lifecycleScope);
     try { await page.fill(COMPOSER_SELECTOR,msg); }
     catch {
       if((await state(page,false,"approval")).approvalRequired===true) throw new Error("APPROVAL_REQUIRED");
@@ -3635,13 +3647,15 @@ async function syncProject(reg, page, projectName, account, binding) {
   return uniq;
 }
 
-async function stopGeneration(page) {
+async function stopGeneration(page,recoveryScope=null) {
   await assertImagePageFree(page);
+  assertRecoveryTaskCurrent(recoveryScope);
   return await state(page,false,"stop");
 }
 
-async function nativeRetry(page,{allowContinue=false}={}) {
+async function nativeRetry(page,{allowContinue=false,recoveryScope=null}={}) {
   await assertImagePageFree(page);
+  assertRecoveryTaskCurrent(recoveryScope);
   return await state(page,false,allowContinue?"recover":"retry");
 }
 
@@ -3873,6 +3887,8 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
       (live.sessionId && live.sessionId!==chat.id)) {
     return {action:"SKIPPED",reason:"TASK_NO_LONGER_RECOVERABLE",status:live?.status||null};
   }
+  if(externalReconcileOnly(live)) return {action:"RECONCILE_ONLY",reason:"EXTERNAL_TASK_UNKNOWN"};
+  const recoveryScope={taskId:live.taskId,project:live.project,account:live.account,sessionId:chat.id,workgroupId:live.workgroupId||null};
   if(contextExhausted(observed)) return {action:"SKIPPED",reason:"CONTEXT_EXHAUSTED",recommendation:"ROTATE_SESSION"};
   if(observed.sessionState==="SUSPECT_STALL" && !options.aggressive) {
     // Quiet UI alone is not proof of failure. Notify once per quiet episode.
@@ -3905,27 +3921,29 @@ async function gradedRecover(reg, chat, page, task, observed, options={}) {
   }
   let method=null, detail=null;
   if(observed.sessionState==="ERROR_RECOVERABLE") {
-    detail=await nativeRetry(page,{allowContinue:true});
+    detail=await nativeRetry(page,{allowContinue:true,recoveryScope});
+    assertRecoveryTaskCurrent(recoveryScope);
     if(detail.clicked) method="native-"+(detail.kind||"retry");
-    else { await sendMessage(page,"continue",chat.url); method="continue"; }
+    else { await sendMessage(page,"continue",chat.url,null,recoveryScope); method="continue"; }
   } else if(observed.sessionState==="IDLE_INCOMPLETE") {
     if(aggressive && attempts>=2 && live.originalMessage) {
-      await sendMessage(page,`[RECOVERY ${live.taskId}] Continue this existing task without duplicating completed work. Reconcile current GitHub/task state first. Original task:\n${live.originalMessage}`,chat.url);
+      await sendMessage(page,`[RECOVERY ${live.taskId}] Continue this existing task without duplicating completed work. Reconcile current GitHub/task state first. Original task:\n${live.originalMessage}`,chat.url,null,recoveryScope);
       method="guarded-resend-original";
     } else {
       const msg=attempts===0?"continue":"continue from where you left off. Do not restart or duplicate completed work; inspect the current task/GitHub state first.";
-      await sendMessage(page,msg,chat.url); method="continue";
+      await sendMessage(page,msg,chat.url,null,recoveryScope); method="continue";
     }
   } else if(observed.sessionState==="SUSPECT_STALL") {
-    detail=await stopGeneration(page);
+    detail=await stopGeneration(page,recoveryScope);
     if(!detail.stopped || !await waitForGenerationStop(page,7000)) return {action:"DEFERRED",reason:"GENERATION_STOP_NOT_CONFIRMED",detail};
     const current=(await loadRuntime()).tasks[task.taskId];
-    if(!current || !activeTaskStatus(current.status) || current.watchdogPausedForUserControl) return {action:"SKIPPED",reason:"TASK_CHANGED_DURING_STOP"};
-    await sendMessage(page,"continue from where you left off. Do not restart or duplicate completed work; inspect the current task/GitHub state first.",chat.url);
+    if(!current || !activeTaskStatus(current.status) || externalReconcileOnly(current) || current.watchdogPausedForUserControl) return {action:"SKIPPED",reason:"TASK_CHANGED_DURING_STOP"};
+    await sendMessage(page,"continue from where you left off. Do not restart or duplicate completed work; inspect the current task/GitHub state first.",chat.url,null,recoveryScope);
     method="stop-and-continue";
   } else {
     return {action:"NONE",attempts};
   }
+  assertRecoveryTaskCurrent(recoveryScope);
   live.recoveryAttempts=attempts+1; live.totalRecoveryAttempts=totalAttempts+1; live.lastRecoveryAt=now.toISOString(); live.lastRecoveryMethod=method; live.status="RECOVERING"; live.updatedAt=now.toISOString();
   live.watchdogNotifiedAt=null; rt.tasks[live.taskId]=live; await saveRuntime(rt);
   return {action:"RECOVERED",method,attempt:live.recoveryAttempts,detail};
@@ -4095,32 +4113,38 @@ async function watchOnce(reg, project=null, account=null, options={}) {
         continue;
       }
       let recovery={action:"NONE"}, notification=null;
-      if(observed.sessionState==="WAITING_USER_APPROVAL") {
+      if(externalReconcileOnly(current) && observed.sessionState!=="IDLE_COMPLETE") {
+        recovery={action:"RECONCILE_ONLY",reason:"EXTERNAL_TASK_UNKNOWN"};
+      } else if(observed.sessionState==="WAITING_USER_APPROVAL") {
         recovery={action:"DEFERRED",reason:"WAITING_USER_APPROVAL"};
       } else if(observed.sessionState==="CONTEXT_EXHAUSTED") {
         const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
-        live.status="BLOCKED";
-        live.blockedReason="CONTEXT_EXHAUSTED";
-        live.contextExhaustedAt=new Date().toISOString();
-        live.recommendation="ROTATE_SESSION";
-        if(options.autoRecover!==false && !live.watchdogNotifiedAt) {
-          notification=await notifyController(reg,live,`[WATCHDOG]
+        if(externalReconcileOnly(live)) {
+          recovery={action:"RECONCILE_ONLY",reason:"EXTERNAL_TASK_UNKNOWN"};
+        } else {
+          live.status="BLOCKED";
+          live.blockedReason="CONTEXT_EXHAUSTED";
+          live.contextExhaustedAt=new Date().toISOString();
+          live.recommendation="ROTATE_SESSION";
+          if(options.autoRecover!==false && !live.watchdogNotifiedAt) {
+            notification=await notifyController(reg,live,`[WATCHDOG]
 task_id: ${live.taskId}
 status: BLOCKED
 session_state: CONTEXT_EXHAUSTED
 role: ${live.role||chat.role}
 summary: Conversation reached a hard context limit. Do not retry/continue this Chat; prepare a checkpointed replacement session.`);
-          if(notification.sent || notification.recorded) live.watchdogNotifiedAt=new Date().toISOString();
+            if(notification.sent || notification.recorded) live.watchdogNotifiedAt=new Date().toISOString();
+          }
+          latest.tasks[live.taskId]=live; await saveRuntime(latest);
         }
-        latest.tasks[live.taskId]=live; await saveRuntime(latest);
       } else if(options.autoRecover!==false && ["ERROR_RECOVERABLE","IDLE_INCOMPLETE","SUSPECT_STALL","BLOCKED"].includes(observed.sessionState)) {
         recovery=await gradedRecover(reg,chat,page,task,observed,options);
       } else if(observed.sessionState==="IDLE_COMPLETE") {
         const latest=await loadRuntime(), live=latest.tasks[task.taskId];
         if(!live || !activeTaskStatus(live.status) || live.watchdogPausedForUserControl) continue;
-        live.recoveryAttempts=0; live.watchErrorCount=0;
+        if(!externalReconcileOnly(live)) { live.recoveryAttempts=0; live.watchErrorCount=0; }
         if((live.completionMode||"durable")==="external") {
-          live.status="RUNNING";
+          if(!externalReconcileOnly(live)) live.status="RUNNING";
           live.externalResponsePending=true;
           live.externalResponseAt=new Date().toISOString();
           live.watchdogResultNotifiedAt=null;
@@ -4148,10 +4172,14 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
         latest.tasks[live.taskId]=live; await saveRuntime(latest);
       } else if(observed.sessionState.startsWith("RUNNING")) {
         const latest=await loadRuntime(), live=latest.tasks[task.taskId]||task;
-        if(["DISPATCHED","RECOVERING"].includes(String(live.status).toUpperCase())) live.status="RUNNING";
-        live.watchErrorCount=0;
-        if(live.lastRecoveryAt && new Date(observed.lastProgressAt)>new Date(live.lastRecoveryAt)) live.recoveryAttempts=0;
-        latest.tasks[live.taskId]=live; await saveRuntime(latest);
+        if(externalReconcileOnly(live)) {
+          recovery={action:"RECONCILE_ONLY",reason:"EXTERNAL_TASK_UNKNOWN"};
+        } else {
+          if(["DISPATCHED","RECOVERING"].includes(String(live.status).toUpperCase())) live.status="RUNNING";
+          live.watchErrorCount=0;
+          if(live.lastRecoveryAt && new Date(observed.lastProgressAt)>new Date(live.lastRecoveryAt)) live.recoveryAttempts=0;
+          latest.tasks[live.taskId]=live; await saveRuntime(latest);
+        }
       }
       results.push({taskId:task.taskId,role:task.role,sessionId:chat.id,state:observed.sessionState,recommendation:observed.recommendation,
         quietForSec:observed.quietForSec,runningForSec:observed.runningForSec,recovery,notification});
@@ -4191,6 +4219,11 @@ summary: Conversation reached a hard context limit. Do not retry/continue this C
       const latest=await loadRuntime(), live=latest.tasks[task.taskId];
       if(!live || !activeTaskStatus(live.status)) {
         results.push({taskId:task.taskId,state:"TASK_CHANGED",status:live?.status||null});
+        continue;
+      }
+      if(externalReconcileOnly(live)) {
+        results.push({taskId:task.taskId,role:task.role,sessionId:chat?.id||task.sessionId||null,state:"WATCH_ERROR",error:error.message,
+          deliveryStage:error.deliveryStage||null,recovery:{action:"RECONCILE_ONLY",reason:"EXTERNAL_TASK_UNKNOWN"}});
         continue;
       }
       if(error.deliveryStage==="SEND_ATTEMPTED") {

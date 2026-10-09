@@ -326,6 +326,8 @@ chat-bridge task clear TASK_ID --project "PROJECT NAME"
 
 Runtime state lives under `~/.local/state/chat-bridge/` and is reconstructable. GitHub remains authoritative.
 
+An external owner must project a genuinely uncertain or timed-out task with `task set-status TASK_ID --project "PROJECT NAME" --account ALIAS --session CID --status UNKNOWN --expected-updated-at ISO`. This local management entry requires an existing external task, exact scope and expected update version, changes only status and update time, and never starts Ego or waits for the UI lock. Same-version UNKNOWN is idempotent. Browser callers must satisfy existing management authorization through `--caller-ref`; an unverified origin is refused. The existing owner, route, conversation, message, baseline and recovery budgets remain intact. External UNKNOWN permits observation and exact late-response events, while watchdog/shared recovery cannot Retry, Stop, continue, promote the status or detach the page. The external owner still decides whether a late response is admissible; this projection does not extend its deadline or accept its result.
+
 ## Models and Thinking Level
 
 Model choice and Thinking Level are independent controls.

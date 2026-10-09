@@ -318,6 +318,42 @@ def runtime(db):
     return json.loads(row[0])
 
 
+def set_external_task_unknown(db, args):
+    if not args or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", args[0]) or len(args[1:]) % 2:
+        raise ValueError("EXTERNAL_TASK_STATUS_SCOPE_REQUIRED")
+    task_id, pairs = args[0], args[1:]
+    opts = dict(zip(pairs[::2], pairs[1::2]))
+    allowed = {"--status", "--session", "--project", "--account", "--expected-updated-at", "--caller-ref"}
+    if len(opts) * 2 != len(pairs) or not set(opts).issubset(allowed) or any(not opts.get(key) for key in allowed - {"--caller-ref"}):
+        raise ValueError("EXTERNAL_TASK_STATUS_SCOPE_REQUIRED")
+    expected = opts["--expected-updated-at"]
+    try:
+        parsed = datetime.fromisoformat(expected.replace("Z", "+00:00"))
+    except ValueError:
+        raise ValueError("EXTERNAL_TASK_STATUS_SCOPE_REQUIRED")
+    if opts["--status"] != "UNKNOWN" or "T" not in expected or parsed.tzinfo is None:
+        raise ValueError("EXTERNAL_TASK_STATUS_SCOPE_REQUIRED")
+    if os.environ.get("CHAT_BRIDGE_FROM_SPACE") and not os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID"):
+        raise ValueError("CONTROL_ORIGIN_MISMATCH")
+    # Read and compare inside the writer transaction; no UI or child call holds this lock.
+    begin_immediate(db, timeout=15)
+    rt = runtime(db)
+    task = (rt.get("tasks") or {}).get(task_id)
+    if (not task or task.get("taskId") != task_id or task.get("completionMode") != "external"
+            or any(task.get(field) != opts[flag] for field, flag in (("sessionId", "--session"), ("project", "--project"), ("account", "--account")))):
+        raise ValueError("EXTERNAL_TASK_STATUS_SCOPE_MISMATCH")
+    authorize_control(db, opts.get("--caller-ref"), task["project"], workgroup=task.get("workgroupId"))
+    if task.get("status") not in {"RUNNING", "DISPATCHED", "RECOVERING", "UNKNOWN"}:
+        raise ValueError("EXTERNAL_TASK_STATUS_NOT_MUTABLE")
+    if task.get("updatedAt") != expected:
+        raise ValueError("EXTERNAL_TASK_STATUS_VERSION_CONFLICT")
+    if task["status"] != "UNKNOWN":
+        task.update(status="UNKNOWN", updatedAt=stamp())
+        db.execute("UPDATE documents SET payload=? WHERE kind='runtime'", (json.dumps(rt, ensure_ascii=False),))
+    db.commit()
+    return task
+
+
 def local_caller(caller, saved=None):
     """Bind to this local Codex process; environment hints are not an auth boundary."""
     thread = os.environ.get("CODEX_THREAD_ID", "")
@@ -4816,9 +4852,11 @@ def main():
             db.close()
             db = connection(config, state)
     else:
-        db = connection(config, state, initialize=command not in {"native-admission", "controller-placement-commit"})
+        db = connection(config, state, initialize=command not in {"native-admission", "controller-placement-commit", "task-set-status"})
     try:
-        if command == "image-batch-create":
+        if command == "task-set-status":
+            value = set_external_task_unknown(db, args)
+        elif command == "image-batch-create":
             value = image_batch_create(db, json.load(sys.stdin))
         elif command in {"image-authorize", "image-revoke", "image-submit", "image-inspect", "image-result", "image-apply"}:
             value = image_api(db, command, json.load(sys.stdin))

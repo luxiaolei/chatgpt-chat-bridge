@@ -35,6 +35,11 @@ test("BLOCKED task remains attached without a recorded terminal result",async()=
   const f=await fixture("BLOCKED");assert.deepEqual(f.out,[]);assert.equal(f.closed,0);assert.equal(f.saved,0);assert.equal(f.chat.page,"p1");
 });
 
+test("UNKNOWN external task remains attached for late response reconciliation",async()=>{
+  const f=await fixture("UNKNOWN");
+  assert.deepEqual(f.out,[]);assert.equal(f.closed,0);assert.equal(f.saved,0);assert.equal(f.chat.page,"p1");
+});
+
 test("terminal detach preserves user/unmanaged page, draft and generating page",async()=>{
   for(const [tab,snapshot] of [
     [{openedBy:"user"},{}],[{openedBy:"unknown"},{}],[{},{generating:true}],[{},{composerRawText:"draft"}],
