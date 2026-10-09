@@ -4741,7 +4741,8 @@ def page_resource_decision(db, state, payload):
         if not target.get("allocatedHere") or (not module.owns_allocated_page(state, current, target, current=True) if current else not own_direct):
             return deny("PHYSICAL_TARGET_ALLOCATION_UNPROVEN")
     elif purpose == "TERMINAL_ALLOCATION":
-        if not registered or protected and (registered.get("pageTargetId") != target["targetId"] or not any(module.owns_allocated_page(state, row, target) for task in linked for row in
+        if (not registered or registered.get("pageTargetId") != target["targetId"] or registered.get("profileId") != target["profileId"] or
+                registered.get("pageSpaceId", registered.get("spaceId")) != target["spaceId"] or protected and not any(module.owns_allocated_page(state, row, target) for task in linked for row in
                 db.execute("SELECT * FROM operations WHERE task_id=? AND account_id=? AND status IN ('SENT','FAILED_PRE_SEND','CANCELLED')", (task["taskId"], account_id(identity))))):
             return deny("PHYSICAL_TARGET_ALLOCATION_UNPROVEN")
     elif purpose == "ORPHAN_IDLE":

@@ -55,6 +55,22 @@ test('exact resource termination preserves legacy UNKNOWN; lost close ACK fences
     assert.equal(f.rawOperation(op.operationId),original);
   }finally{await rm(f.root,{recursive:true,force:true});}
 });
+test('ensure blocks replacement of a disappeared target after uncertain close but permits confirmed release or refusal',async()=>{
+  const source=await readFile('src/main.js','utf8'),start=source.indexOf('async function ensurePage'),end=source.indexOf('\nfunction hashText',start),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
+  for(const phase of ['INTENT','UNKNOWN','REFUSED','RELEASED']) {
+    const f=await fixture();try{
+      const intent=f.call('page-release-record',{...f.payload,phase:'INTENT'});
+      if(phase!=='INTENT') f.call('page-release-record',{...f.payload,releaseIntent:intent,phase,data:{closeAttempted:phase!=='REFUSED',closeAcknowledged:true,targetAbsent:true}});
+      const chat={id:'11111111-1111-4111-8111-111111111111',project:'P',account:'a',url:home.replace('/project','/c/11111111-1111-4111-8111-111111111111'),page:'p9',pageTargetId:'target-one',spaceId:9,pageSpaceId:9,spaceName:'managed',profileId:'P1'};
+      const page={label:'new-page',targetId:'new-target',goto:async()=>{},url:async()=>chat.url};let opens=0,creates=0;
+      const ensure=await new AsyncFunction('coordinated','accountScope','openBoundTask','pagesOf','newManagedPage','waitForConversationReady','sameConversationUrl','saveRegistry','handoffAllocatedPage',source.slice(start,end)+';return ensurePage;')(
+        f.call,()=>scope,async()=>{opens++;return {binding:f.registry.projects.P.bindings.a,task:{spaceId:9}};},async()=>[],async()=>{creates++;return {page};},async()=>{},(a,b)=>a===b,async()=>{},async()=>{});
+      if(['INTENT','UNKNOWN'].includes(phase)) {
+        await assert.rejects(()=>ensure(f.registry,chat),/PAGE_TARGET_RELEASE_FENCED/);assert.equal(opens,0);assert.equal(creates,0);
+      } else { await ensure(f.registry,chat);assert.equal(opens,1);assert.equal(creates,1);assert.equal(chat.pageTargetId,'new-target'); }
+    }finally{await rm(f.root,{recursive:true,force:true});}
+  }
+});
 test('direct allocation has immutable provenance and cannot clean an attached or paused target',async()=>{
   const f=await fixture();try{
     const data={allocationOrdinal:1,project:'P',account:'a',accountId:scope,spaceId:9,spaceName:'managed',profileId:'P1',projectUrl:null};
@@ -80,6 +96,13 @@ test('terminal original task never grants release after another task has reused 
     assert.equal(f.call('page-reclaim-context',payload).resourceRelease.reason,'PHYSICAL_TARGET_EXECUTION_PROTECTED');
     const changed=structuredClone(reg);changed.chats[cid].attachmentEpoch=2;f.put('registry',changed);
     assert.equal(f.call('page-reclaim-context',payload).resourceRelease.reason,'PHYSICAL_TARGET_ATTACHMENT_CHANGED');
+    f.put('runtime',{tasks:{A:{taskId:'A',sessionId:cid,project:'P',account:'a',status:'COMPLETE'}}});
+    for(const patch of [c=>{delete c.pageTargetId;},c=>{delete c.profileId;},c=>{c.spaceId=8;}]) {
+      reg.chats[cid]={...chat};patch(reg.chats[cid]);f.put('registry',reg);
+      const legacy={...payload,candidate:reg.chats[cid]};
+      assert.equal(f.call('page-reclaim-context',legacy).resourceRelease.reason,'PHYSICAL_TARGET_ALLOCATION_UNPROVEN');
+      assert.notEqual(f.run('page-release-record',{...legacy,phase:'INTENT'}).status,0);
+    }
   }finally{await rm(f.root,{recursive:true,force:true});}
 });
 

@@ -1440,6 +1440,11 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
 }
 
 async function ensurePage(reg, chat, options={}) {
+  if(chat.pageTargetId) {
+    const prior=coordinated("page-release-status",{account:chat.account,resourceTarget:{accountId:accountScope(reg,chat.account),
+      profileId:chat.profileId,spaceId:Number(chat.pageSpaceId??chat.spaceId),targetId:chat.pageTargetId}});
+    if(prior.phase && !["REFUSED","RELEASED"].includes(prior.phase)) throw new Error("PAGE_TARGET_RELEASE_FENCED");
+  }
   const configured=reg.projects?.[chat.project]?.bindings?.[chat.account];
   const spaceOverride=chat.spaceName && configured?.spaceName!==chat.spaceName
     ? {spaceName:chat.spaceName,spaceId:chat.spaceId,profileId:chat.profileId||null} : null;
@@ -1513,7 +1518,7 @@ async function ensurePage(reg, chat, options={}) {
     await saveRegistry(reg);
     throw new Error("CONVERSATION_REATTACH_FAILED: "+chat.role+" ("+chat.id+")");
   }
-  chat.page=page.label; chat.pageTargetId=page.targetId; chat.spaceId=task.spaceId; chat.pageSpaceId=task.spaceId;
+  chat.page=page.label; chat.pageTargetId=page.targetId; chat.spaceId=task.spaceId; chat.pageSpaceId=task.spaceId; chat.profileId=binding.profileId;
   await saveRegistry(reg); await handoffAllocatedPage(page); return {task,page,binding};
   } catch(error) {
     if(allocated) await cleanupFailedAllocation(reg,task,page,error);
