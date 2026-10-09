@@ -607,6 +607,10 @@ async function releasePhysicalPage(reg,task,page,payload,beforeClose=null) {
   try {
     if(pageAllocations.has(page)) await recordAllocationStage("PAGE_RELEASE_INTENT",{...pageAllocations.get(page),url:target.url,releaseIntent:intent});
     if(beforeClose) await beforeClose();
+    const before=await task.cdp("Target.getTargets",{}, {timeout:10000});
+    if(!Array.isArray(before?.targetInfos) || !before.targetInfos.every(tab=>typeof tab?.targetId==="string"&&tab.targetId.trim()) ||
+       before.targetInfos.filter(tab=>tab.targetId===target.targetId).length!==1)
+      throw new Error("PAGE_RELEASE_NATIVE_TARGET_UNVERIFIED");
     if(/^(about:blank|chrome:\/\/newtab\/?)$/i.test(target.url)) {
       if(target.purpose!=="ORPHAN_IDLE" && (target.purpose!=="OWNED_TEMPORARY" || !pageAllocations.has(page))) throw new Error("PAGE_RELEASE_NEUTRAL_UNOWNED");
       if(!await page.evaluate(()=>["about:blank","chrome://newtab/"].includes(location.href) &&
@@ -620,9 +624,10 @@ async function releasePhysicalPage(reg,task,page,payload,beforeClose=null) {
     await verify();
     closeAttempted=true;
     const closed=await task.cdp("Target.closeTarget",{targetId:target.targetId},{timeout:10000});
-    if(closed?.success===false) throw new Error("PAGE_CLOSE_UNCONFIRMED");
+    if(closed?.success!==true) throw new Error("PAGE_CLOSE_UNCONFIRMED");
     const native=await task.cdp("Target.getTargets",{}, {timeout:10000});
-    if(!Array.isArray(native?.targetInfos) || native.targetInfos.some(tab=>tab.targetId===target.targetId) ||
+    if(!Array.isArray(native?.targetInfos) || !native.targetInfos.every(tab=>typeof tab?.targetId==="string"&&tab.targetId.trim()) ||
+       native.targetInfos.some(tab=>tab.targetId===target.targetId) ||
        (await task.tabs()).some(tab=>tab.targetId===target.targetId)) throw new Error("PAGE_CLOSE_UNCONFIRMED");
     const receipt=coordinated("page-release-record",{...payload,phase:"RELEASED",data:{closeAttempted:true,closeAcknowledged:true,targetAbsent:true}});
     return {target,receipt,deliveryProven:false,remoteExecutionStopped:false};

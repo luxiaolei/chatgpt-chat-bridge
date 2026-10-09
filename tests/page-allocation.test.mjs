@@ -18,7 +18,7 @@ async function fixture(change=()=>{}) {
   f.page={label:'p9',targetId:f.pageTargetId??'exact-native-target',url:async()=>f.tab.url,
     evaluate:async()=>true};
   const task={spaceId:9,tabs:async()=>f.gone?[]:[f.tab],newPage:async()=>{f.created++;assert.equal(f.records.at(-1).phase,'ALLOCATION_INTENT');if(f.creationError)throw f.creationError;return f.page;},
-    cdp:async(method,params)=>{if(method==='Target.closeTarget'){assert.equal(params.targetId,'exact-native-target');f.closed++;if(f.closeError)throw f.closeError;f.gone=true;return {success:true};}return {targetInfos:f.gone?[]:[f.tab]};}};
+    cdp:async(method,params)=>{if(method==='Target.closeTarget'){assert.equal(params.targetId,'exact-native-target');f.closed++;if(f.closeError)throw f.closeError;f.gone=true;return 'closeResponse' in f?f.closeResponse:{success:true};}if(f.nativeError)throw f.nativeError;return 'nativeResponse' in f?f.nativeResponse:{targetInfos:f.gone?[]:[f.tab]};}};
   const ensureStart=source.indexOf('async function ensureProjectLocation'),ensureEnd=source.indexOf('\nasync function syncProject',ensureStart);
   const api=await new AsyncFunction('recordDeliveryStage','pageBudgetError','listTaskSpaces','stored','coordinated','projectHomeId','projectKey','assertInputSafe','state','composerIsEmpty','samePhysicalSpace','accountScope','opt','reg','crypto','projectRecord','accountManagedTask','openProjectPage','bindingFor','saveRegistry','touchRuntime','bindingExecutionReadiness','projectIdFromUrl',
     'const globalThis={__CHAT_BRIDGE_DELIVERY_ATTEMPT__:'+(f.direct?'null':'{}')+'};let sendAttempted=false;const bindingObserved=()=>false;const newManagedPage=(_reg,p,a,t,b)=>allocateManagedPage(t,b,p,a);'+source.slice(start,end)+source.slice(ensureStart,ensureEnd)+';return {allocateManagedPage,cleanupAllocatedPage,cleanupFailedAllocation,ensureProjectLocation,handoffAllocatedPage};')(
@@ -52,6 +52,20 @@ test('failed allocation cleanup closes only its unchanged owned idle target and 
   const outcome=Error('navigation failed');await x.api.cleanupFailedAllocation(x.reg,x.task,page,outcome);
   assert.equal(outcome.pageCleanup.state,'RELEASED');assert.equal(x.f.closed,1);
   assert.deepEqual(x.f.records.map(r=>r.phase),['ALLOCATION_INTENT','PAGE_ALLOCATED','PAGE_RELEASE_INTENT','PAGE_RELEASED']);
+});
+test('native inventory must confirm the captured target before close and only an explicit success acknowledges close',async()=>{
+  for(const patch of [f=>{f.nativeError=Error('Target domain unavailable');},...[undefined,{}, {targetInfos:[]},{targetInfos:[{targetId:'other'}]},{targetInfos:[null,{targetId:'exact-native-target'}]},{targetInfos:[{targetId:'exact-native-target'},{targetId:'exact-native-target'}]}].map(response=>f=>{f.nativeResponse=response;})]) {
+    const x=await fixture(patch),page=await x.api.allocateManagedPage(x.task,x.binding,'P','a'),result={};
+    await x.api.cleanupFailedAllocation(x.reg,x.task,page,result);
+    assert.equal(x.f.closed,0);assert.equal(result.allocationState,'RETAINED');
+    assert.ok(!x.f.records.some(r=>r.phase==='PAGE_RELEASED'));
+  }
+  for(const response of [undefined,{}, {success:false}]) {
+    const x=await fixture(f=>{f.closeResponse=response;}),page=await x.api.allocateManagedPage(x.task,x.binding,'P','a'),result={};
+    await x.api.cleanupFailedAllocation(x.reg,x.task,page,result);
+    assert.equal(x.f.closed,1);assert.equal(result.allocationState,'UNKNOWN');
+    assert.ok(!x.f.records.some(r=>r.phase==='PAGE_RELEASED'));
+  }
 });
 test('target replacement, attachment, unknown protection, draft, generation and uncertain close retain evidence and prohibit reallocation',async()=>{
   for(const patch of [
