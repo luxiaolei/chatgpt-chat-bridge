@@ -4744,7 +4744,7 @@ def page_resource_decision(db, state, payload):
     if purpose == "MANAGEMENT_TERMINATION":
         if payload.get("confirm") is not True:
             return deny("PHYSICAL_TARGET_CONFIRM_REQUIRED")
-        authorize_control(db, payload.get("callerRef"), project=project)
+        authority = authorize_control(db, payload.get("callerRef"), project=project)
     elif purpose == "OWNED_TEMPORARY":
         if not target.get("allocatedHere") or (not module.owns_allocated_page(state, current, target, current=True) if current else not own_direct):
             return deny("PHYSICAL_TARGET_ALLOCATION_UNPROVEN")
@@ -4759,10 +4759,20 @@ def page_resource_decision(db, state, payload):
             return deny("PHYSICAL_TARGET_UNPLACED_EXECUTION")
     else:
         return deny("PHYSICAL_TARGET_PERMISSION_MISSING")
+    if payload.get("reloadHome"):
+        if (purpose != "MANAGEMENT_TERMINATION" or authority.get("mode") != "HOST_LOCAL" or payload.get("reloadHome") is not True or
+                payload.get("attempt") or payload.get("candidate") or not route or
+                not re.fullmatch(r"https://chatgpt\.com/g/" + route[1] + r"(?:-[^/?#]+)?/project/?", target["url"], re.I)):
+            return deny("PHYSICAL_TARGET_HOME_RELOAD_UNAUTHORIZED")
+        if cfg.get("lifecycle", {}).get("draftPolicy") != "discard":
+            return deny("PHYSICAL_TARGET_HOME_RELOAD_DRAFT_PROTECTED")
+        if any(item.get("pageTargetId") == target["targetId"] or item.get("targetId") == target["targetId"] for item in
+               [*(reg.get("chats") or {}).values(), *(rt.get("tasks") or {}).values(), *(rt.get("sessions") or {}).values()]):
+            return deny("PHYSICAL_TARGET_REFERENCED")
     latest = delivery_attempt_module().page_release_latest(state, target)
     if latest and latest["outcome"] != "REFUSED":
         intent = payload.get("releaseIntent")
-        if (latest["outcome"] is not None or latest["target"] != target or not isinstance(intent, dict) or
+        if (latest["outcome"] is not None or latest["target"] != target or latest.get("data", {}).get("reloadHome", False) != payload.get("reloadHome", False) or not isinstance(intent, dict) or
                 any(intent.get(key) != latest["reference"][key] for key in ("path", "sha256", "bytes"))):
             return deny("PAGE_RELEASE_ALREADY_ATTEMPTED")
     return {"allowed": True, "reason": purpose, "target": target, "deliveryProven": False, "remoteExecutionStopped": False}
@@ -5297,6 +5307,8 @@ def main():
                 decision = page_resource_decision(db, state, payload)
                 if not decision["allowed"]:
                     raise ValueError(decision["reason"])
+                if (payload.get("data") or {}).get("reloadHome", False) != payload.get("reloadHome", False):
+                    raise ValueError("PAGE_RELEASE_RECOVERY_INTENT_MISMATCH")
             else:
                 identity = (registry(db).get("accounts", {}).get(payload.get("account")) or {}).get("identity")
                 origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
