@@ -369,7 +369,7 @@ function boolValue(value, def=false) {
 }
 function positionals(start=0) {
   const booleans="aggressive all allow-duplicate-role background confirm create current-controller dry-run overflow quiet reload-home resume-watch skip-lifecycle skip-tasks strict-model".split(" ");
-  const valued="account affinity-key after auto-reconcile baseline-assistant-count baseline-assistant-hash baseline-assistant-id caller-ref candidate completion-mode controller cooldown dispatched-at draft-policy effort escalation-to expected-hash github id image-path instruction issue label limit max-overflow-spaces max-recovery max-total-recovery message mime-type min-gap-sec model name operation original-message page profile project project-id reconcile-role reply-to reply-to-session request-id resource-policy-version role root-controller session space stall-sec status target-id task task-id timeout title turn-id type url workgroup".split(" ");
+  const valued="account affinity-key after auto-reconcile baseline-assistant-count baseline-assistant-hash baseline-assistant-id caller-ref candidate completion-mode controller cooldown dispatched-at draft-policy effort escalation-to expected-hash github id image-path instruction issue label limit max-overflow-spaces max-recovery max-total-recovery message mime-type min-gap-sec model name operation original-message page profile project project-id reconcile-role reply-to reply-to-session request-id resource-policy-version role root-controller session space stall-sec status target-id task task-id terminate-after-reload-unknown timeout title turn-id type url workgroup".split(" ");
   const out=[];
   for (let i=start;i<args.length;i++) {
     if (args[i].startsWith("--")) {
@@ -587,13 +587,15 @@ async function handoffAllocatedPage(page) {
 }
 
 async function releasePhysicalPage(reg,task,page,payload,beforeClose=null) {
-  const target=payload.resourceTarget,reloadHome=payload.reloadHome===true;
+  const target=payload.resourceTarget,reloadHome=payload.reloadHome===true,termination=!!payload.terminateAfterReloadUnknown;
+  if(termination && reloadHome) throw new Error("PAGE_TERMINATION_RELOAD_CONFLICT");
+  const recordCommand=termination?"page-termination-record":"page-release-record";
   const verify=async(readUrl=true)=>{
     const tab=(await task.tabs()).find(tab=>tab.label===target.page);
     if(!tab || !target.targetId || Number(task.spaceId)!==Number(target.spaceId) || tab.targetId!==target.targetId || tab.openedBy!=="agent" ||
        tab.url!==target.url || page.targetId!==target.targetId || readUrl && await page.url()!==target.url)
       throw new Error("PAGE_RELEASE_TARGET_CHANGED");
-    if(reloadHome) boundManagedPage(task,tab);
+    if(reloadHome || termination) boundManagedPage(task,tab);
     const spaces=(await listTaskSpaces()).filter(space=>Number(space.id)===Number(task.spaceId));
     if(spaces.length!==1 || spaces[0].name!==target.spaceName || spaces[0].profileId!==target.profileId ||
       spaces[0].ownership!=="agent" || spaces[0].createdBy!=="agent") throw new Error("PAGE_RELEASE_SPACE_CHANGED");
@@ -608,13 +610,14 @@ async function releasePhysicalPage(reg,task,page,payload,beforeClose=null) {
        !before.targetInfos.some(tab=>tab.targetId===target.targetId && tab.type==="page" && tab.url===target.url))
       throw new Error("PAGE_RELEASE_NATIVE_TARGET_UNVERIFIED");
   };
-  await verify(!reloadHome);
+  await verify(!reloadHome&&!termination);
+  if(termination) await verifyNative(true);
   if(reloadHome) {
     if(typeof page.reload!=="function") throw new Error("PAGE_RELEASE_RELOAD_UNAVAILABLE");
     await verifyNative(true);
   }
-  const intent=coordinated("page-release-record",{...payload,phase:"INTENT",data:{reloadHome}});
-  payload={...payload,releaseIntent:intent};
+  const intent=coordinated(recordCommand,{...payload,phase:"INTENT",data:{reloadHome}});
+  payload={...payload,[termination?"terminationIntent":"releaseIntent"]:intent};
   let closeAttempted=false,reloadAttempted=false;
   try {
     if(pageAllocations.has(page)) await recordAllocationStage("PAGE_RELEASE_INTENT",{...pageAllocations.get(page),url:target.url,releaseIntent:intent});
@@ -626,8 +629,11 @@ async function releasePhysicalPage(reg,task,page,payload,beforeClose=null) {
       await verify();
     }
     if(beforeClose) await beforeClose();
-    await verifyNative();
-    if(/^(about:blank|chrome:\/\/newtab\/?)$/i.test(target.url)) {
+    await verifyNative(termination);
+    if(termination) {
+      await verify(false);
+      await verifyNative(true);
+    } else if(/^(about:blank|chrome:\/\/newtab\/?)$/i.test(target.url)) {
       if(target.purpose!=="ORPHAN_IDLE" && (target.purpose!=="OWNED_TEMPORARY" || !pageAllocations.has(page))) throw new Error("PAGE_RELEASE_NEUTRAL_UNOWNED");
       if(!await page.evaluate(()=>["about:blank","chrome://newtab/"].includes(location.href) &&
         !document.querySelector('input,textarea,[contenteditable="true"],iframe'))) throw new Error("PAGE_RELEASE_NEUTRAL_CHANGED");
@@ -637,7 +643,7 @@ async function releasePhysicalPage(reg,task,page,payload,beforeClose=null) {
       if(sample.url!==target.url || sample.generating!==false || sample.approvalRequired!==false || !composerIsEmpty(sample))
         throw new Error("PAGE_RELEASE_UI_PROTECTED");
     }
-    await verify();
+    await verify(!termination);
     closeAttempted=true;
     const closed=await task.cdp("Target.closeTarget",{targetId:target.targetId},{timeout:10000});
     if(closed?.success!==true) throw new Error("PAGE_CLOSE_UNCONFIRMED");
@@ -645,20 +651,20 @@ async function releasePhysicalPage(reg,task,page,payload,beforeClose=null) {
     if(!Array.isArray(native?.targetInfos) || !native.targetInfos.every(tab=>typeof tab?.targetId==="string"&&tab.targetId.trim()) ||
        native.targetInfos.some(tab=>tab.targetId===target.targetId) ||
        (await task.tabs()).some(tab=>tab.targetId===target.targetId)) throw new Error("PAGE_CLOSE_UNCONFIRMED");
-    const receipt=coordinated("page-release-record",{...payload,phase:"RELEASED",data:{closeAttempted:true,closeAcknowledged:true,targetAbsent:true,reloadAttempted}});
-    return {target,receipt,reloadAttempted,deliveryProven:false,remoteExecutionStopped:false};
+    const receipt=coordinated(recordCommand,{...payload,phase:"RELEASED",data:{closeAttempted:true,closeAcknowledged:true,targetAbsent:true,reloadAttempted}});
+    return {target,receipt,reloadAttempted,...(termination?{rendererStateVerified:false}:{}),deliveryProven:false,remoteExecutionStopped:false};
   } catch(error) {
     error.allocationState=closeAttempted||reloadAttempted?"UNKNOWN":"RETAINED";
     if(pageAllocations.has(page)) await recordAllocationStage("PAGE_RELEASE_UNKNOWN",{...pageAllocations.get(page),url:target.url,
       closeAttempted,state:error.allocationState,reason:String(error.message||error)}).catch(()=>{});
-    try { coordinated("page-release-record",{...payload,phase:closeAttempted||reloadAttempted?"UNKNOWN":"REFUSED",
+    try { coordinated(recordCommand,{...payload,phase:closeAttempted||reloadAttempted?"UNKNOWN":"REFUSED",
       data:{closeAttempted,reloadAttempted,reason:String(error.message||error)}}); }
     catch(recordError) { error.releaseRecordError=String(recordError.message||recordError); }
     throw error;
   }
 }
 
-async function releaseManagementPage(reg,project,account,spaceName,label,targetId,confirm,reloadHome=false) {
+async function releaseManagementPage(reg,project,account,spaceName,label,targetId,confirm,reloadHome=false,terminateAfterReloadUnknown=null) {
   if(!confirm) throw new Error("PAGE_RELEASE_CONFIRM_REQUIRED");
   if(!label || !targetId || !spaceName) throw new Error("PAGE_RELEASE_EXACT_TARGET_REQUIRED");
   const spaces=(await listTaskSpaces()).filter(space=>space.name===spaceName);
@@ -667,7 +673,8 @@ async function releaseManagementPage(reg,project,account,spaceName,label,targetI
   if(tab?.targetId!==targetId || tab.openedBy!=="agent") throw new Error("PAGE_RELEASE_TARGET_CHANGED");
   const page=boundManagedPage(task,tab),binding={spaceName,profileId:info.profileId};
   const payload=physicalReleasePayload(reg,task,page,binding,project,account,"MANAGEMENT_TERMINATION");
-  payload.confirm=true;payload.reloadHome=reloadHome;payload.resourceTarget.url=tab.url;payload.resourceTarget.targetId=targetId;
+  payload.confirm=true;payload.reloadHome=reloadHome;payload.terminateAfterReloadUnknown=terminateAfterReloadUnknown;
+  payload.resourceTarget.url=tab.url;payload.resourceTarget.targetId=targetId;
   return {ok:true,...await releasePhysicalPage(reg,task,page,payload)};
 }
 
@@ -4714,7 +4721,10 @@ else if(cmd==="space"){
   const sub=args[1]||"show";
   if(sub==="release") {
     if(!project || !accountArg) throw new Error("space release requires --project and --account");
-    print(await releaseManagementPage(reg,project,accountArg,opt("space"),opt("page"),opt("target-id"),args.includes("--confirm"),args.includes("--reload-home")));
+    const unknownPath=opt("terminate-after-reload-unknown");
+    if(unknownPath && !opt("expected-hash")) throw new Error("PAGE_TERMINATION_UNKNOWN_HASH_REQUIRED");
+    print(await releaseManagementPage(reg,project,accountArg,opt("space"),opt("page"),opt("target-id"),args.includes("--confirm"),args.includes("--reload-home"),
+      unknownPath?{path:unknownPath,sha256:opt("expected-hash")}:null));
   } else if(sub==="gc") {
     print(await gcAgentSpaces(reg,args.includes("--confirm")));
   } else if(sub==="consolidate") {

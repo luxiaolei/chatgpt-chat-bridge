@@ -4759,16 +4759,28 @@ def page_resource_decision(db, state, payload):
             return deny("PHYSICAL_TARGET_UNPLACED_EXECUTION")
     else:
         return deny("PHYSICAL_TARGET_PERMISSION_MISSING")
-    if payload.get("reloadHome"):
-        if (purpose != "MANAGEMENT_TERMINATION" or authority.get("mode") != "HOST_LOCAL" or payload.get("reloadHome") is not True or
+    termination = payload.get("terminateAfterReloadUnknown")
+    if payload.get("reloadHome") or termination:
+        if (purpose != "MANAGEMENT_TERMINATION" or authority.get("mode") != "HOST_LOCAL" or
                 payload.get("attempt") or payload.get("candidate") or not route or
                 not re.fullmatch(r"https://chatgpt\.com/g/" + route[1] + r"(?:-[^/?#]+)?/project/?", target["url"], re.I)):
+            return deny("PHYSICAL_TARGET_HOME_RELOAD_UNAUTHORIZED")
+        if termination and payload.get("reloadHome") or not termination and payload.get("reloadHome") is not True:
             return deny("PHYSICAL_TARGET_HOME_RELOAD_UNAUTHORIZED")
         if cfg.get("lifecycle", {}).get("draftPolicy") != "discard":
             return deny("PHYSICAL_TARGET_HOME_RELOAD_DRAFT_PROTECTED")
         if any(item.get("pageTargetId") == target["targetId"] or item.get("targetId") == target["targetId"] for item in
                [*(reg.get("chats") or {}).values(), *(rt.get("tasks") or {}).values(), *(rt.get("sessions") or {}).values()]):
             return deny("PHYSICAL_TARGET_REFERENCED")
+    if termination:
+        predecessor = module.page_termination_predecessor(state, target, termination)
+        latest = module.page_termination_latest(state, target)
+        intent = payload.get("terminationIntent")
+        if latest and (latest["outcome"] is not None or latest.get("predecessor") != predecessor or not isinstance(intent, dict) or
+                       any(intent.get(key) != latest["reference"][key] for key in ("path", "sha256", "bytes"))):
+            return deny("PAGE_TERMINATION_ALREADY_ATTEMPTED")
+        return {"allowed": True, "reason": "EXPLICIT_HOME_TERMINATION", "target": target, "predecessor": predecessor,
+                "rendererStateVerified": False, "deliveryProven": False, "remoteExecutionStopped": False}
     latest = delivery_attempt_module().page_release_latest(state, target)
     if latest and latest["outcome"] != "REFUSED":
         intent = payload.get("releaseIntent")
@@ -5300,6 +5312,8 @@ def main():
                 value["resourceRelease"] = page_resource_decision(db, state, payload)
         elif command == "page-release-record":
             payload = json.load(sys.stdin)
+            if payload.get("terminateAfterReloadUnknown"):
+                raise ValueError("PAGE_TERMINATION_SEPARATE_INTENT_REQUIRED")
             phase = payload.get("phase")
             target = payload.get("resourceTarget")
             if phase == "INTENT":
@@ -5315,6 +5329,22 @@ def main():
                 if not identity or target.get("accountId") != account_id(identity) or origin and origin != target["accountId"] or not origin and os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
                     raise ValueError("PAGE_RELEASE_ORIGIN_MISMATCH")
             value = delivery_attempt_module().page_release_record(state, target, phase, payload.get("data") or {}, payload.get("releaseIntent"))
+            db.commit()
+        elif command == "page-termination-record":
+            payload = json.load(sys.stdin)
+            phase, target = payload.get("phase"), payload.get("resourceTarget")
+            if phase == "INTENT":
+                begin_immediate(db)
+                decision = page_resource_decision(db, state, payload)
+                if not payload.get("terminateAfterReloadUnknown") or not decision["allowed"]:
+                    raise ValueError(decision["reason"])
+            else:
+                identity = (registry(db).get("accounts", {}).get(payload.get("account")) or {}).get("identity")
+                origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+                if not identity or target.get("accountId") != account_id(identity) or origin and origin != target["accountId"] or not origin and os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+                    raise ValueError("PAGE_RELEASE_ORIGIN_MISMATCH")
+            value = delivery_attempt_module().page_termination_record(state, target, payload.get("terminateAfterReloadUnknown"), phase,
+                                                                       payload.get("data") or {}, payload.get("terminationIntent"))
             db.commit()
         elif command == "page-release-status":
             payload = json.load(sys.stdin)

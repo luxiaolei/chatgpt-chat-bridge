@@ -28,7 +28,7 @@ async function fixture(change=()=>{}) {
     e=>e.message==='page budget reached',async()=>f.spaces||[{id:9,name:'managed',profileId:'P1',ownership:'agent',createdBy:'agent'}],
     (_command,kind)=>kind==='registry'?reg:{tasks:{},sessions:{}},(command,payload)=>{
       if(command==='page-allocation-record'){f.realCoordinated?.(command,payload);f.records.push({phase:payload.phase,data:payload.data,requestId:payload.requestId});return {path:'allocation',sha256:'hash',bytes:1};}
-      if(command==='page-release-record'){f.releases.push(structuredClone(payload));if(payload.phase==='INTENT'){f.intentPersisted=true;f.afterIntent?.();}return {path:'intent',sha256:'hash',bytes:1};}
+      if(command==='page-release-record'||command==='page-termination-record'){f.releases.push(structuredClone({command,...payload}));if(f.intentError&&payload.phase==='INTENT')throw f.intentError;if(payload.phase==='INTENT'){f.intentPersisted=true;f.afterIntent?.();}return {path:'intent',sha256:'hash',bytes:1};}
       const referenced=Object.values(reg.chats).some(c=>c.page==='p9');
       return {...f.context,resourceRelease:{allowed:!referenced&&!f.denied&&payload.resourceTarget.profileId==='P1',reason:'PROTECTED'}};
     },()=>home.match(/g-p-[a-f0-9]{32}/)[0],
@@ -105,6 +105,41 @@ test('reload timeout or any later guard failure fences the exact target without 
     assert.equal(x.f.reloaded,1);assert.equal(x.f.closed,0);assert.equal(x.f.created,0);
     assert.deepEqual(x.f.releases.map(r=>r.phase),['INTENT','UNKNOWN']);
     assert.equal(x.f.releases[1].data.reloadAttempted,true);assert.equal(x.f.releases[1].data.closeAttempted,false);
+  }
+});
+const reloadUnknown={path:'/private/001-UNKNOWN.json',sha256:'a'.repeat(64)};
+test('explicit termination uses only captured browser metadata and a distinct intent before one close',async()=>{
+  const x=await fixture(f=>{f.urlError=Error('renderer unresponsive');f.loginError=Error('renderer unresponsive');f.stateError=Error('renderer unresponsive');});
+  const result=await x.api.releaseManagementPage(x.reg,'P','a','managed','p9','exact-native-target',true,false,reloadUnknown);
+  assert.equal(result.rendererStateVerified,false);assert.equal(result.remoteExecutionStopped,false);assert.equal(result.deliveryProven,false);
+  assert.equal(x.f.closed,1);assert.equal(x.f.reloaded,0);assert.equal(x.f.created,0);assert.equal(x.f.urlReads||0,0);assert.equal(x.f.logins||0,0);
+  assert.deepEqual(x.f.releases.map(r=>[r.command,r.phase]),[['page-termination-record','INTENT'],['page-termination-record','RELEASED']]);
+  assert.deepEqual(x.f.releases[0].terminateAfterReloadUnknown,reloadUnknown);
+});
+test('termination rejects failed exclusive intent and fresh identity/reference drift before any close',async()=>{
+  for(const patch of [f=>{f.intentError=Error('exclusive intent exists');},f=>{f.denied=true;},f=>{f.nativeResponse={targetInfos:[]};},
+    f=>{f.nativeResponse={targetInfos:[{targetId:'exact-native-target',type:'page',url:'https://chatgpt.com/'}]};},
+    f=>{f.afterIntent=()=>{f.denied=true;};},f=>{f.afterIntent=()=>{f.reg.chats.current={page:'p9'};};},
+    f=>{f.afterIntent=()=>{f.tab.targetId='replacement';};},f=>{f.afterIntent=()=>{f.spaces=[{id:9,name:'managed',profileId:'changed',ownership:'agent',createdBy:'agent'}];};},
+    f=>{f.afterIntent=()=>{f.nativeResponse={targetInfos:[]};};}]) {
+    const x=await fixture(patch);
+    await assert.rejects(()=>x.api.releaseManagementPage(x.reg,'P','a','managed','p9','exact-native-target',true,false,reloadUnknown));
+    assert.equal(x.f.closed,0);assert.equal(x.f.reloaded,0);assert.equal(x.f.urlReads||0,0);
+  }
+  const conflict=await fixture();
+  await assert.rejects(()=>conflict.api.releaseManagementPage(conflict.reg,'P','a','managed','p9','exact-native-target',true,true,reloadUnknown),/RELOAD_CONFLICT/);
+  assert.equal(conflict.f.releases.length,0);
+});
+test('termination requires exact close ACK plus native and Space disappearance; any uncertainty records UNKNOWN',async()=>{
+  for(const patch of [f=>{f.closeError=Error('ACK lost');},f=>{f.closeResponse={success:false};},
+    f=>{f.nativeResponse={targetInfos:[{targetId:'exact-native-target',type:'page',url:home}]};},
+    f=>{f.spaceRetained=true;},f=>{f.nativeAfterCloseError=true;}]) {
+    const x=await fixture(patch);
+    if(x.f.nativeAfterCloseError){const cdp=x.task.cdp;x.task.cdp=async(...args)=>{if(x.f.closed&&args[0]==='Target.getTargets')throw Error('inventory unreadable');return cdp(...args);};}
+    if(x.f.spaceRetained){const tabs=x.task.tabs;x.task.tabs=async()=>x.f.closed?[x.f.tab]:tabs();}
+    await assert.rejects(()=>x.api.releaseManagementPage(x.reg,'P','a','managed','p9','exact-native-target',true,false,reloadUnknown),e=>e.allocationState==='UNKNOWN');
+    assert.equal(x.f.closed,1);assert.equal(x.f.reloaded,0);assert.deepEqual(x.f.releases.map(r=>r.phase),['INTENT','UNKNOWN']);
+    assert.equal(x.f.releases.at(-1).data.closeAttempted,true);
   }
 });
 test('native inventory must confirm the captured target before close and only an explicit success acknowledges close',async()=>{
