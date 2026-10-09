@@ -105,3 +105,30 @@ test('a newly allocated completed target can be released while old unbound UNKNO
     assert.equal(f.rawOperation(old.operationId),original);
   }finally{await rm(f.root,{recursive:true,force:true});}
 });
+
+test('direct scope fences end only at a certain refusal, recorded handoff or confirmed release',async()=>{
+ const f=await fixture();try{
+  const data={allocationOrdinal:1,project:'P',account:'a',accountId:scope,spaceId:9,spaceName:'managed',profileId:'P1',projectUrl:home};
+  const record=(requestId,phase,value=data)=>f.call('page-allocation-record',{requestId,phase,data:value});
+  record('refused','ALLOCATION_INTENT');record('refused','ALLOCATION_REFUSED');
+  record('owned','ALLOCATION_INTENT');const allocated={...data,page:'p9',targetId:'target-one'};record('owned','PAGE_ALLOCATED',allocated);
+  assert.notEqual(f.run('page-allocation-record',{requestId:'next',phase:'ALLOCATION_INTENT',data}).status,0);
+  record('owned','PAGE_HANDED_OFF',allocated);record('next','ALLOCATION_INTENT');record('next','ALLOCATION_REFUSED');
+  record('retained','ALLOCATION_INTENT');record('retained','PAGE_ALLOCATED',{...allocated,targetId:'target-two'});
+  record('retained','PAGE_RELEASE_UNKNOWN',{...allocated,targetId:'target-two',closeAttempted:false,state:'RETAINED'});
+  assert.notEqual(f.run('page-allocation-record',{requestId:'after-retained',phase:'ALLOCATION_INTENT',data}).status,0);
+  const payload={...f.payload,resourceTarget:{...f.target,targetId:'target-two'}};
+  const intent=f.call('page-release-record',{...payload,phase:'INTENT'});f.call('page-release-record',{...payload,releaseIntent:intent,phase:'RELEASED',data:{closeAttempted:true,closeAcknowledged:true,targetAbsent:true}});
+  record('after-retained','ALLOCATION_INTENT');
+ }finally{await rm(f.root,{recursive:true,force:true});}
+});
+
+test('direct journal rejects dot path components without creating stage files',async()=>{
+ const f=await fixture();try{
+  const data={allocationOrdinal:1,project:'P',account:'a',accountId:scope,spaceId:9,spaceName:'managed',profileId:'P1',projectUrl:home};
+  for(const requestId of ['.','..']) {
+   const r=f.run('page-allocation-record',{requestId,phase:'ALLOCATION_INTENT',data});assert.notEqual(r.status,0);assert.match(r.stderr,/PAGE_ALLOCATION_REQUEST_INVALID/);
+  }
+  await assert.rejects(stat(path.join(f.state,'page-allocations')),e=>e.code==='ENOENT');
+ }finally{await rm(f.root,{recursive:true,force:true});}
+});

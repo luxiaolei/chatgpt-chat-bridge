@@ -17,7 +17,7 @@ const out=mkdtempSync(path.join(process.env.TMPDIR||'/tmp','bridge-controller-pl
 mkdirSync(out,{recursive:true,mode:0o700});chmodSync(out,0o700);
 const source=readFileSync(path.join(repo,'src/main.js'),'utf8');
 const section=(start,end)=>{const a=source.indexOf(start),z=source.indexOf(end,a);assert(a>=0&&z>a);return source.slice(a,z);};
-const code='const allocateManagedPage=(t)=>t.newPage(); const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+section('function managedSpacePlan','\nasync function accountManagedTask')+
+const code='const handoffAllocatedPage=async()=>{};const allocateManagedPage=(t)=>t.newPage(); const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+section('function managedSpacePlan','\nasync function accountManagedTask')+
  section('async function overflowManagedTask','\nasync function newManagedPage')+
  section('async function reattachTask','\nasync function observeOperation');
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;

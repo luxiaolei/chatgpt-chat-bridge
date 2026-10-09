@@ -4717,9 +4717,11 @@ def page_resource_decision(db, state, payload):
             continue
         if same_space(chat) and chat.get("page") == target["page"] or chat.get("url") == target["url"] and "/c/" in target["url"]:
             return deny("PHYSICAL_TARGET_REFERENCED")
-    linked = [t for t in (rt.get("tasks") or {}).values() if registered and t.get("sessionId") == registered.get("id")]
+    linked = [t for t in (rt.get("tasks") or {}).values() if registered and (t.get("sessionId") == registered.get("id") or
+              not t.get("sessionId") and t.get("project") == project and t.get("role") == registered.get("role") and
+              (not t.get("account") or (reg.get("accounts", {}).get(t["account"]) or {}).get("identity") == identity))]
     if registered:
-        if (registered.get("page") != target["page"] or not same_space(registered) or not linked or
+        if (registered.get("page") != target["page"] or not same_space(registered) or not any(t.get("sessionId") == registered["id"] for t in linked) or
                 rt.get("sessions", {}).get(registered["id"], {}).get("watchdogPausedForUserControl") or
                 management_mode(db, project, task_workgroup(registered))["mode"] in {"PAUSED", "DRAINING"} or
                 any(t.get("project") != project or t.get("account") != alias or str(t.get("status") or "").upper() not in TERMINAL - {"BLOCKED"} or
@@ -5303,6 +5305,7 @@ def main():
             latest = delivery_attempt_module().page_release_latest(state, target)
             value = {"phase": (latest["outcome"] or "INTENT") if latest else None, "readOnly": True}
         elif command == "page-allocation-record":
+            begin_immediate(db)
             payload = json.load(sys.stdin)
             data = payload.get("data") or {}
             origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
@@ -5310,6 +5313,7 @@ def main():
             if not identity or data.get("accountId") != account_id(identity) or origin and account_id(identity) != origin or not origin and os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
                 raise ValueError("PAGE_ALLOCATION_ORIGIN_MISMATCH")
             value = delivery_attempt_module().direct_allocation_record(state, payload.get("requestId"), payload.get("phase"), data)
+            db.commit()
         elif command == "delivery-admission":
             context = json.load(sys.stdin)
             row = delivery_attempt_module().verify_current(state, db, context)

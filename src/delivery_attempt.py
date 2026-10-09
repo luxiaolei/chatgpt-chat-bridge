@@ -266,15 +266,71 @@ def page_release_record(state, target, phase, data, intent=None):
         "deliveryProven": False, "remoteExecutionStopped": False, "retryAuthorized": False})
 
 
+def direct_allocation_scope(state, data, create=False):
+    scope = {key: data[key] for key in ("accountId", "profileId", "spaceId")}
+    root = private_directory(pathlib.Path(state).resolve() / "page-allocations", create=create)
+    return private_directory(root / hashlib.sha256(encoded(scope)).hexdigest(), create=create)
+
+
+def direct_allocation_guard(state, data):
+    try:
+        directory = direct_allocation_scope(state, data)
+    except FileNotFoundError:
+        return
+    # shortcut: scan receipts in this physical scope; index if admission becomes slow.
+    for request in directory.iterdir():
+        private_directory(request)
+        for intent in request.glob("01-ALLOCATION_INTENT-*.json"):
+            raw, ref = read_capture(intent)
+            record = json.loads(raw)
+            ordinal = record["data"]["allocationOrdinal"]
+            if (not ref["captureStable"] or record.get("format") != "chat-bridge-page-allocation-v1" or
+                    record.get("requestId") != request.name or record.get("phase") != "ALLOCATION_INTENT" or
+                    type(ordinal) is not int or not 1 <= ordinal <= 128 or intent.name != f"01-ALLOCATION_INTENT-{ordinal:03d}.json"):
+                raise ValueError("PAGE_ALLOCATION_EVIDENCE_INVALID")
+            finished = False
+            for phase, number in (("ALLOCATION_REFUSED", "02"), ("PAGE_RELEASED", "81"), ("PAGE_HANDED_OFF", "05")):
+                path = request / f"{number}-{phase}-{ordinal:03d}.json"
+                if path.exists():
+                    raw, saved = read_capture(path)
+                    value = json.loads(raw)
+                    if (not saved["captureStable"] or value.get("format") != record["format"] or value.get("requestId") != record["requestId"] or value.get("phase") != phase or
+                            any(value.get("data", {}).get(k) != record["data"].get(k) for k in ("accountId", "profileId", "spaceId", "allocationOrdinal"))):
+                        raise ValueError("PAGE_ALLOCATION_EVIDENCE_INVALID")
+                    finished = True
+            if not finished:
+                allocated = request / f"03-PAGE_ALLOCATED-{ordinal:03d}.json"
+                if allocated.exists():
+                    raw, saved = read_capture(allocated)
+                    target = json.loads(raw).get("data") or {}
+                    latest = page_release_latest(state, target) if saved["captureStable"] and target.get("targetId") else None
+                    finished = latest and latest["outcome"] == "RELEASED"
+                if not finished:
+                    raise ValueError("PAGE_ALLOCATION_UNRESOLVED: " + record["requestId"])
+
+
 def direct_allocation_record(state, request, phase, data):
-    if not isinstance(request, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", request):
+    if not isinstance(request, str) or request in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", request):
         raise ValueError("PAGE_ALLOCATION_REQUEST_INVALID")
-    phases = {"ALLOCATION_INTENT": "01", "ALLOCATION_REFUSED": "02", "PAGE_ALLOCATED": "03", "ALLOCATION_UNKNOWN": "04", "PAGE_RELEASE_INTENT": "80", "PAGE_RELEASED": "81", "PAGE_RELEASE_UNKNOWN": "82"}
+    phases = {"ALLOCATION_INTENT": "01", "ALLOCATION_REFUSED": "02", "PAGE_ALLOCATED": "03", "ALLOCATION_UNKNOWN": "04", "PAGE_HANDED_OFF": "05", "PAGE_RELEASE_INTENT": "80", "PAGE_RELEASED": "81", "PAGE_RELEASE_UNKNOWN": "82"}
     ordinal = data.get("allocationOrdinal")
     if phase not in phases or type(ordinal) is not int or not 1 <= ordinal <= 128:
         raise ValueError("PAGE_ALLOCATION_PHASE_INVALID")
-    root = private_directory(pathlib.Path(state).resolve() / "page-allocations", create=True)
+    if phase == "ALLOCATION_INTENT":
+        direct_allocation_guard(state, data)
+    root = direct_allocation_scope(state, data, create=True)
     directory = private_directory(root / request, create=True)
+    if phase != "ALLOCATION_INTENT":
+        raw, saved = read_capture(directory / f"01-ALLOCATION_INTENT-{ordinal:03d}.json")
+        intent = json.loads(raw)
+        if (not saved["captureStable"] or intent.get("requestId") != request or
+                any(intent.get("data", {}).get(k) != data.get(k) for k in ("allocationOrdinal", "project", "account", "accountId", "spaceId", "spaceName", "profileId", "projectUrl"))):
+            raise ValueError("PAGE_ALLOCATION_INTENT_CHANGED")
+        if phase == "PAGE_HANDED_OFF" or phase.startswith("PAGE_RELEASE"):
+            raw, saved = read_capture(directory / f"03-PAGE_ALLOCATED-{ordinal:03d}.json")
+            allocated = json.loads(raw)
+            if not saved["captureStable"] or any(allocated.get("data", {}).get(k) != data.get(k) for k in ("page", "targetId")):
+                raise ValueError("PAGE_ALLOCATION_TARGET_CHANGED")
     return write_once(directory / f"{phases[phase]}-{phase}-{ordinal:03d}.json", {
         "format": "chat-bridge-page-allocation-v1", "requestId": request, "phase": phase,
         "recordedAt": datetime.now(timezone.utc).isoformat(), "data": data})
@@ -283,9 +339,9 @@ def direct_allocation_record(state, request, phase, data):
 def owns_direct_allocation(state, target):
     try:
         request, ordinal = target["requestId"], target["allocationOrdinal"]
-        if not isinstance(request, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", request) or type(ordinal) is not int or not 1 <= ordinal <= 128:
+        if not isinstance(request, str) or request in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", request) or type(ordinal) is not int or not 1 <= ordinal <= 128:
             return False
-        root = private_directory(pathlib.Path(state).resolve() / "page-allocations")
+        root = direct_allocation_scope(state, target)
         directory = private_directory(root / request)
         raw, saved = read_capture(directory / f"03-PAGE_ALLOCATED-{ordinal:03d}.json")
         record = json.loads(raw)

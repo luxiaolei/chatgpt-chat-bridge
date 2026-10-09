@@ -6,6 +6,7 @@ const FORMAT='chat-bridge-delivery-attempt-v1';
 const sha=value=>crypto.createHash('sha256').update(value).digest('hex');
 const phases=new Map([
   ['ALLOCATION_INTENT','01'],['ALLOCATION_REFUSED','02'],['PAGE_ALLOCATED','03'],['ALLOCATION_UNKNOWN','04'],
+  ['PAGE_HANDED_OFF','05'],
   ['PAGE_RELEASE_INTENT','80'],['PAGE_RELEASED','81'],['PAGE_RELEASE_UNKNOWN','82'],
   ['DRAFT_BACKUP','15'],['DRAFT_DISCARD_INTENT','17'],['DRAFT_DISCARDED','18'],
   ['TARGET_OBSERVED','10'],['BEFORE_INPUT','20'],['INPUT_VERIFIED','30'],

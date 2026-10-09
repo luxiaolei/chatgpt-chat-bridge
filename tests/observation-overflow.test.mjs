@@ -59,7 +59,7 @@ async function fixture(change={}){
     sameConversationUrl:globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,
     projectKey:value=>value.match(/g-p-[0-9a-f]{32}/)?.[0],recoveryRequired:globalThis.__CHAT_BRIDGE_SESSION_POLICY__.recoveryRequired,
     contextExhausted:globalThis.__CHAT_BRIDGE_SESSION_POLICY__.contextExhausted};
-  const code='const allocateManagedPage=(t)=>t.newPage();'+section('function normalizeRuntime','\nconst CAPACITY_WAIT_STATUS')+'\n'+section('function managedSpacePlan','\nasync function accountManagedTask')+'\n'+
+  const code='const cleanupAllocatedPage=async(_r,_t,p,v)=>closeEmptyPage(p,await p.url(),v);const handoffAllocatedPage=async()=>{};const allocateManagedPage=(t)=>t.newPage();'+section('function normalizeRuntime','\nconst CAPACITY_WAIT_STATUS')+'\n'+section('function managedSpacePlan','\nasync function accountManagedTask')+'\n'+
     section('async function overflowManagedTask','\nasync function newManagedPage')+'\n'+section('async function closeEmptyPage','\nasync function nativeSubmissionWitness')+'\n'+section('async function observeOperation','\nasync function ensurePage');
   const observe=await new AsyncFunction(...Object.keys(values),code+';return observeOperation;')(...Object.values(values));
   const before=structuredClone({reg,runtime,operation});

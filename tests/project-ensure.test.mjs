@@ -10,7 +10,7 @@ function extract(name,nextName){
   const start=source.indexOf("async function "+name);
   const end=source.indexOf("\nasync function "+nextName,start);
   assert.ok(start>=0 && end>start,name);
-  return (name==="ensureProjectLocation"?"const cleanupFailedAllocation=async()=>{};\n":"")+source.slice(start,end);
+  return (name==="ensureProjectLocation"?"const handoffAllocatedPage=async()=>{};const cleanupFailedAllocation=async()=>{};\n":"")+source.slice(start,end);
 }
 
 test("Project Ensure is conservative until create+confirm and records real binding", async()=>{

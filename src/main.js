@@ -472,6 +472,7 @@ async function repairProjectObservation(reg, project, account, binding) {
   SPACE_CATALOG.recordSpace(reg,{name:selected.spaceName,spaceId:task.spaceId,identity,
     accountName:session.name||accountName,profileId:selected.profileId,ownership:info?.ownership||"agent",urls:[binding.projectUrl]});
   await saveRegistry(reg);
+  await handoffAllocatedPage(page);
   return {task,page};
   } catch(error) { await cleanupFailedAllocation(reg,task,page,error); throw error; }
 }
@@ -578,8 +579,14 @@ async function allocateManagedPage(task,binding,project,account) {
   }
   return page;
 }
+async function handoffAllocatedPage(page) {
+  const allocation=pageAllocations.get(page);
+  if(!allocation) return;
+  await recordAllocationStage("PAGE_HANDED_OFF",allocation);
+  pageAllocations.delete(page);
+}
 
-async function releasePhysicalPage(reg,task,page,payload) {
+async function releasePhysicalPage(reg,task,page,payload,beforeClose=null) {
   const target=payload.resourceTarget;
   const verify=async()=>{
     const tab=(await task.tabs()).find(tab=>tab.label===target.page);
@@ -589,7 +596,8 @@ async function releasePhysicalPage(reg,task,page,payload) {
     const spaces=(await listTaskSpaces()).filter(space=>Number(space.id)===Number(task.spaceId));
     if(spaces.length!==1 || spaces[0].name!==target.spaceName || spaces[0].profileId!==target.profileId ||
       spaces[0].ownership!=="agent" || spaces[0].createdBy!=="agent") throw new Error("PAGE_RELEASE_SPACE_CHANGED");
-    const decision=coordinated("page-reclaim-context",payload).resourceRelease;
+    const context=coordinated("page-reclaim-context",payload),decision=context.resourceRelease;
+    if(payload.candidate && context.sessionRefs.includes(payload.candidate.id)) throw new Error("PAGE_RELEASE_EXECUTION_PROTECTED");
     if(!decision?.allowed) throw new Error(decision?.reason||"PAGE_RELEASE_PERMISSION_MISSING");
   };
   await verify();
@@ -598,6 +606,7 @@ async function releasePhysicalPage(reg,task,page,payload) {
   let closeAttempted=false;
   try {
     if(pageAllocations.has(page)) await recordAllocationStage("PAGE_RELEASE_INTENT",{...pageAllocations.get(page),url:target.url,releaseIntent:intent});
+    if(beforeClose) await beforeClose();
     if(/^(about:blank|chrome:\/\/newtab\/?)$/i.test(target.url)) {
       if(target.purpose!=="ORPHAN_IDLE" && (target.purpose!=="OWNED_TEMPORARY" || !pageAllocations.has(page))) throw new Error("PAGE_RELEASE_NEUTRAL_UNOWNED");
       if(!await page.evaluate(()=>["about:blank","chrome://newtab/"].includes(location.href) &&
@@ -651,13 +660,13 @@ function assertPhysicalPageAvailable(reg,task,page,binding,account) {
     profileId:binding.profileId,spaceId:Number(task.spaceId),targetId:page.targetId}});
   if(status.phase && status.phase!=="REFUSED") throw new Error("PAGE_TARGET_RELEASE_FENCED");
 }
-async function cleanupAllocatedPage(reg,task,page) {
+async function cleanupAllocatedPage(reg,task,page,beforeClose=null) {
   const allocation=pageAllocations.get(page);
   if(!allocation || sendAttempted || Number(task.spaceId)!==Number(allocation.spaceId)) return false;
   const payload=physicalReleasePayload(reg,task,page,allocation,allocation.project,allocation.account,"OWNED_TEMPORARY");
   Object.assign(payload.resourceTarget,{url:await page.url(),allocatedHere:true,requestId:allocation.requestId,
     allocationOrdinal:allocation.allocationOrdinal,projectUrl:allocation.projectUrl});
-  await releasePhysicalPage(reg,task,page,payload);
+  await releasePhysicalPage(reg,task,page,payload,beforeClose);
   try { await recordAllocationStage("PAGE_RELEASED",{...allocation,url:payload.resourceTarget.url}); }
   catch(error) { error.allocationState="UNKNOWN"; throw error; }
   pageAllocations.delete(page);
@@ -769,7 +778,7 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
     const fresh=(await task.tabs()).find(t=>t.label===candidate.page);
     if(!fresh || fresh.openedBy!=="agent" || !sameConversationUrl(fresh.url,candidate.url,targetProject)) continue;
     const context=coordinated("page-reclaim-context",reclaimContext);
-    if(context.sessionRefs.includes(candidate.id) || (!context.resourceRelease?.allowed &&
+    if(context.resourceRelease?.allowed===false || context.sessionRefs.includes(candidate.id) || (!context.resourceRelease?.allowed &&
        (context.unboundAny || context.unboundProjectIds.includes(targetProject))) ||
        context.resourceRelease?.allowed && (context.unboundAny || context.unboundProjectIds.includes(targetProject)) && discard) continue;
     if(!await assertInputSafe(page,reg.accounts[account].identity,candidate.url,{discardDraft:!!discard,reclaim:true}).catch(error=>{
@@ -782,7 +791,7 @@ async function reclaimIdlePageSlot(reg, project, account, task, binding, exclude
       !closing || closing.approvalRequired!==false || closing.generating!==false || !composerIsEmpty(closing) ||
       !sameConversationUrl(closing.url,candidate.url,targetProject) || imageSessionOccupancy(reg,candidate).occupied) continue;
     const guarded=coordinated("page-reclaim-context",reclaimContext);
-    if(guarded.sessionRefs.includes(candidate.id) || (!guarded.resourceRelease?.allowed &&
+    if(guarded.resourceRelease?.allowed===false || guarded.sessionRefs.includes(candidate.id) || (!guarded.resourceRelease?.allowed &&
        (guarded.unboundAny || guarded.unboundProjectIds.includes(targetProject)))) continue;
     const spaces=(await listTaskSpaces()).filter(space=>Number(space.id)===Number(task.spaceId));
     if(spaces.length!==1 || spaces[0].name!==binding.spaceName || spaces[0].profileId!==binding.profileId ||
@@ -878,7 +887,7 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseC
     if(!blank && !composerIsEmpty(snapshot) && !discard) continue;
     if(!blank && await page.url()!==tab.url) continue;
     const context=reclaimContext=coordinated("page-reclaim-context",release);
-    if(hasUnplacedLiveTasks(blank?null:projectHomeId(tab.url)) || context.unboundAny || (blank?context.unboundProjectIds.length:context.unboundProjectIds.includes(projectHomeId(tab.url)))) continue;
+    if(context.resourceRelease?.allowed===false || hasUnplacedLiveTasks(blank?null:projectHomeId(tab.url)) || context.unboundAny || (blank?context.unboundProjectIds.length:context.unboundProjectIds.includes(projectHomeId(tab.url)))) continue;
     const fresh=(await task.tabs()).find(t=>t.label===page.label);
     if(!fresh || fresh.active || fresh.openedBy!=="agent" || fresh.url!==tab.url) continue;
     if(!blank) {
@@ -892,7 +901,7 @@ async function reclaimOrphanManagedPage(reg, task, binding, account=null, reuseC
     liveTasks=Object.values((await loadRuntime()).tasks||{}).filter(item=>activeTaskStatus(item.status));
     reclaimContext=coordinated("page-reclaim-context",release);
     const current=(await task.tabs()).find(t=>t.label===page.label);
-    if(hasUnplacedLiveTasks(blank?null:projectHomeId(tab.url)) || reclaimContext.unboundAny || (blank?reclaimContext.unboundProjectIds.length:reclaimContext.unboundProjectIds.includes(projectHomeId(tab.url))) ||
+    if(reclaimContext.resourceRelease?.allowed===false || hasUnplacedLiveTasks(blank?null:projectHomeId(tab.url)) || reclaimContext.unboundAny || (blank?reclaimContext.unboundProjectIds.length:reclaimContext.unboundProjectIds.includes(projectHomeId(tab.url))) ||
       !current || current.active || current.openedBy!=="agent" || current.url!==tab.url || await page.url()!==tab.url) continue;
     const spaces=(await listTaskSpaces()).filter(space=>Number(space.id)===Number(task.spaceId));
     if(spaces.length!==1 || spaces[0].name!==binding.spaceName || spaces[0].profileId!==binding.profileId ||
@@ -1055,7 +1064,7 @@ async function controlPage(reg, project, account=null) {
     for(const p of pages){ const u=await Promise.race([p.url(),new Promise(resolve=>setTimeout(()=>resolve(""),3000))]).catch(()=>""); if(u==="about:blank" || u==="chrome://newtab/"){ page=p; break; } }
   }
   if(!page) page=await newManagedPage(reg,project,account,task,binding,null,{allowOverflow:false});
-  binding.controlPage=page.label; await saveRegistry(reg); return {binding,task,page};
+  binding.controlPage=page.label; await saveRegistry(reg); await handoffAllocatedPage(page); return {binding,task,page};
 }
 async function accountPage(reg, account, project=null) {
   const names=(project?[project]:Object.keys(reg.projects)).filter(p=>reg.projects[p]?.bindings?.[account]);
@@ -1262,6 +1271,7 @@ async function reattachTask(reg, chat, taskId, options={}) {
         composerCount:snapshot.composerCount,composerRawText:snapshot.composerRawText,
         generating:snapshot.generating,approvalRequired:snapshot.approvalRequired}});
     reg.chats[chat.id]=committed.chat;
+    await handoffAllocatedPage(page);
     return {ok:true,sessionId:chat.id,controller:committed.controller,previous:old,
       spaceName:next.spaceName,page:next.page,messageSent:false,oldTabUntouched:true,resumeWatch:false};
   }
@@ -1270,6 +1280,7 @@ async function reattachTask(reg, chat, taskId, options={}) {
       profileId:next.profileId,attachmentEpoch:next.attachmentEpoch},
     accountIdentity:identity,expectedBinding,resumeWatch:options.resumeWatch===true});
   reg.chats[chat.id]=committed.chat;
+  await handoffAllocatedPage(page);
   const current=committed.task;
   const observed=await observeSession(next,page,current);
   await emitTaskEvent(current,"OBSERVATION_REATTACHED",{previous:old,spaceName:next.spaceName,page:next.page,resumeWatch:options.resumeWatch===true,messageSent:false});
@@ -1391,8 +1402,8 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
   if(allocated && snapshot.generating===false && snapshot.approvalRequired===false && composerIsEmpty(snapshot) &&
      snapshot.online===true && snapshot.pageWasDiscarded===false && !contextExhausted(snapshot) && !recoveryRequired(snapshot)) try {
     temporaryObservationPageCleanupCondition="UNSAFE_CLEANUP_PAGE";
-    const closed=await closeEmptyPage(page,scope.url,async afterSample=>{
-      if(!afterSample && await readLogin()!==identity) throw new Error("OPERATION_OBSERVATION_CLEANUP_SCOPE_CHANGED");
+    const closed=await cleanupAllocatedPage(reg,task,page,async()=>{
+      if(await readLogin()!==identity) throw new Error("OPERATION_OBSERVATION_CLEANUP_SCOPE_CHANGED");
       await assertUniquePage();
       const runtime=normalizeRuntime(stored("peek","runtime")), currentRegistry=stored("peek","registry");
       const spaceName=overflowTarget?.spaceName||binding.spaceName;
@@ -1409,6 +1420,7 @@ async function observeOperation(reg, operationId, candidate=null, pendingSession
   } catch(error) {
     temporaryObservationPageCleanupCondition=String(error.code||error.message||"CLEANUP_ERROR").slice(0,160);
   } // Retain this new page on uncertain cleanup; never close an existing worker/pending page.
+  if(allocated && temporaryObservationPageCleanupCondition==="UNSAFE_OBSERVATION") await handoffAllocatedPage(page);
   return {...(pendingSession?{...snapshot,role:reg.chats[pendingSession].role,status:"pending-rotation"}:{}),
     ok:true,format:"operation-native-observation-v1",operationId:scope.operationId,taskId:scope.taskId,
     project:scope.project,account:scope.account,accountId:scope.accountId,sessionRef:scope.sessionRef,
@@ -1497,7 +1509,7 @@ async function ensurePage(reg, chat, options={}) {
     throw new Error("CONVERSATION_REATTACH_FAILED: "+chat.role+" ("+chat.id+")");
   }
   chat.page=page.label; chat.pageTargetId=page.targetId; chat.spaceId=task.spaceId; chat.pageSpaceId=task.spaceId;
-  await saveRegistry(reg); return {task,page,binding};
+  await saveRegistry(reg); await handoffAllocatedPage(page); return {task,page,binding};
   } catch(error) {
     if(allocated) await cleanupFailedAllocation(reg,task,page,error);
     throw error;
@@ -3536,6 +3548,7 @@ async function ensureProjectLocation(reg, projectName, account, options={}) {
   b.verifiedAt=new Date().toISOString();
   await saveRegistry(reg);
   handedOff=true;
+  await handoffAllocatedPage(page);
   await touchRuntime(projectName,{activeAccount:account,spaceName,lastCommand:"project ensure"});
   const readiness=bindingExecutionReadiness(pr,b);
   return {ok:readiness.ready,status:readiness.ready?"READY":"CONTENT_NOT_READY",accessReady:true,
@@ -4636,6 +4649,7 @@ else if(cmd==="space" && ["scan","map","restore"].includes(args[1])){
           if(!item) throw new Error(`SPACE_NOT_RECORDED: ${name}`);
           if(item.identity!==login.id) throw new Error(`SPACE_ACCOUNT_CHANGED: ${name}`);
           verified=true;
+          if(probe) await handoffAllocatedPage(probe);
           const opened=[];
           for(const url of SPACE_CATALOG.missingProjectUrls(item,tabs.map(t=>t.url))){
             const alias=Object.keys(reg.accounts||{}).find(key=>reg.accounts[key].identity===login.id);
@@ -4643,6 +4657,7 @@ else if(cmd==="space" && ["scan","map","restore"].includes(args[1])){
             const next=await allocateManagedPage(task,{spaceName:name,profileId:info.profileId,projectUrl:url},null,alias);
             try { await next.goto(url); }
             catch(error) { await cleanupFailedAllocation(reg,task,next,error); throw error; }
+            await handoffAllocatedPage(next);
             opened.push(url);
           }
           results.push({space:name,account:item.account,verified:true,opened,alreadyOpen:item.projects.length-opened.length});
@@ -5048,6 +5063,7 @@ else if(cmd==="new"){
       resourceVerifiedAt:new Date().toISOString(),
       spaceName:binding.spaceName,spaceId:task.spaceId,pageSpaceId:task.spaceId,profileId:binding.profileId||null,page:page.label,pageTargetId:page.targetId,attachmentEpoch:1,createdAt:new Date().toISOString()};
     await saveRegistry(reg,{attempt,sessionId:id,messageSha256:crypto.createHash("sha256").update(first).digest("hex")});
+    await handoffAllocatedPage(page);
     await touchRuntime(p,{activeAccount:a,spaceName:binding.spaceName,lastCommand:"new",lastSession:id});
     print({...reg.chats[id],delivery,modelSelection:{
       model:applied.model||applied.observed?.model||null,

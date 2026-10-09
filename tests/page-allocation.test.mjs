@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
+import {readFile,mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+import {spawnSync} from 'node:child_process';
 import crypto from 'node:crypto';
 const source=await readFile('src/main.js','utf8'),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const start=source.indexOf('let pageAllocationOrdinal=0;'),end=source.indexOf('function samePhysicalSpace',start);
@@ -18,18 +21,18 @@ async function fixture(change=()=>{}) {
     cdp:async(method,params)=>{if(method==='Target.closeTarget'){assert.equal(params.targetId,'exact-native-target');f.closed++;if(f.closeError)throw f.closeError;f.gone=true;return {success:true};}return {targetInfos:f.gone?[]:[f.tab]};}};
   const ensureStart=source.indexOf('async function ensureProjectLocation'),ensureEnd=source.indexOf('\nasync function syncProject',ensureStart);
   const api=await new AsyncFunction('recordDeliveryStage','pageBudgetError','listTaskSpaces','stored','coordinated','projectHomeId','projectKey','assertInputSafe','state','composerIsEmpty','samePhysicalSpace','accountScope','opt','reg','crypto','projectRecord','accountManagedTask','openProjectPage','bindingFor','saveRegistry','touchRuntime','bindingExecutionReadiness','projectIdFromUrl',
-    'const globalThis={__CHAT_BRIDGE_DELIVERY_ATTEMPT__:'+(f.direct?'null':'{}')+'};let sendAttempted=false;const bindingObserved=()=>false;const newManagedPage=(_reg,p,a,t,b)=>allocateManagedPage(t,b,p,a);'+source.slice(start,end)+source.slice(ensureStart,ensureEnd)+';return {allocateManagedPage,cleanupAllocatedPage,cleanupFailedAllocation,ensureProjectLocation};')(
+    'const globalThis={__CHAT_BRIDGE_DELIVERY_ATTEMPT__:'+(f.direct?'null':'{}')+'};let sendAttempted=false;const bindingObserved=()=>false;const newManagedPage=(_reg,p,a,t,b)=>allocateManagedPage(t,b,p,a);'+source.slice(start,end)+source.slice(ensureStart,ensureEnd)+';return {allocateManagedPage,cleanupAllocatedPage,cleanupFailedAllocation,ensureProjectLocation,handoffAllocatedPage};')(
     async(phase,data)=>{f.records.push({phase,data:structuredClone(data)});if(f.recordError===phase)throw Error('disk write refused');},
     e=>e.message==='page budget reached',async()=>[{id:9,name:'managed',profileId:'P1',ownership:'agent',createdBy:'agent'}],
     (_command,kind)=>kind==='registry'?reg:{tasks:{},sessions:{}},(command,payload)=>{
-      if(command==='page-allocation-record'){f.records.push({phase:payload.phase,data:payload.data,requestId:payload.requestId});return {path:'allocation',sha256:'hash',bytes:1};}
+      if(command==='page-allocation-record'){f.realCoordinated?.(command,payload);f.records.push({phase:payload.phase,data:payload.data,requestId:payload.requestId});return {path:'allocation',sha256:'hash',bytes:1};}
       if(command==='page-release-record'){if(payload.phase==='INTENT'){f.intentPersisted=true;f.afterIntent?.();}return {path:'intent',sha256:'hash',bytes:1};}
       const referenced=Object.values(reg.chats).some(c=>c.page==='p9');
       return {...f.context,resourceRelease:{allowed:!referenced&&!f.denied,reason:'PROTECTED'}};
     },()=>home.match(/g-p-[a-f0-9]{32}/)[0],
     url=>url.match(/g-p-[a-f0-9]{32}/)?.[0],async()=>{f.logins=(f.logins||0)+1;},async()=>{f.afterState?.();return {...f.sample};},
     s=>s.composerCount===1&&s.composerRawText===''&&s.composerAttachmentsEmpty===true,
-    (a,b)=>a.spaceId===b.spaceId||a.spaceName===b.spaceName,()=> 'login-hash',()=>null,reg,crypto,
+    (a,b)=>a.spaceId===b.spaceId||a.spaceName===b.spaceName,()=>f.realScope||'login-hash',()=>null,reg,crypto,
     (r,p)=>r.projects[p],async()=>({task,spaceName:'managed',profileId:'P1'}),async()=>{if(f.projectFound)return home;throw Error('project not found');},
     (r,p,a)=>r.projects[p].bindings[a]||={},async()=>{},async()=>{if(f.runtimeError)throw f.runtimeError;},()=>({ready:true}),()=> 'g-p-'+'a'.repeat(32));
   return {...f,f,api,task};
@@ -85,4 +88,21 @@ test('registry handoff remains intact when the later runtime update fails',async
   const x=await fixture(f=>{f.direct=true;delete f.reg.projects.P.bindings.a;f.projectFound=true;f.runtimeError=Error('runtime unavailable');});
   await assert.rejects(()=>x.api.ensureProjectLocation(x.reg,'P','a',{}),/runtime unavailable/);
   assert.equal(x.reg.projects.P.bindings.a.controlPage,'p9');assert.equal(x.f.closed,0);
+});
+
+test('direct allocation cannot bypass an unknown physical scope across fresh VM invocations and new nonces',async()=>{
+ const root=await mkdtemp(path.join(tmpdir(),'bridge-allocation-vm-')),config=path.join(root,'config'),stateDir=path.join(root,'state');
+ await mkdir(config);await mkdir(stateDir);
+ const reg={accounts:{a:{identity:'one'},b:{identity:'one'}},projects:{P:{bindings:{a:{spaceName:'managed',spaceId:9,profileId:'P1',projectUrl:home}}}},chats:{}};
+ await writeFile(path.join(config,'registry.json'),JSON.stringify(reg));await writeFile(path.join(stateDir,'runtime.json'),JSON.stringify({tasks:{}}));
+ const scope=crypto.createHash('sha256').update('identity:one').digest('hex');
+ const real=(command,payload)=>{const r=spawnSync('python3',[path.resolve('src/coordinator.py'),command,config,stateDir],{encoding:'utf8',input:JSON.stringify(payload)});if(r.status)throw Error(r.stderr);return JSON.parse(r.stdout);};
+ try {
+  const first=await fixture(f=>{f.direct=true;f.realScope=scope;f.realCoordinated=real;f.creationError=Error('native create ACK unknown');});
+  await assert.rejects(()=>first.api.allocateManagedPage(first.task,first.binding,'P','a'),e=>e.allocationState==='UNKNOWN');assert.equal(first.f.created,1);
+  for(const alias of ['a','b']) {
+   const next=await fixture(f=>{f.direct=true;f.realScope=scope;f.realCoordinated=real;f.reg.accounts.b={identity:'one'};});
+   await assert.rejects(()=>next.api.allocateManagedPage(next.task,next.binding,'P',alias),/PAGE_ALLOCATION_UNRESOLVED/);assert.equal(next.f.created,0);
+  }
+ }finally{await rm(root,{recursive:true,force:true});}
 });

@@ -17,7 +17,7 @@ test("a successful page allocation cannot become a capacity wait when its state 
     const create=async()=>{created++;return page;};
     const primary={spaceId:1,newPage:async()=>{primaryCalls++;return mode==="primary"||mode==="reclaimed primary"&&primaryCalls===2?create():full();}};
     const head={spaceId:2,newPage:mode==="overflow"?create:full},next={spaceId:3,newPage:create};
-    const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError","const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{};\n"+code+";return newManagedPage;")(
+    const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError","const handoffAllocatedPage=async()=>{};const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{};\n"+code+";return newManagedPage;")(
       e=>/page budget reached/.test(e.message),async()=>{clears++;throw failure;},
       async(_r,_p,_a,t)=>mode==="reclaimed primary"&&t===primary?{}:null,async()=>null,
       async(_r,_p,_a,_b,reason)=>{reasons.push(reason);return {firstAt:Date.now()-121000,reason};},120,
@@ -38,7 +38,7 @@ test("an uncertain overflow allocation error cannot become a retryable capacity 
     const full=async()=>{throw Error("page budget reached");},primary={spaceId:1,newPage:full};
     const head={spaceId:2,newPage:async()=>{calls++;if(mode==="advanced overflow"||mode==="reclaimed overflow"&&calls===1)return full();throw failure;}};
     const next={spaceId:3,newPage:async()=>{calls++;throw failure;}};
-    const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError","const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{};\n"+code+";return newManagedPage;")(
+    const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError","const handoffAllocatedPage=async()=>{};const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{};\n"+code+";return newManagedPage;")(
       e=>/page budget reached/.test(e.message),()=>{throw Error("unexpected cleanup");},
       async(_r,_p,_a,t)=>mode==="reclaimed overflow"&&t===head?{}:null,async()=>null,
       async(_r,_p,_a,_b,reason)=>{reasons.push(reason);return {firstAt:Date.now()-121000,reason};},120,
@@ -71,7 +71,7 @@ test("normal allocation reuses the verified mapped pool before the expansion del
       if(mode==="UNKNOWN owner")available[1].ownership="unknown";
       let creates=0,saves=0,allocated=0;
       const tasks=new Map(available.map(s=>[s.id,{spaceId:s.id,name:s.name,newPage:async()=>{if(counts[s.id]>=8)throw Error("page budget reached (8/8)");counts[s.id]++;allocated++;return {label:"new-"+s.id};}}]));
-      const api=await new AsyncFunction("childProcess","CONFIG_DIR","STATE_DIR","STORE_PATH","stateBaselines","Date","crypto","slug","listTaskSpaces","taskSpace","taskAccounts","accountScope","saveRegistry","reclaimIdlePageSlot","reclaimOrphanManagedPage","const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{};\n"+code+";return {stored,loadRuntime,recordCapacityWait,newManagedPage};")(
+      const api=await new AsyncFunction("childProcess","CONFIG_DIR","STATE_DIR","STORE_PATH","stateBaselines","Date","crypto","slug","listTaskSpaces","taskSpace","taskAccounts","accountScope","saveRegistry","reclaimIdlePageSlot","reclaimOrphanManagedPage","const handoffAllocatedPage=async()=>{};const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{};\n"+code+";return {stored,loadRuntime,recordCapacityWait,newManagedPage};")(
         await import("node:child_process"),config,state,process.env.CHAT_BRIDGE_CAPACITY_TEST_STORE||path.resolve("src/state-store.py"),new WeakMap(),class extends Date{static now(){return 100000;}},
         await import("node:crypto"),x=>x,async()=>available,async id=>{const task=tasks.get(id)||[...tasks.values()].find(t=>t.name===id);if(!task){creates++;throw Error("unexpected Space creation");}return task;},new Map(),(r,a)=>r.accounts[a].identity,async()=>{saves++;},async()=>null,async()=>null);
       api.stored("get","runtime");
@@ -96,7 +96,7 @@ test("an explicitly budgeted second overflow is used only after safe reclaim fai
   for(const [budget,created] of [[1,false],[2,false],[2,true]]) {
     const calls=[],primary={spaceId:1,newPage:async()=>{throw Error("page budget reached");}};
     const full={spaceId:9,newPage:primary.newPage},next={spaceId:10,newPage:async()=>({label:"next"})};
-    const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError","const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{};\n"+code+";return newManagedPage;")(
+    const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError","const handoffAllocatedPage=async()=>{};const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{};\n"+code+";return newManagedPage;")(
       e=>/page budget reached/.test(e.message),async()=>calls.push("cleared"),
       async(_r,_p,_a,t)=>{calls.push("idle:"+t.spaceId);return null;},async(_r,t)=>{calls.push("orphan:"+t.spaceId);return null;},
       async()=>({firstAt:Date.now()-121000}),120,
@@ -144,7 +144,7 @@ test("a full verified overflow reclaims once in that Space before retrying alloc
   }};
   const binding={spaceName:"primary",spaceId:1},overflowBinding={spaceName:"overflow",spaceId:9};
   const calls=[];
-  const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError","const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{};\n"+code+";return newManagedPage;")(
+  const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError","const handoffAllocatedPage=async()=>{};const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{};\n"+code+";return newManagedPage;")(
     error=>error.message==="page budget reached",async()=>{cleared++;},
     async(_reg,_project,_account,task,target,exclude)=>{
       calls.push(["idle",task.spaceId,target.spaceId,exclude]);
@@ -178,7 +178,7 @@ test("overflow exhaustion keeps resource waiting without recursion or another re
     let allocations=0,selections=0,cleared=0;const calls=[],reasons=[];
     const primary={spaceId:1,newPage:async()=>{throw Error("page budget reached");}};
     const overflow={spaceId:9,newPage:async()=>{allocations++;if(mode==="orphan"&&allocations===2)return {label:"p9"};throw Error(mode==="non-budget error"?"connection lost":"page budget reached");}};
-    const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError","const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{};\n"+code+";return newManagedPage;")(
+    const allocate=await new AsyncFunction("pageBudgetError","clearCapacityWait","reclaimIdlePageSlot","reclaimOrphanManagedPage","recordCapacityWait","CAPACITY_OVERFLOW_AFTER_SEC","overflowManagedTask","capacityWaitError","const handoffAllocatedPage=async()=>{};const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{};\n"+code+";return newManagedPage;")(
       error=>error.message==="page budget reached",async()=>{cleared++;},
       async(_r,_p,_a,task)=>{calls.push(["idle",task.spaceId]);return task===overflow&&mode==="still full"?{}:null;},
       async(_r,task,_b,account)=>{assert.equal(account,"a");calls.push(["orphan",task.spaceId]);return task===overflow&&mode==="orphan"?{}:null;},

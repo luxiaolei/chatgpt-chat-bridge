@@ -46,7 +46,7 @@ PACE_SCOPE="$(python3 "$ROOT/src/web-preflight.py" scope "$CHAT_BRIDGE_CONFIG_DI
 export CHAT_BRIDGE_STATE_DIR="$TMP/concurrent-state"
 export CHAT_BRIDGE_FAKE_RELEASE_FILE="$TMP/release"
 echo "pacing phase: concurrent lock"
-"$ROOT/bin/chat-bridge" projects >/dev/null &
+"$ROOT/bin/chat-bridge" projects --account a >/dev/null &
 P1=$!
 for _ in {1..600}; do
   [[ -s "$LOG" ]] && break
@@ -54,7 +54,7 @@ for _ in {1..600}; do
 done
 [[ -s "$LOG" ]] || { echo "pacing fixture did not enter mock Ego" >&2; exit 1; }
 set +e
-CHAT_BRIDGE_LOCK_WAIT_SEC=0.5 "$ROOT/bin/chat-bridge" projects >/dev/null 2>"$TMP/concurrent.err"
+CHAT_BRIDGE_LOCK_WAIT_SEC=0.5 "$ROOT/bin/chat-bridge" space release --project P --account a --space Exact --page p1 --target-id Exact --confirm >/dev/null 2>"$TMP/concurrent.err"
 RC=$?
 set -e
 touch "$TMP/release"
