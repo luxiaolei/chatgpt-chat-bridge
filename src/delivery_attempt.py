@@ -235,7 +235,7 @@ def page_release_latest(state, target):
         outcome = json.loads(raw)
         if (value["outcome"] or not saved["captureStable"] or outcome.get("target") != value["target"] or
                 outcome.get("format") != "chat-bridge-page-release-v1" or outcome.get("phase") != phase or outcome.get("releaseOrdinal") != ordinal or
-                phase == "REFUSED" and outcome.get("data", {}).get("closeAttempted") is not False):
+                phase == "REFUSED" and (outcome.get("data", {}).get("closeAttempted") is not False or outcome.get("data", {}).get("reloadAttempted") is True)):
             raise ValueError("PAGE_RELEASE_EVIDENCE_INVALID")
         value["outcome"] = phase
     return value
@@ -244,7 +244,7 @@ def page_release_latest(state, target):
 def page_release_record(state, target, phase, data, intent=None):
     if phase not in {"INTENT", "RELEASED", "UNKNOWN", "REFUSED"}:
         raise ValueError("PAGE_RELEASE_PHASE_INVALID")
-    if phase == "REFUSED" and data.get("closeAttempted") is not False or phase == "RELEASED" and any(data.get(k) is not True for k in ("closeAttempted", "closeAcknowledged", "targetAbsent")):
+    if phase == "REFUSED" and (data.get("closeAttempted") is not False or data.get("reloadAttempted") is True) or phase == "RELEASED" and any(data.get(k) is not True for k in ("closeAttempted", "closeAcknowledged", "targetAbsent")):
         raise ValueError("PAGE_RELEASE_OUTCOME_INVALID")
     directory = page_release_directory(state, target, create=True)
     latest = page_release_latest(state, target)

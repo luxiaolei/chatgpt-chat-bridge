@@ -55,6 +55,48 @@ test('exact resource termination preserves legacy UNKNOWN; lost close ACK fences
     assert.equal(f.rawOperation(op.operationId),original);
   }finally{await rm(f.root,{recursive:true,force:true});}
 });
+test('home reload needs HOST_LOCAL, discard policy and an unreferenced exact Project home',async()=>{
+  const f=await fixture();try {
+    const payload={...f.payload,reloadHome:true};
+    assert.equal(f.call('page-reclaim-context',payload).resourceRelease.reason,'PHYSICAL_TARGET_HOME_RELOAD_DRAFT_PROTECTED');
+    const reg=structuredClone(f.registry);reg.projects.P.lifecycle={draftPolicy:'discard'};reg.managementAdmins=['owner'];f.put('registry',reg);
+    assert.equal(f.call('page-reclaim-context',payload).resourceRelease.allowed,true);
+    const web=spawnSync('python3',[coordinator,'page-reclaim-context',f.config,f.state],{encoding:'utf8',input:JSON.stringify({...payload,callerRef:'owner'}),env:{...process.env,CHAT_BRIDGE_FROM_ACCOUNT_ID:scope}});
+    assert.equal(web.status,0,web.stderr);assert.equal(JSON.parse(web.stdout).resourceRelease.reason,'PHYSICAL_TARGET_HOME_RELOAD_UNAUTHORIZED');
+    for(const patch of [{reloadHome:'yes'},{confirm:false},{candidate:{id:'missing'}},
+      {resourceTarget:{...f.target,url:home.replace('/project','/c/11111111-1111-4111-8111-111111111111')}},
+      {resourceTarget:{...f.target,profileId:'changed'}},{resourceTarget:{...f.target,purpose:'ORPHAN_IDLE'}}]) {
+      assert.equal(f.call('page-reclaim-context',{...payload,...patch}).resourceRelease.allowed,false);
+    }
+    for(const kind of ['chats','tasks','sessions']) {
+      if(kind==='chats'){const changed=structuredClone(reg);changed.chats.other={id:'other',pageTargetId:f.target.targetId,page:'other-label'};f.put('registry',changed);}
+      else f.put('runtime',{[kind]:{other:{pageTargetId:f.target.targetId,page:'other-label'}}});
+      assert.equal(f.call('page-reclaim-context',payload).resourceRelease.reason,'PHYSICAL_TARGET_REFERENCED');
+      f.put('registry',reg);f.put('runtime',{tasks:{}});
+    }
+    f.put('runtime',{tasks:{},projects:{P:{watchdogPausedForUserControl:true}}});
+    assert.equal(f.call('page-reclaim-context',payload).resourceRelease.reason,'PHYSICAL_TARGET_PAUSED');
+  }finally{await rm(f.root,{recursive:true,force:true});}
+});
+test('a reload intent preserves old UNKNOWN and an uncertain reload fences normal release and new recovery',async()=>{
+  const f=await fixture();try {
+    const op=f.call('submit',{requestId:'legacy-reload',callerRef:'owner',project:'P',account:'a',role:'worker',message:'synthetic'});f.call('work-one');
+    const raw=f.rawOperation(op.operationId),reg=structuredClone(f.registry);reg.projects.P.lifecycle={draftPolicy:'discard'};f.put('registry',reg);
+    const payload={...f.payload,reloadHome:true};
+    assert.notEqual(f.run('page-release-record',{...payload,phase:'INTENT',data:{reloadHome:false}}).status,0);
+    const intent=f.call('page-release-record',{...payload,phase:'INTENT',data:{reloadHome:true}});
+    assert.equal(f.call('page-reclaim-context',{...payload,releaseIntent:intent}).resourceRelease.allowed,true);
+    assert.equal(f.call('page-reclaim-context',{...f.payload,releaseIntent:intent}).resourceRelease.allowed,false);
+    assert.notEqual(f.run('page-release-record',{...payload,releaseIntent:intent,phase:'REFUSED',data:{closeAttempted:false,reloadAttempted:true}}).status,0);
+    f.call('page-release-record',{...payload,releaseIntent:intent,phase:'UNKNOWN',data:{closeAttempted:false,reloadAttempted:true}});
+    assert.equal(f.call('page-release-status',payload).phase,'UNKNOWN');
+    for(const next of [payload,f.payload]) {
+      assert.equal(f.call('page-reclaim-context',next).resourceRelease.allowed,false);
+      assert.notEqual(f.run('page-release-record',{...next,phase:'INTENT'}).status,0);
+    }
+    assert.equal(f.rawOperation(op.operationId),raw);
+  }finally{await rm(f.root,{recursive:true,force:true});}
+});
 test('ensure blocks replacement of a disappeared target after uncertain close but permits confirmed release or refusal',async()=>{
   const source=await readFile('src/main.js','utf8'),start=source.indexOf('async function ensurePage'),end=source.indexOf('\nfunction hashText',start),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
   for(const phase of ['INTENT','UNKNOWN','REFUSED','RELEASED']) {

@@ -11,12 +11,12 @@ const home='https://chatgpt.com/g/g-p-'+'a'.repeat(32)+'/project';
 async function fixture(change=()=>{}) {
   const binding={spaceName:'managed',spaceId:9,profileId:'P1',projectUrl:home};
   const reg={accounts:{a:{identity:'synthetic-login'}},projects:{P:{bindings:{a:binding}}},chats:{}};
-  const f={reg,binding,records:[],created:0,closed:0,context:{unboundAny:false,unboundProjectIds:[]},
-    tab:{label:'p9',targetId:'exact-native-target',url:home,openedBy:'agent'},
+  const f={reg,binding,records:[],releases:[],created:0,closed:0,reloaded:0,context:{unboundAny:false,unboundProjectIds:[]},
+    tab:{label:'p9',targetId:'exact-native-target',url:home,type:'page',openedBy:'agent'},
     sample:{url:home,generating:false,approvalRequired:false,composerCount:1,composerRawText:'',composerAttachmentsEmpty:true}};
   await change(f);
-  f.page={label:'p9',spaceId:9,targetId:f.pageTargetId??'exact-native-target',url:async()=>f.tab.url,
-    evaluate:async()=>true};
+  f.page={label:'p9',spaceId:9,targetId:f.pageTargetId??'exact-native-target',url:async()=>{f.urlReads=(f.urlReads||0)+1;if(f.urlError)throw f.urlError;return f.tab.url;},
+    evaluate:async()=>true,reload:async options=>{assert.deepEqual(options,{waitUntil:'domcontentloaded',timeout:20000});assert.equal(f.intentPersisted,true);f.reloaded++;await f.onReload?.();}};
   f.tab.page=f.page;
   const task={spaceId:9,tabs:async()=>f.gone?[]:[f.tab],newPage:async()=>{f.created++;assert.equal(f.records.at(-1).phase,'ALLOCATION_INTENT');if(f.creationError)throw f.creationError;return f.page;},
     page:()=>{f.lazyCalls=(f.lazyCalls||0)+1;throw Error('lazy label handle must not be used');},
@@ -25,14 +25,14 @@ async function fixture(change=()=>{}) {
   const api=await new AsyncFunction('recordDeliveryStage','pageBudgetError','listTaskSpaces','stored','coordinated','projectHomeId','projectKey','assertInputSafe','state','composerIsEmpty','samePhysicalSpace','accountScope','opt','reg','crypto','projectRecord','accountManagedTask','openProjectPage','bindingFor','saveRegistry','touchRuntime','bindingExecutionReadiness','projectIdFromUrl','taskSpace',
     'const globalThis={__CHAT_BRIDGE_DELIVERY_ATTEMPT__:'+(f.direct?'null':'{}')+'};let sendAttempted=false;const bindingObserved=()=>false;const newManagedPage=(_reg,p,a,t,b)=>allocateManagedPage(t,b,p,a);'+source.slice(start,end)+source.slice(ensureStart,ensureEnd)+';return {allocateManagedPage,cleanupAllocatedPage,cleanupFailedAllocation,ensureProjectLocation,handoffAllocatedPage,releaseManagementPage};')(
     async(phase,data)=>{f.records.push({phase,data:structuredClone(data)});if(f.recordError===phase)throw Error('disk write refused');},
-    e=>e.message==='page budget reached',async()=>[{id:9,name:'managed',profileId:'P1',ownership:'agent',createdBy:'agent'}],
+    e=>e.message==='page budget reached',async()=>f.spaces||[{id:9,name:'managed',profileId:'P1',ownership:'agent',createdBy:'agent'}],
     (_command,kind)=>kind==='registry'?reg:{tasks:{},sessions:{}},(command,payload)=>{
       if(command==='page-allocation-record'){f.realCoordinated?.(command,payload);f.records.push({phase:payload.phase,data:payload.data,requestId:payload.requestId});return {path:'allocation',sha256:'hash',bytes:1};}
-      if(command==='page-release-record'){if(payload.phase==='INTENT'){f.intentPersisted=true;f.afterIntent?.();}return {path:'intent',sha256:'hash',bytes:1};}
+      if(command==='page-release-record'){f.releases.push(structuredClone(payload));if(payload.phase==='INTENT'){f.intentPersisted=true;f.afterIntent?.();}return {path:'intent',sha256:'hash',bytes:1};}
       const referenced=Object.values(reg.chats).some(c=>c.page==='p9');
-      return {...f.context,resourceRelease:{allowed:!referenced&&!f.denied,reason:'PROTECTED'}};
+      return {...f.context,resourceRelease:{allowed:!referenced&&!f.denied&&payload.resourceTarget.profileId==='P1',reason:'PROTECTED'}};
     },()=>home.match(/g-p-[a-f0-9]{32}/)[0],
-    url=>url.match(/g-p-[a-f0-9]{32}/)?.[0],async()=>{f.logins=(f.logins||0)+1;},async()=>{f.afterState?.();return {...f.sample};},
+    url=>url.match(/g-p-[a-f0-9]{32}/)?.[0],async()=>{f.logins=(f.logins||0)+1;if(f.loginError)throw f.loginError;},async()=>{if(f.stateError)throw f.stateError;f.afterState?.();return {...f.sample};},
     s=>s.composerCount===1&&s.composerRawText===''&&s.composerAttachmentsEmpty===true,
     (a,b)=>a.spaceId===b.spaceId||a.spaceName===b.spaceName,()=>f.realScope||'login-hash',()=>null,reg,crypto,
     (r,p)=>r.projects[p],async()=>({task,spaceName:'managed',profileId:'P1'}),async()=>{if(f.projectFound)return home;throw Error('project not found');},
@@ -63,6 +63,48 @@ test('management release uses the native bound tab Page rather than a lazy label
     const y=await fixture();patch(y.f);
     await assert.rejects(()=>y.api.releaseManagementPage(y.reg,'P','a','managed','p9','exact-native-target',true),/PAGE_BOUND_TARGET_UNVERIFIED/);
     assert.equal(y.f.closed,0);assert.equal(y.f.intentPersisted||false,false);assert.equal(y.f.lazyCalls||0,0);
+  }
+});
+test('explicit home recovery reloads once before Page reads, then keeps every ordinary release guard',async()=>{
+  const x=await fixture(f=>{f.urlError=Error('unresponsive Page');f.onReload=()=>{assert.equal(f.urlReads||0,0);f.urlError=null;};});
+  const result=await x.api.releaseManagementPage(x.reg,'P','a','managed','p9','exact-native-target',true,true);
+  assert.equal(result.reloadAttempted,true);assert.equal(result.remoteExecutionStopped,false);
+  assert.equal(x.f.reloaded,1);assert.equal(x.f.logins,1);assert.equal(x.f.closed,1);assert.equal(x.f.created,0);assert.equal(x.f.lazyCalls||0,0);
+  assert.deepEqual(x.f.releases.map(r=>r.phase),['INTENT','RELEASED']);
+  assert.equal(x.f.releases[0].data.reloadHome,true);assert.equal(x.f.releases[1].data.reloadAttempted,true);
+});
+test('home reload refuses changed metadata, native identity or permission before any Page call or mutation',async()=>{
+  for(const patch of [f=>{f.denied=true;},f=>{f.reg.chats.current={page:'p9'};},
+    ...['name','profileId','ownership','createdBy'].map(key=>f=>{f.spaces=[{id:9,name:'managed',profileId:'P1',ownership:'agent',createdBy:'agent',[key]:'changed'}];}),
+    f=>{f.nativeError=Error('native unavailable');},f=>{f.nativeResponse={targetInfos:[{targetId:'exact-native-target',url:home,type:'worker'}]};},
+    f=>{f.nativeResponse={targetInfos:[{targetId:'exact-native-target',url:home.replace('/project','/c/11111111-1111-4111-8111-111111111111'),type:'page'}]};}
+  ]) {
+    const x=await fixture(patch);
+    await assert.rejects(()=>x.api.releaseManagementPage(x.reg,'P','a','managed','p9','exact-native-target',true,true));
+    assert.equal(x.f.reloaded,0);assert.equal(x.f.closed,0);assert.equal(x.f.intentPersisted||false,false);assert.equal(x.f.urlReads||0,0);
+  }
+  const missing=await fixture();delete missing.f.page.reload;
+  await assert.rejects(()=>missing.api.releaseManagementPage(missing.reg,'P','a','managed','p9','exact-native-target',true,true),/RELOAD_UNAVAILABLE/);
+  assert.equal(missing.f.intentPersisted||false,false);
+});
+test('scope and permission are rechecked after intent and before home reload',async()=>{
+  for(const patch of [f=>{f.denied=true;},f=>{f.reg.chats.current={page:'p9'};},f=>{f.tab.targetId='replacement';},
+    f=>{f.nativeResponse={targetInfos:[]};},f=>{f.spaces=[{id:9,name:'managed',profileId:'different',ownership:'agent',createdBy:'agent'}];}]) {
+    const x=await fixture(f=>{f.afterIntent=()=>patch(f);});
+    await assert.rejects(()=>x.api.releaseManagementPage(x.reg,'P','a','managed','p9','exact-native-target',true,true));
+    assert.equal(x.f.reloaded,0);assert.equal(x.f.closed,0);assert.deepEqual(x.f.releases.map(r=>r.phase),['INTENT','REFUSED']);
+    assert.equal(x.f.releases[1].data.reloadAttempted,false);
+  }
+});
+test('reload timeout or any later guard failure fences the exact target without another reload, close or allocation',async()=>{
+  for(const patch of [f=>{throw Error('reload ACK unknown');},f=>{f.urlError=Error('still unresponsive');},
+    f=>{f.loginError=Error('login changed');},f=>{f.stateError=Error('UI unknown');},f=>{f.sample.composerRawText='retained draft';},
+    f=>{f.sample.generating=true;},f=>{f.sample.approvalRequired=true;},f=>{f.tab.targetId='replacement';},f=>{f.denied=true;}]) {
+    const x=await fixture(f=>{f.onReload=()=>patch(f);});
+    await assert.rejects(()=>x.api.releaseManagementPage(x.reg,'P','a','managed','p9','exact-native-target',true,true),e=>e.allocationState==='UNKNOWN');
+    assert.equal(x.f.reloaded,1);assert.equal(x.f.closed,0);assert.equal(x.f.created,0);
+    assert.deepEqual(x.f.releases.map(r=>r.phase),['INTENT','UNKNOWN']);
+    assert.equal(x.f.releases[1].data.reloadAttempted,true);assert.equal(x.f.releases[1].data.closeAttempted,false);
   }
 });
 test('native inventory must confirm the captured target before close and only an explicit success acknowledges close',async()=>{
