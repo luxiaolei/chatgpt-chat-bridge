@@ -80,7 +80,7 @@ async function run(f,fn) {
       "setEffort=async()=>{f.calls.push('effort');return true;};saveRegistry=async()=>{f.calls.push('registry');};touchRuntime=async()=>{};print=value=>{f.printed=value;};",
       'openBoundTask=async()=>({task:{spaceId:2},binding:f.reg.projects.P.bindings.a});',
        'listTaskSpaces=async()=>[{id:2,name:"managed",profileId:"P1",ownership:"agent",createdBy:"agent"}];',
-      'if(f.change.reclaim){loadRuntime=async()=>({tasks:{t:{taskId:"t",sessionId:chat.id,project:"P",account:"a",status:"CANCELLED"}}});imageSessionOccupancy=()=>({occupied:false});}',
+      'releasePhysicalPage=async(_r,_t,page)=>page.close();if(f.change.reclaim){loadRuntime=async()=>({tasks:{t:{taskId:"t",sessionId:chat.id,project:"P",account:"a",status:"CANCELLED"}}});imageSessionOccupancy=()=>({occupied:false});}',
       'newManagedPage=async()=>page;openProjectPage=async()=>{f.currentUrl=home;};',
       "waitForDelivery=async()=>({url:f.currentUrl,lastUser:message,lastUserId:'33333333-3333-4333-8333-333333333333',lastUserSource:{text:message,messageId:'33333333-3333-4333-8333-333333333333',conversationId:chat.id},lastUserSourceCondition:'BOUND_SOURCE',observedAt:new Date().toISOString(),messageCount:1,composerText:''});",
       'return {state,prepare:()=>assertInputSafe(page,"verified-user",url,{discardDraft:true}),send:()=>sendMessage(page,message,url),dispatch:()=>applyDispatchModel(page,chat,"Latest","High"),',

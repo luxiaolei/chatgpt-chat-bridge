@@ -16,6 +16,7 @@ async function build(f,extra='') {
     saveRuntime=async x=>{f.rt=structuredClone(x);f.calls.push('save-runtime');};
     saveRegistry=async()=>f.calls.push('save-registry');
     notifyController=async()=>{f.calls.push('notify');return {sent:true};};
+    assertPhysicalPageAvailable=()=>{};
     assertWebAvailable=async()=>{};
     detectWebRateLimit=async()=>{};
     resolveChat=()=>f.chat;

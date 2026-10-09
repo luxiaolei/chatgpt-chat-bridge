@@ -2721,6 +2721,11 @@ def worker_diagnostic(returncode, stderr, phase, error=None, stdout=None):
         if adapter == {"formatVersion": "chatgpt-native-adapter-v1", "phase": "FORMAT", "status": "UNSUPPORTED"}:
             worker["capturedReceipt"]["nativeAdapter"] = adapter
     result = {"worker": worker}
+    if receipt and receipt.get("allocationState") in {"UNKNOWN", "RETAINED"}:
+        worker["allocationState"] = receipt["allocationState"]
+        for key in ("pageAllocation", "pageCleanup"):
+            if isinstance(receipt.get(key), dict):
+                worker[key] = receipt[key]
     # Full parsed witness is private diagnostic evidence, not a delivery upgrade.
     # In particular, timeout used to throw this away before uncertain_new_session.
     if receipt and receipt.get("deliveryStage") == "SEND_ATTEMPTED" and isinstance(receipt.get("nativeWitness"), dict):
@@ -3602,6 +3607,9 @@ def work_one(db):
         return finish(db, row, "DELIVERY_UNKNOWN", type(error).__name__,
                       result=worker_diagnostic(None, getattr(error, "stderr", None) or type(error).__name__, "dispatch", error=error))
     receipt = parse_worker_receipt(completed)
+    if receipt and receipt.get("allocationState") in {"UNKNOWN", "RETAINED"}:
+        return finish(db, row, "DELIVERY_UNKNOWN", "PAGE_ALLOCATION_OR_RELEASE_UNKNOWN",
+                      result=worker_diagnostic(completed.returncode, completed.stderr, "dispatch", stdout=completed.stdout))
     if completed.returncode == 75:
         detail = receipt or {}
         if detail.get("ok") is False and detail.get("deliveryStage") == "PRE_SEND" and detail.get("code") in {"PACING_DEFERRED", "WEB_COOLDOWN_ACTIVE"}:
@@ -4654,6 +4662,101 @@ def image_api(db, command, payload):
         raise
 
 
+def page_resource_decision(db, state, payload):
+    target = payload.get("resourceTarget")
+    if not isinstance(target, dict):
+        return {"allowed": False, "reason": "PHYSICAL_TARGET_PROOF_MISSING"}
+    deny = lambda reason: {"allowed": False, "reason": reason}
+    reg, rt = registry(db), runtime(db)
+    alias, project = payload.get("account"), target.get("project")
+    identity = (reg.get("accounts", {}).get(alias) or {}).get("identity")
+    module = delivery_attempt_module()
+    own_direct = target.get("purpose") == "OWNED_TEMPORARY" and module.owns_direct_allocation(state, target)
+    if (not identity or target.get("account") != alias or target.get("accountId") != account_id(identity) or
+            type(target.get("spaceId")) is not int or target["spaceId"] <= 0 or
+            not all(isinstance(target.get(key), str) and target[key] for key in ("spaceName", "profileId", "page", "targetId", "url")) or
+            project not in (reg.get("projects") or {}) and not own_direct):
+        return deny("PHYSICAL_TARGET_SCOPE_INVALID")
+    origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+    if origin and origin != account_id(identity) or not origin and os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+        return deny("PHYSICAL_TARGET_ORIGIN_MISMATCH")
+    cfg = (reg.get("projects") or {}).get(project) or {}
+    binding = (cfg.get("bindings") or {}).get(alias) or {}
+    purpose = target.get("purpose")
+    neutral = purpose in {"OWNED_TEMPORARY", "ORPHAN_IDLE"} and target["url"] in {"about:blank", "chrome://newtab/", "https://chatgpt.com/"}
+    route = re.fullmatch(r"https://chatgpt\.com/g/(g-p-[0-9a-f]{32})(?:-[^/?#]+)?/project/?", binding.get("projectUrl") or (target.get("projectUrl") if own_direct else None) or "", re.I)
+    if not neutral and (not route or not re.fullmatch(r"https://chatgpt\.com/g/" + route[1] + r"(?:-[^/?#]+)?/(?:project|c/[0-9a-f-]{36})/?", target["url"], re.I)):
+        return deny("PHYSICAL_TARGET_PROJECT_UNVERIFIED")
+    spaces = [binding, *(reg.get("spaces") or {}).values()]
+    pool = (reg.get("capacityOverflow") or {}).get(identity + "|" + target["profileId"]) or {}
+    spaces += [pool, *(pool.get("previousSpaces") or [])]
+    current = None
+    if payload.get("attempt"):
+        current = module.verify_current(state, db, payload["attempt"])
+        if current["account_id"] != account_id(identity):
+            return deny("PHYSICAL_TARGET_CLAIM_MISMATCH")
+    own_current = purpose == "OWNED_TEMPORARY" and current and module.owns_allocated_page(state, current, target, current=True)
+    if not own_direct and not own_current and not any(s.get("spaceName", s.get("name")) == target["spaceName"] and s.get("spaceId") == target["spaceId"] and
+               s.get("profileId") == target["profileId"] and (s is binding or s.get("identity") == identity) for s in spaces):
+        return deny("PHYSICAL_TARGET_SPACE_UNVERIFIED")
+    if management_mode(db, project)["mode"] in {"PAUSED", "DRAINING"} or rt.get("projects", {}).get(project, {}).get("watchdogPausedForUserControl"):
+        return deny("PHYSICAL_TARGET_PAUSED")
+    if db.execute("SELECT 1 FROM operations WHERE account_id=? AND native_target IS NULL AND status='DISPATCHING' AND id!=? LIMIT 1",
+                  (account_id(identity), current["id"] if current else "")).fetchone():
+        return deny("PHYSICAL_TARGET_ACTIVE_WRITER")
+    same_space = lambda item: item.get("spaceId") == target["spaceId"] or item.get("spaceName") == target["spaceName"]
+    candidate = payload.get("candidate")
+    registered = (reg.get("chats") or {}).get((candidate or {}).get("id")) if isinstance(candidate, dict) else None
+    if candidate and (not registered or any(registered.get(key) != value for key, value in candidate.items())):
+        return deny("PHYSICAL_TARGET_ATTACHMENT_CHANGED")
+    for p in (reg.get("projects") or {}).values():
+        if any(same_space(b) and b.get("controlPage") == target["page"] for b in (p.get("bindings") or {}).values()):
+            return deny("PHYSICAL_TARGET_CONTROL_PAGE")
+    for chat in (reg.get("chats") or {}).values():
+        if chat is registered:
+            continue
+        if same_space(chat) and chat.get("page") == target["page"] or chat.get("url") == target["url"] and "/c/" in target["url"]:
+            return deny("PHYSICAL_TARGET_REFERENCED")
+    linked = [t for t in (rt.get("tasks") or {}).values() if registered and t.get("sessionId") == registered.get("id")]
+    if registered:
+        if (registered.get("page") != target["page"] or not same_space(registered) or not linked or
+                rt.get("sessions", {}).get(registered["id"], {}).get("watchdogPausedForUserControl") or
+                management_mode(db, project, task_workgroup(registered))["mode"] in {"PAUSED", "DRAINING"} or
+                any(t.get("project") != project or t.get("account") != alias or str(t.get("status") or "").upper() not in TERMINAL - {"BLOCKED"} or
+                    any(t.get(flag) for flag in ("watchdogPausedForUserControl", "watchdogPendingNotification", "externalResponsePending")) for t in linked) or
+                db.execute("SELECT 1 FROM operations WHERE account_id=? AND session_ref=? AND status IN ('DISPATCHING','DELIVERY_UNKNOWN','SUPERSEDED','QUEUED') AND id!=? LIMIT 1",
+                           (account_id(identity), registered["id"], current["id"] if current else "")).fetchone()):
+            return deny("PHYSICAL_TARGET_EXECUTION_PROTECTED")
+    if any(same_space(t) and t.get("page") == target["page"] for t in [*(rt.get("tasks") or {}).values(), *(rt.get("sessions") or {}).values()] if t not in linked and (not registered or t.get("id", t.get("sessionId")) != registered.get("id"))):
+        return deny("PHYSICAL_TARGET_TASK_REFERENCED")
+    protected = db.execute("SELECT 1 FROM operations WHERE account_id=? AND native_target IS NULL AND status IN ('DISPATCHING','DELIVERY_UNKNOWN','SUPERSEDED') AND id!=? LIMIT 1",
+                           (account_id(identity), current["id"] if current else "")).fetchone()
+    if purpose == "MANAGEMENT_TERMINATION":
+        if payload.get("confirm") is not True:
+            return deny("PHYSICAL_TARGET_CONFIRM_REQUIRED")
+        authorize_control(db, payload.get("callerRef"), project=project)
+    elif purpose == "OWNED_TEMPORARY":
+        if not target.get("allocatedHere") or (not module.owns_allocated_page(state, current, target, current=True) if current else not own_direct):
+            return deny("PHYSICAL_TARGET_ALLOCATION_UNPROVEN")
+    elif purpose == "TERMINAL_ALLOCATION":
+        if not registered or protected and (registered.get("pageTargetId") != target["targetId"] or not any(module.owns_allocated_page(state, row, target) for task in linked for row in
+                db.execute("SELECT * FROM operations WHERE task_id=? AND account_id=? AND status IN ('SENT','FAILED_PRE_SEND','CANCELLED')", (task["taskId"], account_id(identity))))):
+            return deny("PHYSICAL_TARGET_ALLOCATION_UNPROVEN")
+    elif purpose == "ORPHAN_IDLE":
+        if protected or any(str(t.get("status") or "").upper() not in TERMINAL and not t.get("sessionId") and
+                            (reg.get("accounts", {}).get(t.get("account")) or {}).get("identity") == identity for t in (rt.get("tasks") or {}).values()):
+            return deny("PHYSICAL_TARGET_UNPLACED_EXECUTION")
+    else:
+        return deny("PHYSICAL_TARGET_PERMISSION_MISSING")
+    latest = delivery_attempt_module().page_release_latest(state, target)
+    if latest and latest["outcome"] != "REFUSED":
+        intent = payload.get("releaseIntent")
+        if (latest["outcome"] is not None or latest["target"] != target or not isinstance(intent, dict) or
+                any(intent.get(key) != latest["reference"][key] for key in ("path", "sha256", "bytes"))):
+            return deny("PAGE_RELEASE_ALREADY_ATTEMPTED")
+    return {"allowed": True, "reason": purpose, "target": target, "deliveryProven": False, "remoteExecutionStopped": False}
+
+
 def main():
     command, config_name, state_name, *args = sys.argv[1:]
     config, state = pathlib.Path(config_name), pathlib.Path(state_name)
@@ -4668,7 +4771,7 @@ def main():
         if "--confirm" not in args:
             db.execute("PRAGMA query_only=ON")
             db.execute("BEGIN")
-    elif command in {"observe", "observation-context", "controller-placement-context", "delivery-attempts", "delivery-admission", "page-reclaim-context"}:
+    elif command in {"observe", "observation-context", "controller-placement-context", "delivery-attempts", "delivery-admission", "page-reclaim-context", "page-release-status"}:
         db = connection(config, state, initialize=False)
         db.execute("PRAGMA query_only=ON")
     elif command in {"admission-check", "local-owner-contract"} and (state / "bridge.sqlite3").exists():
@@ -5172,6 +5275,41 @@ def main():
             value = {"sessionRefs": sorted(sessions), "unboundProjectIds": sorted(unbound), "unboundAny": any_unbound,
                      "unplacedTaskScopes": unplaced_scopes,
                      "preSendCapacityWaits": capacity_waits, "capacityWaitRefusals": capacity_refusals, "readOnly": True}
+            if payload.get("resourceTarget"):
+                value["resourceRelease"] = page_resource_decision(db, state, payload)
+        elif command == "page-release-record":
+            payload = json.load(sys.stdin)
+            phase = payload.get("phase")
+            target = payload.get("resourceTarget")
+            if phase == "INTENT":
+                begin_immediate(db)
+                decision = page_resource_decision(db, state, payload)
+                if not decision["allowed"]:
+                    raise ValueError(decision["reason"])
+            else:
+                identity = (registry(db).get("accounts", {}).get(payload.get("account")) or {}).get("identity")
+                origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+                if not identity or target.get("accountId") != account_id(identity) or origin and origin != target["accountId"] or not origin and os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+                    raise ValueError("PAGE_RELEASE_ORIGIN_MISMATCH")
+            value = delivery_attempt_module().page_release_record(state, target, phase, payload.get("data") or {}, payload.get("releaseIntent"))
+            db.commit()
+        elif command == "page-release-status":
+            payload = json.load(sys.stdin)
+            target = payload.get("resourceTarget") or {}
+            identity = (registry(db).get("accounts", {}).get(payload.get("account")) or {}).get("identity")
+            origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+            if not identity or target.get("accountId") != account_id(identity) or origin and origin != target["accountId"] or not origin and os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+                raise ValueError("PAGE_RELEASE_ORIGIN_MISMATCH")
+            latest = delivery_attempt_module().page_release_latest(state, target)
+            value = {"phase": (latest["outcome"] or "INTENT") if latest else None, "readOnly": True}
+        elif command == "page-allocation-record":
+            payload = json.load(sys.stdin)
+            data = payload.get("data") or {}
+            origin = os.environ.get("CHAT_BRIDGE_FROM_ACCOUNT_ID")
+            identity = (registry(db).get("accounts", {}).get(data.get("account")) or {}).get("identity")
+            if not identity or data.get("accountId") != account_id(identity) or origin and account_id(identity) != origin or not origin and os.environ.get("CHAT_BRIDGE_FROM_SPACE"):
+                raise ValueError("PAGE_ALLOCATION_ORIGIN_MISMATCH")
+            value = delivery_attempt_module().direct_allocation_record(state, payload.get("requestId"), payload.get("phase"), data)
         elif command == "delivery-admission":
             context = json.load(sys.stdin)
             row = delivery_attempt_module().verify_current(state, db, context)

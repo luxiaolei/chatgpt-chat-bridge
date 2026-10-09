@@ -204,3 +204,131 @@ def verify_current(state, db, context):
         if not route or manifest.get("route") != route or route_snapshot(reg, row) != route:
             raise ValueError("DELIVERY_ROUTE_CHANGED")
     return row
+
+
+def page_release_directory(state, target, create=False):
+    """One physical target gets one close intent; a lost ACK never arms a second."""
+    scope = {key: target[key] for key in ("accountId", "profileId", "spaceId", "targetId")}
+    root = private_directory(pathlib.Path(state).resolve() / "page-releases", create=create)
+    return private_directory(root / hashlib.sha256(encoded(scope)).hexdigest(), create=create)
+
+
+def page_release_latest(state, target):
+    try:
+        directory = page_release_directory(state, target)
+    except FileNotFoundError:
+        return None
+    intents = sorted(directory.glob("*-INTENT.json"))
+    if not intents:
+        return None
+    raw, reference = read_capture(intents[-1])
+    value = json.loads(raw)
+    ordinal = value["releaseOrdinal"]
+    if not reference["captureStable"] or value.get("format") != "chat-bridge-page-release-v1" or value.get("phase") != "INTENT" or type(ordinal) is not int:
+        raise ValueError("PAGE_RELEASE_EVIDENCE_INVALID")
+    value["reference"], value["outcome"] = reference, None
+    for phase in ("RELEASED", "UNKNOWN", "REFUSED"):
+        path = directory / f"{ordinal:03d}-{phase}.json"
+        if not path.exists():
+            continue
+        raw, saved = read_capture(path)
+        outcome = json.loads(raw)
+        if (value["outcome"] or not saved["captureStable"] or outcome.get("target") != value["target"] or
+                outcome.get("format") != "chat-bridge-page-release-v1" or outcome.get("phase") != phase or outcome.get("releaseOrdinal") != ordinal or
+                phase == "REFUSED" and outcome.get("data", {}).get("closeAttempted") is not False):
+            raise ValueError("PAGE_RELEASE_EVIDENCE_INVALID")
+        value["outcome"] = phase
+    return value
+
+
+def page_release_record(state, target, phase, data, intent=None):
+    if phase not in {"INTENT", "RELEASED", "UNKNOWN", "REFUSED"}:
+        raise ValueError("PAGE_RELEASE_PHASE_INVALID")
+    if phase == "REFUSED" and data.get("closeAttempted") is not False or phase == "RELEASED" and any(data.get(k) is not True for k in ("closeAttempted", "closeAcknowledged", "targetAbsent")):
+        raise ValueError("PAGE_RELEASE_OUTCOME_INVALID")
+    directory = page_release_directory(state, target, create=True)
+    latest = page_release_latest(state, target)
+    if phase == "INTENT":
+        if latest and latest["outcome"] != "REFUSED":
+            raise ValueError("PAGE_RELEASE_ALREADY_ATTEMPTED")
+        ordinal = latest["releaseOrdinal"] + 1 if latest else 1
+        if ordinal > 128:
+            raise ValueError("PAGE_RELEASE_ATTEMPT_BUDGET")
+    else:
+        if (not latest or latest["target"] != target or latest["outcome"] is not None or
+                not isinstance(intent, dict) or any(intent.get(key) != latest["reference"][key] for key in ("path", "sha256", "bytes"))):
+            raise ValueError("PAGE_RELEASE_INTENT_CHANGED")
+        ordinal = latest["releaseOrdinal"]
+    return write_once(directory / f"{ordinal:03d}-{phase}.json", {
+        "format": "chat-bridge-page-release-v1", "phase": phase, "target": target,
+        "releaseOrdinal": ordinal,
+        "recordedAt": datetime.now(timezone.utc).isoformat(), "data": data,
+        "deliveryProven": False, "remoteExecutionStopped": False, "retryAuthorized": False})
+
+
+def direct_allocation_record(state, request, phase, data):
+    if not isinstance(request, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", request):
+        raise ValueError("PAGE_ALLOCATION_REQUEST_INVALID")
+    phases = {"ALLOCATION_INTENT": "01", "ALLOCATION_REFUSED": "02", "PAGE_ALLOCATED": "03", "ALLOCATION_UNKNOWN": "04", "PAGE_RELEASE_INTENT": "80", "PAGE_RELEASED": "81", "PAGE_RELEASE_UNKNOWN": "82"}
+    ordinal = data.get("allocationOrdinal")
+    if phase not in phases or type(ordinal) is not int or not 1 <= ordinal <= 128:
+        raise ValueError("PAGE_ALLOCATION_PHASE_INVALID")
+    root = private_directory(pathlib.Path(state).resolve() / "page-allocations", create=True)
+    directory = private_directory(root / request, create=True)
+    return write_once(directory / f"{phases[phase]}-{phase}-{ordinal:03d}.json", {
+        "format": "chat-bridge-page-allocation-v1", "requestId": request, "phase": phase,
+        "recordedAt": datetime.now(timezone.utc).isoformat(), "data": data})
+
+
+def owns_direct_allocation(state, target):
+    try:
+        request, ordinal = target["requestId"], target["allocationOrdinal"]
+        if not isinstance(request, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", request) or type(ordinal) is not int or not 1 <= ordinal <= 128:
+            return False
+        root = private_directory(pathlib.Path(state).resolve() / "page-allocations")
+        directory = private_directory(root / request)
+        raw, saved = read_capture(directory / f"03-PAGE_ALLOCATED-{ordinal:03d}.json")
+        record = json.loads(raw)
+        return saved["captureStable"] and record.get("format") == "chat-bridge-page-allocation-v1" and record.get("requestId") == request and record.get("phase") == "PAGE_ALLOCATED" and all(record.get("data", {}).get(k) == target[k] for k in ("project", "account", "accountId", "spaceId", "spaceName", "profileId", "page", "targetId", "projectUrl"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def owns_allocated_page(state, row, target, current=False):
+    """Physical allocation provenance, never a historical first-message exclusion."""
+    try:
+        root = pathlib.Path(state).resolve() / "delivery-attempts"
+        directory = root / row["id"] / str(row["attempts"])
+        for entry in (root, directory.parent, directory):
+            private_directory(entry)
+        raw, reference = read_capture(directory / "manifest.json")
+        manifest = json.loads(raw)
+        if (not reference["captureStable"] or manifest.get("format") != FORMAT or manifest.get("operationId") != row["id"] or
+                manifest.get("claimOrdinal") != row["attempts"] or
+                (manifest.get("claimedAt") != row["claimed_at"] if current else type(manifest.get("claimedAt")) not in {int, float}) or
+                manifest.get("payloadHash") != row["payload_hash"] or
+                manifest.get("accountId") != row["account_id"] or manifest.get("accountId") != target["accountId"] or
+                manifest.get("account") != row["account_alias"] or manifest.get("project") != target["project"] or
+                manifest.get("messageSha256") != hashlib.sha256(row["message"].encode()).hexdigest()):
+            return False
+        if not current:
+            finished, finished_ref = read_capture(directory / "75-SCRIPT_FINISHED.json")
+            ended, ended_ref = read_capture(directory / "host-worker-ended.json")
+            finished, ended = json.loads(finished), json.loads(ended)
+            if (not finished_ref["captureStable"] or not ended_ref["captureStable"] or finished.get("manifestSha256") != reference["sha256"] or
+                    finished.get("operationId") != row["id"] or finished.get("claimOrdinal") != row["attempts"] or finished.get("phase") != "SCRIPT_FINISHED" or
+                    ended.get("manifestSha256") != reference["sha256"] or ended.get("operationId") != row["id"] or ended.get("claimOrdinal") != row["attempts"] or ended.get("phase") != "worker-ended" or
+                    finished.get("data", {}).get("succeeded") is not True or ended.get("cleanup") or
+                    ended.get("timedOut") or ended.get("interrupted") or ended.get("leaderReturnCode") != 0):
+                return False
+        for path in directory.glob("03-PAGE_ALLOCATED-*.json"):
+            raw, saved = read_capture(path)
+            record = json.loads(raw)
+            if (saved["captureStable"] and record.get("manifestSha256") == reference["sha256"] and
+                    record.get("operationId") == row["id"] and record.get("claimOrdinal") == row["attempts"] and
+                    record.get("phase") == "PAGE_ALLOCATED" and
+                    all(record.get("data", {}).get(key) == target[key] for key in ("project", "account", "spaceId", "spaceName", "profileId", "page", "targetId"))):
+                return True
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return False

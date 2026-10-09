@@ -5,10 +5,12 @@ import crypto from 'node:crypto';
 const FORMAT='chat-bridge-delivery-attempt-v1';
 const sha=value=>crypto.createHash('sha256').update(value).digest('hex');
 const phases=new Map([
+  ['ALLOCATION_INTENT','01'],['ALLOCATION_REFUSED','02'],['PAGE_ALLOCATED','03'],['ALLOCATION_UNKNOWN','04'],
+  ['PAGE_RELEASE_INTENT','80'],['PAGE_RELEASED','81'],['PAGE_RELEASE_UNKNOWN','82'],
   ['DRAFT_BACKUP','15'],['DRAFT_DISCARD_INTENT','17'],['DRAFT_DISCARDED','18'],
   ['TARGET_OBSERVED','10'],['BEFORE_INPUT','20'],['INPUT_VERIFIED','30'],
   ['SEND_INTENT','40'],['SEND_RETURNED','50'],['OBSERVED','60'],
-  ['DELIVERY_CONFIRMED','70'],['ERROR','90']
+  ['DELIVERY_CONFIRMED','70'],['SCRIPT_FINISHED','75'],['ERROR','90']
 ]);
 async function directorySafe(directory){
   const st=await fs.lstat(directory);
@@ -34,6 +36,11 @@ export async function openAttempt(stateDirectory, descriptor){
   let observation=0;
   return {manifest,async record(phase,data={},message=null){
     if(!phases.has(phase))throw new Error('DELIVERY_PHASE_INVALID');
+    const allocationPhase=phase.startsWith('ALLOCATION_')||phase.startsWith('PAGE_');
+    if(allocationPhase&&(!Number.isSafeInteger(data.allocationOrdinal)||data.allocationOrdinal<1))
+      throw new Error('DELIVERY_ALLOCATION_ORDINAL_INVALID');
+    if(allocationPhase&&manifest.route&&(data.project!==manifest.project||data.account!==manifest.account||data.profileId!==manifest.route.profileId))
+      throw new Error('DELIVERY_ALLOCATION_ROUTE_CHANGED');
     if(message!==null&&sha(message)!==manifest.messageSha256)throw new Error('DELIVERY_ATTEMPT_MESSAGE_MISMATCH');
     if(manifest.route && ['TARGET_OBSERVED','BEFORE_INPUT','INPUT_VERIFIED','SEND_INTENT'].includes(phase)) {
       const route=manifest.route;
@@ -46,7 +53,7 @@ export async function openAttempt(stateDirectory, descriptor){
         throw new Error('DELIVERY_ROUTE_CHANGED');
     }
     if(phase==='OBSERVED'&&++observation>128)throw new Error('DELIVERY_OBSERVATION_BUDGET_EXCEEDED');
-    const name=phases.get(phase)+'-'+phase+(phase==='OBSERVED'?'-'+String(observation).padStart(3,'0'):'')+'.json';
+    const name=phases.get(phase)+'-'+phase+(allocationPhase?'-'+String(data.allocationOrdinal).padStart(3,'0'):phase==='OBSERVED'?'-'+String(observation).padStart(3,'0'):'')+'.json';
     const bytes=Buffer.from(JSON.stringify({format:FORMAT,operationId:manifest.operationId,claimOrdinal:manifest.claimOrdinal,
       manifestSha256:descriptor.manifestSha256,phase,recordedAt:new Date().toISOString(),data})+'\n');
     if(bytes.length>2*1024*1024)throw new Error('DELIVERY_EVIDENCE_TOO_LARGE');
@@ -61,7 +68,8 @@ export async function openAttempt(stateDirectory, descriptor){
       await syncDirectory(directory);
     }catch(error){
       if(file)await file.close().catch(()=>{});
-      if(phase==='SEND_INTENT'||error.code==='EEXIST')error.deliveryStage='SEND_ATTEMPTED';
+      if(allocationPhase)error.allocationState='UNKNOWN';
+      else if(phase==='SEND_INTENT'||error.code==='EEXIST')error.deliveryStage='SEND_ATTEMPTED';
       if(error.code==='EEXIST')error.code='DELIVERY_ATTEMPT_ALREADY_RECORDED';
       throw error;
     }

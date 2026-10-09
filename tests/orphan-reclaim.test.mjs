@@ -9,7 +9,7 @@ const source=await readFile(path.resolve("src/main.js"),"utf8");
 const begin=source.indexOf("async function reclaimOrphanManagedPage");
 const end=source.indexOf("\nasync function newManagedPage",begin);
 assert.ok(begin>=0&&end>begin);
-const code='const {composerIsEmpty,draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(begin,end);
+const code="const physicalReleasePayload=(_r,_t,page,_b,_p,account,purpose,candidate)=>({account,candidate,resourceTarget:{purpose,page:page.label}});const releasePhysicalPage=async(_r,_t,page)=>page.close();"+'const {composerIsEmpty,draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(begin,end);
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 
 async function run(snapshot) {

@@ -37,7 +37,7 @@ async function run(change={}) {
     newPage:async()=>{calls.created++;throw Error('unexpected creation');}}]));
   const taskAccounts=new Map();
   const api=await new AsyncFunction('crypto','slug','listTaskSpaces','taskSpace','taskAccounts','accountScope','saveRegistry','openBoundTask','pagesOf','sameConversationUrl','projectKey','newManagedPage','waitForConversationReady','openConversationFromProject',
-    section('function capacityScope','\nfunction capacityBackoffSec')+section('function managedSpacePlan','\nasync function accountManagedTask')+section('async function overflowManagedTask','\nasync function newManagedPage')+section('async function ensurePage','\nfunction hashText')+';return ensurePage;')(
+    section('function capacityScope','\nfunction capacityBackoffSec')+section('function managedSpacePlan','\nasync function accountManagedTask')+section('async function overflowManagedTask','\nasync function newManagedPage')+'const assertPhysicalPageAvailable=()=>{};'+section('async function ensurePage','\nfunction hashText')+';return ensurePage;')(
     crypto,x=>x,async()=>spaces,async id=>{assert.equal(typeof id,'number');calls.spaces.push(id);return tasks.get(id);},taskAccounts,()=> 'scope-a',async()=>{calls.saved++;},
     async(_r,_p,_a,options={})=>{const b=options.spaceOverride||binding;calls.opened.push({id:b.spaceId,requireExisting:options.requireExistingSpace});const s=spaces.find(s=>s.id===b.spaceId&&s.name===b.spaceName);if(!s||s.profileId!==b.profileId||s.ownership!=='agent')throw Error('space changed');return {task:tasks.get(b.spaceId),binding:b};},
     async task=>task.pages(),globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,value=>value?.match(/g-p-[a-f0-9]{32}/)?.[0],

@@ -59,7 +59,7 @@ test("actual space prune --all CLI retains existing Project and account filters"
  assert.deepEqual(calls,[[null,null]]);
 });
 
-test("account-wide UNKNOWN protection refuses every maintenance entry before Web reads",async()=>{
+test("maintenance inspects candidates without removing account UNKNOWN protection",async()=>{
  for(const f of ["control-routing","page-pool","liveness-policy","task-policy","web-policy","model-policy","session-policy"]) await import(`../src/${f}.js`);
  const prefix=source.split('const cmd=args[0] || "help";')[0];
  const result=await new AsyncFunction(prefix+`
@@ -67,31 +67,30 @@ test("account-wide UNKNOWN protection refuses every maintenance entry before Web
    const chat={id:'C',project:'P',account:'a',role:'worker',status:'active',page:'p1',spaceName:'managed',spaceId:7,profileId:'P1'};
    const reg={accounts:{a:{identity:'login'}},projects:{P:{bindings:{a:binding}}},chats:{C:chat}};
    const before=JSON.stringify(reg), reads=[], queries=[];
-   const web=async()=>{reads.push('Web');throw Error('unexpected Web read');};
+   const web=async()=>{reads.push('Web');return [];};
    const task={spaceId:7,pages:web,tabs:web};
    coordinated=(command,payload)=>{if(command!=='page-reclaim-context')throw Error(command);queries.push(payload);return {unboundAny:true};};
    loadRuntime=async()=>({tasks:{T:{taskId:'T',sessionId:'C',project:'P',account:'a',status:'COMPLETE',updatedAt:'2000-01-01T00:00:00Z'}}});
-   imageSessionOccupancy=()=>({occupied:false});listTaskSpaces=web;openBoundTask=web;state=web;saveRegistry=web;
+   imageSessionOccupancy=()=>({occupied:false});listTaskSpaces=async()=>[{id:7,name:'managed',profileId:'P1',ownership:'agent',createdBy:'agent'}];openBoundTask=async()=>({task,binding});state=async()=>{throw Error('no candidate UI required');};saveRegistry=async()=>{throw Error('no state mutation permitted');};
    const outcomes=[await reclaimIdlePageSlot(reg,'P','a',task,binding),await reclaimOrphanManagedPage(reg,task,binding,'a'),
      await detachTerminalTaskPages(reg,'P','a'),await pruneManagedOrphanTabs(reg,'P','a')];
    return {outcomes,reads,queries,unchanged:JSON.stringify(reg)===before};
  `)();
- assert.deepEqual(result.outcomes,[null,null,[],[]]);assert.deepEqual(result.reads,[]);assert.equal(result.unchanged,true);
- assert.equal(result.queries.length,4);assert.ok(result.queries.every(query=>query.account==='a' && query.attempt===null));
+ assert.deepEqual(result.outcomes,[null,null,[],[]]);assert.ok(result.reads.length);assert.equal(result.unchanged,true);
 });
 
-test("scoped prune reports a local deferral and preserves coordinator identity refusals",async()=>{
+test("scoped prune reaches the shared candidate guards and preserves identity refusals",async()=>{
  const opt=source.slice(source.indexOf("function opt("),source.indexOf("\nfunction boolValue("));
  const start=source.indexOf('else if(cmd==="space"){'),end=source.indexOf('\nelse if(',start+1),branch=source.slice(start,end);
- const run=new AsyncFunction("args","reg","print","activeAccount","coordinated","pruneManagedOrphanTabs","pruneProjectSpace",opt+
+ const run=new AsyncFunction("args","reg","print","activeAccount","pruneManagedOrphanTabs","pruneProjectSpace","bindingFor","touchRuntime",opt+
    'const project=opt("project"),accountArg=opt("account"),cmd=args[0];if(false){}'+branch);
  for(const all of [[],['--all']]) {
-   const output=[],queries=[],forbidden=()=>{throw Error('unexpected Web call');};
-   const args=['space','prune',...all,'--project','P','--account','a'];
-   await run(args,{},value=>output.push(value),()=> 'a',(command,payload)=>{queries.push([command,payload]);return {unboundAny:true};},forbidden,forbidden);
-   assert.deepEqual(output,[{ok:true,state:'DEFERRED',reason:'PAGE_RECLAIM_UNBOUND_UNKNOWN',project:'P',account:'a',closed:[]}]);
-   assert.deepEqual(queries,[['page-reclaim-context',{account:'a',attempt:null}]]);
-   await assert.rejects(run(args,{},forbidden,()=> 'a',()=>{throw Error('PAGE_RECLAIM_ORIGIN_MISMATCH');},forbidden,forbidden),/PAGE_RECLAIM_ORIGIN_MISMATCH/);
+   const output=[],calls=[],args=['space','prune',...all,'--project','P','--account','a'];
+   const guarded=async(_reg,p,a)=>{calls.push([p,a]);return all.length?[]:{ok:true,closed:[]};};
+   await run(args,{},value=>output.push(value),()=> 'a',guarded,guarded,()=>({spaceName:'managed'}),async()=>{});
+   assert.deepEqual(output,[{ok:true,closed:[]}]);assert.deepEqual(calls,[['P','a']]);
+   const denied=async()=>{throw Error('PAGE_RECLAIM_ORIGIN_MISMATCH');};
+   await assert.rejects(run(args,{},()=>{},()=> 'a',denied,denied,()=>({}),async()=>{}),/PAGE_RECLAIM_ORIGIN_MISMATCH/);
  }
 });
 
@@ -115,6 +114,6 @@ test("unfiltered maintenance skips blocked account while retaining another verif
  const visited=[];
  const prune=await new AsyncFunction('listTaskSpaces','openBoundTask','reclaimOrphanManagedPage','projectHomeId','coordinated',code+';return pruneManagedOrphanTabs;')(
    async()=>spaces,async(_r,project,account,options)=>{visited.push(account);return {binding:reg.projects[project].bindings[account],task:{spaceId:options.spaceOverride.spaceId}};},
-   async()=>({page:'done'}),projectHomeId,(_command,payload)=>({unboundAny:payload.account==='a'}));
- assert.deepEqual(await prune(reg),[{spaceId:8,spaceName:'chat-bridge-agent-b',page:'done'}]);assert.deepEqual(visited,['b']);
+   async(_r,_t,_b,a)=>a==='a'?null:{page:'done'},projectHomeId,(_command,payload)=>({unboundAny:payload.account==='a'}));
+ assert.deepEqual(await prune(reg),[{spaceId:8,spaceName:'chat-bridge-agent-b',page:'done'}]);assert.deepEqual(visited,['a','b']);
 });

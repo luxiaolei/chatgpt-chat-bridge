@@ -117,7 +117,7 @@ c.mark_capacity_wait(d,r,receipt);c.finish(d,dict(r),'QUEUED','CAPACITY_WAITING'
     const context=(attempt=null)=>{const r=call("page-reclaim-context",{account:"a",attempt});assert.equal(r.status,0,r.stderr);return JSON.parse(r.stdout);};
     const source=await readFile(path.resolve("src/main.js"),"utf8"),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
     const section=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
-    const code=section("function samePhysicalSpace","\nfunction spaceProtection")+section("async function reclaimOrphanManagedPage","\nasync function overflowManagedTask");
+    const code="const physicalReleasePayload=(_r,_t,page,_b,_p,account,purpose,candidate)=>({account,candidate,resourceTarget:{purpose,page:page.label}});const releasePhysicalPage=async(_r,_t,page)=>page.close();"+section("function samePhysicalSpace","\nfunction spaceProtection")+section("async function reclaimOrphanManagedPage","\nasync function overflowManagedTask");
     const projectHomeId=new Function(section("function projectHomeId(","\nfunction projectKey(")+";return projectHomeId;")();
     const reclaim=async(change=()=>{})=>{
       const docs=JSON.parse(sql("import sqlite3,sys,json;d=sqlite3.connect(sys.argv[2]);print(json.dumps({k:json.loads(v) for k,v in d.execute('SELECT kind,payload FROM documents')}))"));

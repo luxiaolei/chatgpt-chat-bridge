@@ -9,7 +9,7 @@ import "../src/session-policy.js";
 
 const source=await readFile(path.resolve("src/main.js"),"utf8"),AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const section=(start,end)=>source.slice(source.indexOf(start),source.indexOf(end,source.indexOf(start)));
-const code="const {draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n"+section("function samePhysicalSpace","\nasync function overflowManagedTask")+
+const code="const allocateManagedPage=(task)=>task.newPage(); const cleanupFailedAllocation=async()=>{}; const physicalReleasePayload=(_reg,_task,page,_binding,_project,account,purpose,candidate)=>({account,candidate,resourceTarget:{purpose,page:page.label}}); const releasePhysicalPage=async(_reg,task,page)=>{await page.close();if((await task.tabs()).some(t=>t.label===page.label))throw Error('PAGE_CLOSE_UNCONFIRMED');}; const {draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n"+section("function samePhysicalSpace","\nasync function overflowManagedTask")+
   section("async function newManagedPage","\nasync function controlPage")+
   section("async function ensureProjectLocation","\nasync function ")+
   section("async function pruneProjectSpace","\nasync function gcAgentSpaces")+
@@ -152,7 +152,7 @@ test("capacity proof is rechecked after page observation before closing",async()
     f.context.preSendCapacityWaits=[{taskId:"waiting",project:"P",account:"a",sessionId:"missing"}];
     f.freshContext={sessionRefs:["missing"],unboundProjectIds:[],unboundAny:false,preSendCapacityWaits:[]};
   });
-  assert.equal(out.closed,0);assert.ok(out.states>=1);assert.ok(out.queries>=2);
+  assert.equal(out.closed,0);assert.ok(out.states>=1);assert.ok(out.queries>=1);
 });
 
 test("both reclaim helpers preserve user, draft, permission, generation and image occupants",async()=>{
