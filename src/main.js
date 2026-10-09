@@ -2201,6 +2201,7 @@ async function triggerSend(page, targetUrl=null, lifecycleScope=null) {
       if(control.ok!==true || control.control?.mode!=="RUNNING") throw new Error("ADMISSION_NOT_RUNNING");
     }
     if(globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__) coordinated("delivery-admission",globalThis.__CHAT_BRIDGE_DELIVERY_ATTEMPT__);
+    assertRecoveryTaskCurrent(lifecycleScope);
   };
   // The exclusive, synced intent is an uncertainty barrier, not a claim that
   // the UI click happened. A crash from this point never permits replay.

@@ -10,14 +10,14 @@ const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const healthy={online:true,composerPresent:true,generating:true,mode:"Medium",errorTexts:[],recoveryControls:[]};
 
 async function harness(f={}) {
-  f.calls=[];f.loads=0;
+  f.calls=[];f.loads=0;f.admissionCalls=0;
   f.runtime ||= {tasks:{},sessions:{},projects:{}};
   return await new AsyncFunction("f",source+`
     releasePhysicalPage=async(_r,_t,page)=>page.close();assertPhysicalPageAvailable=()=>{};
     const reg=f.reg||{};
     const originalSender=sendMessage;
     stored=(command,kind)=>{if(command==="peek"&&kind==="runtime")return structuredClone(f.runtime);throw Error("unexpected store call");};
-    coordinated=()=>({ok:true,control:{mode:"RUNNING"}});
+    coordinated=()=>{if(++f.admissionCalls===f.unknownOnAdmission)f.runtime.tasks.T.status="UNKNOWN";return {ok:true,control:{mode:"RUNNING"}};};
     loadRuntime=async()=>{if(++f.loads===f.ownerUnknownAtRead)f.runtime.tasks.T.status="UNKNOWN";return structuredClone(f.runtime);};
     saveRuntime=async value=>{f.runtime=structuredClone(value);f.calls.push('save');};
     saveRegistry=async()=>{f.calls.push('registry');};
@@ -169,6 +169,12 @@ test("owner UNKNOWN after native recovery or at Send intent cannot continue or b
   await assert.rejects(sendApi.triggerSend(page,f.raw.url,{taskId:"T",project:"P",account:"a",sessionId:"C"}),/RECOVERY_TASK_CHANGED/);
   assert.deepEqual(f.stages,["SEND_INTENT"]);assert.deepEqual(f.runtime.tasks.T,{...t,status:"UNKNOWN"});
   await assert.rejects(sendApi.send({},"continue",null,null,{taskId:"T",project:"P",account:"a",sessionId:"C"}),/RECOVERY_TASK_CHANGED/);
+  for(const hasSend of [true,false]) {
+    f.unknownAtSendIntent=false;f.unknownOnAdmission=2;f.stages=[];f.runtime.tasks.T=structuredClone(t);
+    const finalApi=await harness(f);page.evaluate=async()=>hasSend;
+    await assert.rejects(finalApi.triggerSend(page,f.raw.url,{taskId:"T",project:"P",account:"a",sessionId:"C"}),/RECOVERY_TASK_CHANGED/);
+    assert.deepEqual(f.stages,["SEND_INTENT"]);assert.deepEqual(f.runtime.tasks.T,{...t,status:"UNKNOWN"});
+  }
 });
 
 const id="12345678-1234-1234-1234-123456789abc";
