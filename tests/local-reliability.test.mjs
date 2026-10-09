@@ -10,19 +10,24 @@ const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const healthy={online:true,composerPresent:true,generating:true,mode:"Medium",errorTexts:[],recoveryControls:[]};
 
 async function harness(f={}) {
-  f.calls=[];
+  f.calls=[];f.loads=0;f.admissionCalls=0;
   f.runtime ||= {tasks:{},sessions:{},projects:{}};
   return await new AsyncFunction("f",source+`
     releasePhysicalPage=async(_r,_t,page)=>page.close();assertPhysicalPageAvailable=()=>{};
     const reg=f.reg||{};
-    loadRuntime=async()=>structuredClone(f.runtime);
+    const originalSender=sendMessage;
+    stored=(command,kind)=>{if(command==="peek"&&kind==="runtime")return structuredClone(f.runtime);throw Error("unexpected store call");};
+    coordinated=()=>{if(++f.admissionCalls===f.unknownOnAdmission)f.runtime.tasks.T.status="UNKNOWN";return {ok:true,control:{mode:"RUNNING"}};};
+    loadRuntime=async()=>{if(++f.loads===f.ownerUnknownAtRead)f.runtime.tasks.T.status="UNKNOWN";return structuredClone(f.runtime);};
     saveRuntime=async value=>{f.runtime=structuredClone(value);f.calls.push('save');};
     saveRegistry=async()=>{f.calls.push('registry');};
     notifyController=async()=>{f.calls.push('notify');return {queued:true,sent:false};};
-    stopGeneration=async()=>{f.calls.push('stop');return {stopped:true};};
+    stopGeneration=async()=>{f.calls.push('stop');if(f.unknownAfterControl)f.runtime.tasks.T.status="UNKNOWN";return {stopped:true};};
     waitForGenerationStop=async()=>true;
     sendMessage=async()=>{f.calls.push('send');};
     emitTaskEvent=async()=>null;
+    recordDeliveryStage=async stage=>{if(f.stages)f.stages.push(stage);if(f.unknownAtSendIntent&&stage==="SEND_INTENT")f.runtime.tasks.T.status="UNKNOWN";};
+    if(f.unknownAfterControl)nativeRetry=async()=>{f.calls.push('retry');f.runtime.tasks.T.status="UNKNOWN";return {clicked:f.retryClicked};};
     if(f.raw) state=async()=>f.raw;
     if(f.pages) {
       openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,tabs:async()=>f.tabs||[]}});
@@ -37,6 +42,8 @@ async function harness(f={}) {
       resolveChat=()=>f.chat;
       ensurePage=async()=>({page:{}});
       detectWebRateLimit=async()=>{};
+      if(f.observed) observeSession=async()=>f.observed;
+      if(f.observeError) observeSession=async()=>{throw f.observeError;};
       if(f.recoveryApprovalRace) nativeRetry=async()=>{throw new Error("APPROVAL_REQUIRED");};
     }
     if(f.detach) {
@@ -46,7 +53,7 @@ async function harness(f={}) {
       const detachPage={label:"p1",targetId:"native-p1",spaceId:7,url:async()=>f.chat.url,evaluate:async()=>"login-a",close:async()=>f.calls.push("close")};
       openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,tabs:async()=>f.calls.includes("close")?[]:[{label:"p1",targetId:detachPage.targetId,page:detachPage,url:f.chat.url,active:false,openedBy:"agent"}]}});
     }
-    return {classifySnapshot,gradedRecover,ensurePage,state,nativeRetry,watchOnce,detachTerminalTaskPages};
+    return {classifySnapshot,gradedRecover,ensurePage,state,nativeRetry,watchOnce,detachTerminalTaskPages,triggerSend,send:originalSender};
   `)(f);
 }
 
@@ -94,6 +101,80 @@ test("a durable result recorded after observation must not be replayed by recove
   assert.equal(result.action,"SKIPPED");
   assert.equal(f.calls.includes("send"),false);
   assert.equal(f.runtime.tasks.T.status,"RESULT_RECORDED");
+});
+
+test("external UNKNOWN permits observation without recovery or owner-state changes",async()=>{
+  const t={taskId:"T",project:"P",account:"a",role:"worker",sessionId:"C",status:"UNKNOWN",completionMode:"external",
+    recoveryAttempts:2,totalRecoveryAttempts:2,watchErrorCount:2,lastRecoveryAt:"2026-10-09T10:34:44.579Z",
+    controllerSessionRef:"owner",replyToSessionRef:"owner",localOwner:null,baselineAssistantCount:1,baselineAssistantId:"ready"};
+  for(const sessionState of ["IDLE_INCOMPLETE","ERROR_RECOVERABLE","SUSPECT_STALL","CONTEXT_EXHAUSTED","RUNNING_ACTIVE"]) {
+    const f={watch:true,chat:{id:"C",project:"P",account:"a"},runtime:{tasks:{T:structuredClone(t)},sessions:{},projects:{}},
+      observed:{...healthy,sessionState,errorTexts:sessionState==="CONTEXT_EXHAUSTED"?["Maximum context length exceeded."]:[]}};
+    const api=await harness(f);
+    const result=await api.watchOnce({chats:{C:f.chat}},null,null,{skipLifecycle:true,aggressive:true});
+    assert.equal(result[0].recovery.action,"RECONCILE_ONLY",sessionState);
+    assert.deepEqual(f.runtime.tasks.T,t,sessionState);
+    assert.deepEqual(f.calls,[],sessionState);
+  }
+  for(const deliveryStage of [undefined,"SEND_ATTEMPTED"]) {
+    const error=Object.assign(new Error("native observation unavailable"),{deliveryStage});
+    const f={watch:true,observeError:error,chat:{id:"C",project:"P",account:"a"},runtime:{tasks:{T:structuredClone(t)},sessions:{},projects:{}}};
+    const api=await harness(f);
+    const result=await api.watchOnce({chats:{C:f.chat}},null,null,{skipLifecycle:true});
+    assert.equal(result[0].recovery.action,"RECONCILE_ONLY");
+    assert.deepEqual(f.runtime.tasks.T,t);
+    assert.deepEqual(f.calls,[]);
+  }
+});
+
+test("shared recovery rereads external UNKNOWN while ordinary external RUNNING can continue",async()=>{
+  const t={taskId:"T",project:"P",role:"worker",sessionId:"C",status:"RUNNING",completionMode:"external"};
+  const f={runtime:{tasks:{T:{...t,status:"UNKNOWN"}},sessions:{},projects:{}}};
+  const api=await harness(f);
+  const result=await api.gradedRecover({}, {id:"C"},{},t,{...healthy,sessionState:"IDLE_INCOMPLETE"},{aggressive:true});
+  assert.equal(result.action,"RECONCILE_ONLY");
+  assert.deepEqual(f.calls,[]);
+  f.runtime.tasks.T={...t};
+  assert.equal((await api.gradedRecover({}, {id:"C"},{},t,{...healthy,sessionState:"IDLE_INCOMPLETE"},{})).action,"RECOVERED");
+  assert.deepEqual(f.calls,["send","save"]);
+});
+
+test("owner UNKNOWN on the final watch reread prevents terminal state and budget changes",async()=>{
+  const t={taskId:"T",project:"P",account:"a",sessionId:"C",status:"RUNNING",completionMode:"external",
+    recoveryAttempts:2,totalRecoveryAttempts:2,watchErrorCount:2,lastRecoveryAt:"2026-10-09T10:34:44.579Z"};
+  for(const sessionState of ["CONTEXT_EXHAUSTED","RUNNING_ACTIVE"]) {
+    const f={watch:true,ownerUnknownAtRead:3,chat:{id:"C",project:"P",account:"a"},
+      runtime:{tasks:{T:structuredClone(t)},sessions:{},projects:{}},observed:{...healthy,sessionState,lastProgressAt:new Date().toISOString()}};
+    const result=await (await harness(f)).watchOnce({chats:{C:f.chat}},null,null,{skipLifecycle:true});
+    assert.equal(result[0].recovery.action,"RECONCILE_ONLY",sessionState);
+    assert.deepEqual(f.runtime.tasks.T,{...t,status:"UNKNOWN"},sessionState);
+    assert.deepEqual(f.calls,[],sessionState);
+  }
+});
+
+test("owner UNKNOWN after native recovery or at Send intent cannot continue or become RECOVERING",async()=>{
+  const t={taskId:"T",project:"P",account:"a",sessionId:"C",status:"RUNNING",completionMode:"external",recoveryAttempts:2,totalRecoveryAttempts:2};
+  for(const retryClicked of [true,false]) {
+    const f={unknownAfterControl:true,retryClicked,runtime:{tasks:{T:structuredClone(t)},sessions:{},projects:{}}},api=await harness(f);
+    await assert.rejects(api.gradedRecover({}, {id:"C"},{},t,{sessionState:"ERROR_RECOVERABLE"},{aggressive:true}),/RECOVERY_TASK_CHANGED/);
+    assert.deepEqual(f.runtime.tasks.T,{...t,status:"UNKNOWN"});assert.deepEqual(f.calls,["retry"]);
+  }
+  const f={unknownAfterControl:true,runtime:{tasks:{T:structuredClone(t)},sessions:{},projects:{}}},api=await harness(f);
+  assert.equal((await api.gradedRecover({}, {id:"C"},{},t,{sessionState:"SUSPECT_STALL"},{aggressive:true})).reason,"TASK_CHANGED_DURING_STOP");
+  assert.deepEqual(f.runtime.tasks.T,{...t,status:"UNKNOWN"});assert.deepEqual(f.calls,["stop"]);
+  f.raw={url:"https://chatgpt.com/c/C",approvalRequired:false};f.unknownAtSendIntent=true;f.stages=[];
+  f.runtime.tasks.T=structuredClone(t);
+  const sendApi=await harness(f);
+  const page={evaluate:async()=>false,press:async()=>assert.fail("Enter dispatched"),click:async()=>assert.fail("Send clicked")};
+  await assert.rejects(sendApi.triggerSend(page,f.raw.url,{taskId:"T",project:"P",account:"a",sessionId:"C"}),/RECOVERY_TASK_CHANGED/);
+  assert.deepEqual(f.stages,["SEND_INTENT"]);assert.deepEqual(f.runtime.tasks.T,{...t,status:"UNKNOWN"});
+  await assert.rejects(sendApi.send({},"continue",null,null,{taskId:"T",project:"P",account:"a",sessionId:"C"}),/RECOVERY_TASK_CHANGED/);
+  for(const hasSend of [true,false]) {
+    f.unknownAtSendIntent=false;f.unknownOnAdmission=2;f.stages=[];f.runtime.tasks.T=structuredClone(t);
+    const finalApi=await harness(f);page.evaluate=async()=>hasSend;
+    await assert.rejects(finalApi.triggerSend(page,f.raw.url,{taskId:"T",project:"P",account:"a",sessionId:"C"}),/RECOVERY_TASK_CHANGED/);
+    assert.deepEqual(f.stages,["SEND_INTENT"]);assert.deepEqual(f.runtime.tasks.T,{...t,status:"UNKNOWN"});
+  }
 });
 
 const id="12345678-1234-1234-1234-123456789abc";

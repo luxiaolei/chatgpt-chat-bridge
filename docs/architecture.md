@@ -185,6 +185,8 @@ The watchdog never marks a project task COMPLETE from UI state alone. `IDLE_COMP
 
 For continuous local operation, macOS launchd runs a fresh one-shot `chat-bridge watch --quiet` periodically. A fresh process reloads registry/runtime each scan, so newly created sessions and account/Space rebindings are visible without restarting a daemon.
 
+For externally completed tasks, the owning adapter must project its actual uncertain or timed-out state through `task set-status TASK --project NAME --account ALIAS --session CID --status UNKNOWN --expected-updated-at ISO`. This host-local management entry atomically requires an existing external task in the exact Project/account/conversation and the expected update version; it changes only status and update time, and same-version UNKNOWN is idempotent. Browser callers retain the existing management identity checks. It never takes the UI lock or starts Ego. External `UNKNOWN` remains active for observation and exact late-response events, but watchdog and shared recovery cannot Retry, Stop, continue, spend recovery budgets, mark it RUNNING/BLOCKED, or detach its page. A late assistant event is evidence for the external owner's existing reconciliation contract; it neither renews that owner's deadline nor accepts a result. Bridge does not infer an external deadline from local UI activity.
+
 ## GitHub Project management binding
 
 The word **Project** has two distinct meanings and they must not share identity:

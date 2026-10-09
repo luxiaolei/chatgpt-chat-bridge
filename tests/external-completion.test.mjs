@@ -8,7 +8,7 @@ globalThis.__CHAT_BRIDGE_COORDINATOR_PATH__=path.resolve("src/coordinator.py");
 
 const root=path.resolve(new URL("..", import.meta.url).pathname);
 
-test("external completion keeps idle assistant result owned by external adapter", async()=>{
+for(const status of ["RUNNING","UNKNOWN"]) test(`external ${status} keeps idle assistant result owned by external adapter`, async()=>{
   for(const file of ["control-routing","page-pool","liveness-policy","task-policy","lifecycle-policy","web-policy","model-policy","session-policy","event-journal"]) {
     await import(`../src/${file}.js`);
   }
@@ -25,15 +25,19 @@ test("external completion keeps idle assistant result owned by external adapter"
   };
   const task={
     taskId:"T1",sessionId:"worker",project:"P",account:"a",role:"worker",
-    controller:"root",replyTo:"root",escalationTo:"root",rootController:"root",
-    status:"RUNNING",completionMode:"external",
+    controller:"root",replyTo:"root",escalationTo:null,rootController:"root",
+    status,completionMode:"external",recoveryAttempts:2,totalRecoveryAttempts:2,watchErrorCount:2,
+    lastRecoveryAt:"2026-10-09T10:34:44.579Z",controllerSessionRef:"root",replyToSessionRef:"root",localOwner:null,
+    baselineAssistantCount:1,baselineAssistantId:"ready",baselineAssistantHash:"ready-hash",
+    originalMessage:"original external research request",dispatchedAt:"2026-10-09T09:51:43Z",
   };
   await writeFile(path.join(config,"registry.json"),JSON.stringify(reg));
   await writeFile(path.join(stateDir,"runtime.json"),JSON.stringify({version:2,projects:{},tasks:{T1:task},sessions:{}}));
   const oldConfig=globalThis.__CHAT_BRIDGE_CONFIG_DIR__, oldState=globalThis.__CHAT_BRIDGE_STATE_DIR__;
   globalThis.__CHAT_BRIDGE_CONFIG_DIR__=config; globalThis.__CHAT_BRIDGE_STATE_DIR__=stateDir;
   try {
-    const source=(await readFile(path.join(root,"src/main.js"),"utf8")).split('const cmd=args[0] || "help";')[0];
+    const main=await readFile(path.join(root,"src/main.js"),"utf8");
+    const source=main.split('const cmd=args[0] || "help";')[0];
     const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
     const sent=[];
     const api=await new AsyncFunction("setTimeout","taskSpace",source+`
@@ -56,7 +60,12 @@ test("external completion keeps idle assistant result owned by external adapter"
     assert.equal(results[0].notification,null);
     assert.equal(sent.length,0);
     const runtime=JSON.parse(await readFile(path.join(stateDir,"runtime.json"),"utf8"));
-    assert.equal(runtime.tasks.T1.status,"RUNNING");
+    assert.equal(runtime.tasks.T1.status,status);
+    for(const key of ["totalRecoveryAttempts","lastRecoveryAt","controllerSessionRef","replyToSessionRef","localOwner","baselineAssistantCount","baselineAssistantId","baselineAssistantHash","originalMessage","dispatchedAt"]) {
+      assert.deepEqual(runtime.tasks.T1[key],task[key]);
+    }
+    assert.equal(runtime.tasks.T1.recoveryAttempts,status==="UNKNOWN"?2:0);
+    assert.equal(runtime.tasks.T1.watchErrorCount,status==="UNKNOWN"?2:0);
     assert.equal(runtime.tasks.T1.completionMode,"external");
     assert.equal(runtime.tasks.T1.externalResponsePending,true);
     assert.equal(runtime.tasks.T1.watchdogResultNotifiedAt,null);
