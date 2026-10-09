@@ -10,7 +10,10 @@ const end=source.indexOf("\nfunction classifySnapshot",start);
 const state=new Function(source.slice(start,end)+";return state;")();
 const retryStart=source.indexOf("async function nativeRetry(");
 const retryEnd=source.indexOf("\nasync function waitForGenerationStop",retryStart);
-const retry=new Function("state","assertImagePageFree",source.slice(retryStart,retryEnd)+";return nativeRetry;")(state,async()=>{});
+const guardStart=source.indexOf("function assertRecoveryTaskCurrent(");
+const guardEnd=source.indexOf("\nasync function triggerSend",guardStart);
+const recoveryGuard=new Function(source.slice(guardStart,guardEnd)+";return assertRecoveryTaskCurrent;")();
+const retry=new Function("state","assertImagePageFree","assertRecoveryTaskCurrent",source.slice(retryStart,retryEnd)+";return nativeRetry;")(state,async()=>{},recoveryGuard);
 
 function node(text="",attributes={},options={}) {
   const item={innerText:text,textContent:text,tagName:options.tagName||"DIV",disabled:!!options.disabled,
