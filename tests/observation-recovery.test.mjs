@@ -5,7 +5,7 @@ import '../src/task-policy.js';
 const source=await readFile('src/main.js','utf8');
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 const start=source.indexOf('async function reattachTask(');
-const code='const cleanupAllocatedPage=async(_r,_t,p,v)=>closeEmptyPage(p,await p.url(),v);const handoffAllocatedPage=async()=>{};const allocateManagedPage=(t)=>t.newPage(); const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(start,source.indexOf('\nasync function ensurePage',start));
+const code=source.slice(source.indexOf('function boundManagedPage('),source.indexOf('\nfunction samePhysicalSpace',source.indexOf('function boundManagedPage(')))+'const cleanupAllocatedPage=async(_r,_t,p,v)=>closeEmptyPage(p,await p.url(),v);const handoffAllocatedPage=async()=>{};const allocateManagedPage=(t)=>t.newPage(); const {composerIsEmpty}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(start,source.indexOf('\nasync function ensurePage',start));
 async function fixture(overrides={}) {
   const chat={id:'sid',project:'P',account:'a',role:'critic',spaceName:'user-space',spaceId:0,page:'p0',url:'https://chatgpt.com/g/g-p-'+'a'.repeat(32)+'/c/sid'};
   const binding={spaceName:'chat-bridge-agent-a',profileId:'Profile 1',projectUrl:'https://chatgpt.com/g/g-p-'+'a'.repeat(32)+'/project'};
@@ -13,8 +13,8 @@ async function fixture(overrides={}) {
   const runtime={tasks:{T:task,other:{watchdogPausedForUserControl:true}},projects:{P:{watchdogPausedForUserControl:true}}};
   const reg={projects:{P:{bindings:{a:binding}}},chats:{sid:chat},accounts:{a:{identity:'login-a'}}};
   let saved=0;
-  const page={label:'p7',url:async()=>chat.url,waitForFunction:async()=>{},evaluate:async()=>overrides.login||'login-a',goto:async()=>{throw Error('unexpected navigation');}};
-  const space={spaceId:9,tabs:async()=>[{label:'p7',url:chat.url,openedBy:'agent'}],page:()=>page};
+  const page={label:'p7',spaceId:9,targetId:'target-p7',url:async()=>chat.url,waitForFunction:async()=>{},evaluate:async()=>overrides.login||'login-a',goto:async()=>{throw Error('unexpected navigation');}};
+  const space={spaceId:9,tabs:async()=>[{label:'p7',targetId:page.targetId,page,url:chat.url,openedBy:'agent'}],page:()=>page};
   const snapshot={composerPresent:true,composerText:overrides.draft||'',composerCount:1,composerAttachmentsEmpty:true,composerRawText:overrides.draft||'',errorTexts:[],generating:false};
   const taskAccounts=new Map(overrides.accountConflict?[[9,'foreign']]:[]);
   const values={stored:()=>structuredClone(reg),taskAccounts,accountScope:(_reg,alias)=>alias,loadRuntime:async()=>runtime,activeTaskStatus:s=>s==='RUNNING',bindingFor:()=>binding,
@@ -109,7 +109,7 @@ test('message selection excludes zero-area hidden history clones but retains off
 });
 
 const observerStart=source.indexOf("async function observeOperation(");
-const observerCode='const handoffAllocatedPage=async()=>{};const allocateManagedPage=(t)=>t.newPage();'+source.slice(observerStart,source.indexOf("\nasync function ensurePage",observerStart));
+const observerCode=source.slice(source.indexOf('function boundManagedPage('),source.indexOf('\nfunction samePhysicalSpace',source.indexOf('function boundManagedPage(')))+'const handoffAllocatedPage=async()=>{};const allocateManagedPage=(t)=>t.newPage();'+source.slice(observerStart,source.indexOf("\nasync function ensurePage",observerStart));
 async function operationFixture(change={}) {
   const cid="aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", projectId="g-p-"+"a".repeat(32);
   const scope={operationId:"op",taskId:"legacy-no-runtime",project:"P",account:"a",accountId:"scope-a",
@@ -119,12 +119,12 @@ async function operationFixture(change={}) {
   const snapshot={url:scope.url,observedAt:new Date().toISOString(),userMessages:[],composerText:"untouched draft",
     online:false,errorTexts:["Network error"],recoveryControls:[{label:"Retry",disabled:false}],pageWasDiscarded:false,
     generating:true,lastAssistantId:"assistant",lastAssistant:"body",messageCount:2};
-  const page={label:"p1",url:async()=>change.url||scope.url,waitForFunction:async()=>{},
+  const page={label:"p1",spaceId:1,targetId:"target-p1",url:async()=>change.url||scope.url,waitForFunction:async()=>{},
     evaluate:async()=>change.login||"login",goto:async()=>opened++};
   const params={coordinated:()=>({...scope,anchor:change.race&&contextReads++?"changed":"anchor"}),
     opt:key=>key==="project"?"P":"a",listTaskSpaces:async()=>[{id:1,name:scope.binding.spaceName,ownership:change.ownership||"agent",createdBy:"agent",profileId:"Profile 1"}],
     loadRuntime:async()=>({tasks:change.paused?{x:{sessionId:cid,watchdogPausedForUserControl:true}}:{},sessions:{}}),
-    assertWebAvailable:async()=>{},taskSpace:async()=>({spaceId:1,tabs:async()=>[{label:"p1",url:scope.url,openedBy:"agent"}],page:()=>page,newPage:async()=>{throw Error("unexpected allocation");}}),
+    assertWebAvailable:async()=>{},taskSpace:async()=>({spaceId:1,tabs:async()=>[{label:"p1",targetId:page.targetId,page,url:scope.url,openedBy:"agent"}],page:()=>page,newPage:async()=>{throw Error("unexpected allocation");}}),
     taskAccounts:new Map(),accountScope:()=>scope.accountId,waitForConversationReady:async()=>{throw Error("read-only observer must never run retry-capable readiness");},
     recoveryRequired:()=>true,sameConversationUrl:(a,b)=>a===b,projectKey:url=>url.match(/g-p-[a-f0-9]{32}/)?.[0],state:async()=>snapshot};
   const fn=await new AsyncFunction(...Object.keys(params),observerCode+";return observeOperation;")(...Object.values(params));

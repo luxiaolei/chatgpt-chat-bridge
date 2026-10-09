@@ -48,7 +48,7 @@ function fixture(change={}) {
     s==='main'||s==='[role="main"]'?root:s==='form'?form:
     s.includes('prompt-textarea')?composers[0]||null:s==='button[data-testid="send-button"]'?send:null,
     querySelectorAll:s=>s.includes('contenteditable="true"')?composers:s==='button'?buttons:[]};
-  f.page={label:'synthetic',spaceId:2,url:async()=>f.currentUrl,goto:async u=>{f.currentUrl=u;},waitForSelector:async()=>{},
+  f.page={label:'synthetic',spaceId:2,targetId:'native-synthetic',url:async()=>f.currentUrl,goto:async u=>{f.currentUrl=u;},waitForSelector:async()=>{},
     fill:async(_s,text)=>{calls.push('fill');if(text===''&&change.clearNotEmpty)return;if(text===''&&change.clearFails)throw Error('uncertain clear');composer.textContent=composer.innerText=change.partialFill?'partial user content':change.emptyFill?'':text;if(change.loginAfterFill)f.login=change.loginAfterFill;if(change.fillFails)throw Error('fill transport failed');},
     keyboard:{press:async key=>calls.push('key:'+key),insertText:async text=>{calls.push('insert');composer.textContent=composer.innerText=text;}},
     focus:async()=>calls.push('focus'),waitForTimeout:async()=>{},close:async()=>{f.closed++;},
@@ -87,7 +87,7 @@ async function run(f,fn) {
       "model:async()=>{const positionals=()=>['Latest'],opt=()=>null;"+modelBody+'},',
       "effort:async()=>{const positionals=()=>['High'];"+effortBody+'},',
       "new:async()=>{const project='P',accountArg='a';"+newBody+'},',
-      'reclaim:()=>reclaimIdlePageSlot(reg,"P","a",{spaceId:2,page:()=>page,tabs:async()=>f.closed?[]:[{label:page.label,url:f.currentUrl,active:true,openedBy:"agent"}]},reg.projects.P.bindings.a),loader:()=>recoverConversationLoadError(page)};'
+      'reclaim:()=>reclaimIdlePageSlot(reg,"P","a",{spaceId:2,page:()=>page,tabs:async()=>f.closed?[]:[{label:page.label,targetId:page.targetId,page,url:f.currentUrl,active:true,openedBy:"agent"}]},reg.projects.P.bindings.a),loader:()=>recoverConversationLoadError(page)};'
     ].join('\n');
     const api=await new AsyncFunction('f','message','url','home',prefix+setup)(f,message,url,home);
     return await fn(api);

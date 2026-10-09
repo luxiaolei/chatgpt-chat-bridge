@@ -9,15 +9,15 @@ const source=await readFile(path.resolve("src/main.js"),"utf8");
 const begin=source.indexOf("async function reclaimOrphanManagedPage");
 const end=source.indexOf("\nasync function newManagedPage",begin);
 assert.ok(begin>=0&&end>begin);
-const code="const physicalReleasePayload=(_r,_t,page,_b,_p,account,purpose,candidate)=>({account,candidate,resourceTarget:{purpose,page:page.label}});const releasePhysicalPage=async(_r,_t,page)=>page.close();"+'const {composerIsEmpty,draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(begin,end);
+const code=source.slice(source.indexOf('function boundManagedPage('),source.indexOf('\nfunction samePhysicalSpace',source.indexOf('function boundManagedPage(')))+"const physicalReleasePayload=(_r,_t,page,_b,_p,account,purpose,candidate)=>({account,candidate,resourceTarget:{purpose,page:page.label}});const releasePhysicalPage=async(_r,_t,page)=>page.close();"+'const {composerIsEmpty,draftDiscardProject}=globalThis.__CHAT_BRIDGE_TASK_POLICY__;\n'+source.slice(begin,end);
 const AsyncFunction=Object.getPrototypeOf(async()=>{}).constructor;
 
 async function run(snapshot) {
   snapshot={approvalRequired:false,composerCount:1,composerAttachmentsEmpty:true,composerRawText:snapshot.composerText,...snapshot};
   let closed=0;
   const home="https://chatgpt.com/g/g-p-"+"a".repeat(32)+"/project";
-  const page={label:"p1",url:async()=>home,close:async()=>{closed++}};
-  const task={spaceId:7,pages:async()=>[page],tabs:async()=>closed?[]:[{label:"p1",url:home,active:false,openedBy:"agent"}]};
+  const page={label:"p1",spaceId:7,targetId:"native-p1",evaluate:async()=>{},url:async()=>home,close:async()=>{closed++}};
+  const task={spaceId:7,pages:async()=>[page],tabs:async()=>closed?[]:[{label:"p1",targetId:page.targetId,page,url:home,active:false,openedBy:"agent"}]};
   const reclaim=await new AsyncFunction("loadRuntime","activeTaskStatus","orphanManagedPageCandidates","state","projectHomeId","coordinated","sameConversationUrl","assertInputSafe","listTaskSpaces",
     code+";return reclaimOrphanManagedPage;")(
       async()=>({tasks:{}}),

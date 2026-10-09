@@ -15,21 +15,21 @@ async function fixture(change={}){
   const scope={sessionRef:id,url,project:'P',account:'a',accountId:'a',accountIdentity:'login-a',projectId,binding,anchor:'exact-current',operationId:'sent-original'};
   const snapshot={url,lastAssistant:'actual successor reply',lastAssistantId:'assistant',lastUserSource:{text:'exact source'},composerText:'user draft',observedAt:new Date().toISOString()};
   let queries=0,printed,reads=0,logins=0;
-  const page={url:async()=>url,waitForFunction:async()=>{},evaluate:async()=>{logins++;return change.login||'login-a';}};
+  const page={label:"p4",spaceId:42,targetId:"target-p4",url:async()=>url,waitForFunction:async()=>{},evaluate:async()=>{logins++;return change.login||'login-a';}};
   const values={reg,runtime,cmd:change.cmd||'status',args:[change.cmd||'status',id],
     coordinated:(command,payload)=>{assert.equal(command,'observation-context');assert.deepEqual(payload,{pendingSession:id});queries++;return {...scope,anchor:change.race&&queries===2?'changed':'exact-current'};},
     opt:name=>change[name]||null,
     listTaskSpaces:async()=>[{id:change.spaceId||42,name:binding.spaceName,ownership:change.ownership||'agent',createdBy:'agent',profileId:change.profile||'Profile 1'}],
     loadRuntime:async()=>({...runtime,sessions:change.pause||(change.pauseAfterRead&&reads)||(change.pauseAfterLogin&&logins)?{[id]:{watchdogPausedForUserControl:true}}:{},
       tasks:{...runtime.tasks,...(change.pauseTaskAfterRead&&reads?{target:{sessionId:id,watchdogPausedForUserControl:true}}:{})}}),
-    taskSpace:async()=>({spaceId:42,tabs:async()=>change.tabs||[{url,label:'p4',openedBy:'agent'}],page:()=>page,newPage:()=>{throw Error('unexpected page allocation');}}),
+    taskSpace:async()=>({spaceId:42,tabs:async()=>change.tabs||[{url,label:'p4',targetId:page.targetId,page,openedBy:'agent'}],page:()=>page,newPage:()=>{throw Error('unexpected page allocation');}}),
     taskAccounts:new Map(),accountScope:(_reg,alias)=>alias,assertWebAvailable:async()=>{},
     state:async(_page,mode)=>{assert.equal(mode,'ids');reads++;return {...snapshot,url:change.url||url};},
     projectKey:value=>value.match(/g-p-[0-9a-f]{32}/)?.[0],
     sameConversationUrl:globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,
     convId:value=>value.match(/\/c\/([^/]+)/)?.[1]||value,recoveryRequired:()=>false,
     print:value=>printed=value};
-  const code=section('async function observeOperation(','\nasync function ensurePage')+'\n'+
+  const code=source.slice(source.indexOf('function boundManagedPage('),source.indexOf('\nfunction samePhysicalSpace',source.indexOf('function boundManagedPage(')))+section('async function observeOperation(','\nasync function ensurePage')+'\n'+
     section('else if(["read","status"].includes(cmd)','\nelse if(["read","evidence"').replace(/^else /,'');
   return {run:async()=>{await new AsyncFunction(...Object.keys(values),code)(...Object.values(values));return {printed,queries,reads};},reg,runtime};
 }

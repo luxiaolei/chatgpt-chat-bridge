@@ -43,7 +43,8 @@ async function harness(f={}) {
       listTaskSpaces=async()=>[{id:7,name:"managed",profileId:"P1",ownership:"agent",createdBy:"agent"}];
       imageSessionOccupancy=()=>({occupied:false});
       coordinated=command=>{if(command!=="page-reclaim-context")throw Error(command);return {sessionRefs:[],unboundProjectIds:[],unboundAny:false};};
-      openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,page:()=>({url:async()=>f.chat.url,evaluate:async()=>"login-a",close:async()=>f.calls.push("close")}),tabs:async()=>f.calls.includes("close")?[]:[{label:"p1",url:f.chat.url,active:false,openedBy:"agent"}]}});
+      const detachPage={label:"p1",targetId:"native-p1",spaceId:7,url:async()=>f.chat.url,evaluate:async()=>"login-a",close:async()=>f.calls.push("close")};
+      openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,tabs:async()=>f.calls.includes("close")?[]:[{label:"p1",targetId:detachPage.targetId,page:detachPage,url:f.chat.url,active:false,openedBy:"agent"}]}});
     }
     return {classifySnapshot,gradedRecover,ensurePage,state,nativeRetry,watchOnce,detachTerminalTaskPages};
   `)(f);
@@ -100,12 +101,12 @@ const base="https://chatgpt.com/g/g-p-0123456789abcdef0123456789abcdef";
 function attachmentFixture(actual) {
   let current=actual;
   const calls=[];
-  const page={label:"p1",url:async()=>current,goto:async url=>{calls.push(url);current=url;}};
+  const page={label:"p1",targetId:"native-p1",spaceId:7,evaluate:async()=>{},url:async()=>current,goto:async url=>{calls.push(url);current=url;}};
   let newUrl="about:blank";
-  const newPage={label:"p2",url:async()=>newUrl,goto:async url=>{newUrl=url;}};
+  const newPage={label:"p2",targetId:"native-p2",spaceId:7,evaluate:async()=>{},url:async()=>newUrl,goto:async url=>{newUrl=url;}};
   const binding={spaceId:7,spaceName:"managed",projectUrl:base+"/project"};
   const chat={id,role:"worker",project:"P",account:"a",url:base+"/c/"+id,page:"p1",spaceId:7,pageSpaceId:7,spaceName:"managed"};
-  return {chat,calls,f:{binding,pages:[page],tabs:[{label:"p1",url:actual,openedBy:"agent",active:true}],newPage}};
+  return {chat,calls,f:{binding,pages:[page],tabs:[{label:"p1",targetId:page.targetId,page,url:actual,openedBy:"agent",active:true}],newPage}};
 }
 
 test("same conversation with canonical slug/query differences is not navigated again",async()=>{

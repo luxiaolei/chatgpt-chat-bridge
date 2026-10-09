@@ -3758,8 +3758,10 @@ def controller_placement_commit(db, payload):
     if not isinstance(payload, dict) or set(payload) != required:
         raise ValueError("CONTROLLER_PLACEMENT_COMMIT_INVALID")
     attachment, observed = payload["attachment"], payload["observation"]
-    if (not isinstance(attachment, dict) or set(attachment) != {
-            "spaceName", "spaceId", "pageSpaceId", "page", "profileId", "attachmentEpoch"}
+    if (not isinstance(attachment, dict) or set(attachment) not in ({
+            "spaceName", "spaceId", "pageSpaceId", "page", "profileId", "attachmentEpoch"},
+            {"spaceName", "spaceId", "pageSpaceId", "page", "profileId", "attachmentEpoch", "pageTargetId"})
+            or "pageTargetId" in attachment and (not isinstance(attachment["pageTargetId"], str) or not attachment["pageTargetId"].strip())
             or not isinstance(observed, dict) or set(observed) != {
             "url", "accountIdentity", "composerPresent", "composerCount", "composerRawText", "generating", "approvalRequired"}):
         raise ValueError("CONTROLLER_PLACEMENT_EVIDENCE_INVALID")
@@ -3809,6 +3811,8 @@ def controller_placement_commit(db, payload):
                 or observed["generating"] is not False or observed["approvalRequired"] is not False):
             raise ValueError("CONTROLLER_PLACEMENT_OBSERVATION_REJECTED")
         chat.update(attachment)
+        if "pageTargetId" not in attachment:
+            chat.pop("pageTargetId", None)
         reg = registry(db)
         reg["chats"][current["sessionId"]] = chat
         if overflow is not None:
@@ -3832,8 +3836,10 @@ def reattach_commit(db, payload):
     if not isinstance(payload, dict) or set(payload) != required:
         raise ValueError("REATTACH_COMMIT_INVALID")
     attachment = payload["attachment"]
-    if not isinstance(attachment, dict) or set(attachment) != {
-            "spaceName", "spaceId", "pageSpaceId", "page", "profileId", "attachmentEpoch"}:
+    if (not isinstance(attachment, dict) or set(attachment) not in ({
+            "spaceName", "spaceId", "pageSpaceId", "page", "profileId", "attachmentEpoch"},
+            {"spaceName", "spaceId", "pageSpaceId", "page", "profileId", "attachmentEpoch", "pageTargetId"}) or
+            "pageTargetId" in attachment and (not isinstance(attachment["pageTargetId"], str) or not attachment["pageTargetId"].strip())):
         raise ValueError("REATTACH_ATTACHMENT_INVALID")
     begin_immediate(db)
     try:
@@ -3852,6 +3858,8 @@ def reattach_commit(db, payload):
                 attachment["spaceName"] != binding.get("spaceName") or attachment["profileId"] != binding.get("profileId")):
             raise ValueError("REATTACH_BINDING_CHANGED")
         chat.update(attachment)
+        if "pageTargetId" not in attachment:
+            chat.pop("pageTargetId", None)
         if payload["resumeWatch"] is True:
             for name in ("watchdogPausedForUserControl", "watchdogPausedAt", "watchdogPausedSpace", "watchdogPausedOwnership"):
                 task.pop(name, None)

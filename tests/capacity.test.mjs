@@ -166,7 +166,7 @@ test('a detached conversation reuses the bounded pool and preserves its CID duri
   const binding={spaceName:'chat-bridge-agent-a',spaceId:1,profileId:'P1'},overflow={spaceName:binding.spaceName+'-overflow-2',spaceId:10,profileId:'P1'},page={label:'next',goto:async target=>assert.equal(target,url),url:async()=>url};
   let handedOff=0;
   const ensure=await new AsyncFunction('openBoundTask','pagesOf','sameConversationUrl','newManagedPage','waitForConversationReady','saveRegistry','openConversationFromProject','handoffAllocatedPage','cleanupFailedAllocation',source.slice(a,z)+';return ensurePage;')(
-    async()=>({binding,task:{spaceId:1}}),async()=>[],(a,b)=>a===b,async(_r,p,account,_t,_b,id,options)=>{assert.equal(options.allowOverflow,true);assert.equal(id,chat.id);return {page,task:{spaceId:10},binding:overflow,overflow:true};},async()=>{},async()=>{},()=>{throw Error('unexpected fallback');},async target=>{assert.equal(target,page);handedOff++;},async()=>{throw Error('unexpected cleanup');});
+    async()=>({binding,task:{spaceId:1,tabs:async()=>[]}}),async()=>[],(a,b)=>a===b,async(_r,p,account,_t,_b,id,options)=>{assert.equal(options.allowOverflow,true);assert.equal(id,chat.id);return {page,task:{spaceId:10},binding:overflow,overflow:true};},async()=>{},async()=>{},()=>{throw Error('unexpected fallback');},async target=>{assert.equal(target,page);handedOff++;},async()=>{throw Error('unexpected cleanup');});
   await ensure({projects:{P:{bindings:{a:binding}}}},chat,{allowOverflow:true});
   assert.equal(chat.id,original.id);assert.equal(chat.url,original.url);assert.equal(chat.page,'next');assert.equal(chat.spaceId,10);assert.equal(chat.spaceName,overflow.spaceName);
   assert.equal(handedOff,1);

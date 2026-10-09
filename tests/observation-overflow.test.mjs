@@ -22,7 +22,7 @@ async function fixture(change={}){
   const runtime={sessions:{},tasks:{other:{sessionId:'other',watchdogPausedForUserControl:true}},capacity:{retained:true}};
   const operation={id:'original',status:'DELIVERY_UNKNOWN',session_ref:cid,attempts:48,result:{original:true}};
   const calls={newPages:[],created:[],gotos:[],spaces:[],closed:[],state:0,contexts:0};
-  const tab=(label,target=url,openedBy='agent')=>({label,url:target,openedBy,active:false});
+  const tab=(label,target=url,openedBy='agent')=>({label,targetId:'native-'+label,url:target,openedBy,active:false});
   const full=id=>Array.from({length:8},(_,n)=>tab('p'+id+'-'+n,url.replace(cid,'22222222-2222-4222-8222-222222222222')));
   const inventories=new Map([[1,full(1)],[42,change.headTabs??[tab('p42','about:blank')]],[41,change.previousTabs??full(41)]]);
   if(change.primaryTabs)inventories.set(1,change.primaryTabs);
@@ -33,7 +33,7 @@ async function fixture(change={}){
     projectId,anchor:'original-anchor',accountIdentity:'login-a',url,binding:reg.projects.P.bindings.a};
   const pages=new Map();
   function page(id,label,target){
-    const p={label,url:async()=>change.pageUrl||target,waitForFunction:async()=>{},
+    const p={label,spaceId:id,targetId:inventories.get(id).find(t=>t.label===label)?.targetId,url:async()=>change.pageUrl||target,waitForFunction:async()=>{},
       evaluate:async()=>{if(calls.state)change.duringCleanupLogin?.({reg,runtime,available,inventories,change});return calls.state&&change.cleanupLogin||change.login||'login-a';},goto:async value=>{calls.gotos.push({id,value});target=value;inventories.get(id).find(t=>t.label===label).url=value;},
       close:async()=>{calls.closed.push({id,label});if(change.closeError)throw Error('synthetic close failure');inventories.set(id,inventories.get(id).filter(t=>t.label!==label));}};
     pages.set(id+':'+label,p);return p;
@@ -48,7 +48,7 @@ async function fixture(change={}){
       assert.equal(typeof target,'number','observation must open only an existing Space by verified ID');
       calls.spaces.push(target);const info=available.find(x=>x.id===target);assert.ok(info,'must not create a Space');
       if(change.overflowIdRace && target===42){info.id=99;inventories.set(99,inventories.get(42));target=99;}
-      return {spaceId:target,name:change.taskNameWrong&&target===42?'foreign-name':info.name,tabs:async()=>inventories.get(target),
+      return {spaceId:target,name:change.taskNameWrong&&target===42?'foreign-name':info.name,tabs:async()=>inventories.get(target).map(t=>{t.targetId??='native-'+target+'-'+t.label;t.page??=pages.get(target+':'+t.label)||page(target,t.label,t.url);return t;}),
         page:label=>pages.get(target+':'+label)||page(target,label,inventories.get(target).find(x=>x.label===label)?.url),
         newPage:async()=>{calls.newPages.push(target);if(inventories.get(target).length>=8||change.allocationRace===target)throw Error('Page budget reached (8/8) in space');
           const label='created-'+target;inventories.get(target).push(tab(label,'about:blank'));calls.created.push(target);return page(target,label,'about:blank');}};
@@ -59,7 +59,7 @@ async function fixture(change={}){
     sameConversationUrl:globalThis.__CHAT_BRIDGE_SESSION_POLICY__.sameConversationUrl,
     projectKey:value=>value.match(/g-p-[0-9a-f]{32}/)?.[0],recoveryRequired:globalThis.__CHAT_BRIDGE_SESSION_POLICY__.recoveryRequired,
     contextExhausted:globalThis.__CHAT_BRIDGE_SESSION_POLICY__.contextExhausted};
-  const code='const cleanupAllocatedPage=async(_r,_t,p,v)=>closeEmptyPage(p,await p.url(),v);const handoffAllocatedPage=async()=>{};const allocateManagedPage=(t)=>t.newPage();'+section('function normalizeRuntime','\nconst CAPACITY_WAIT_STATUS')+'\n'+section('function managedSpacePlan','\nasync function accountManagedTask')+'\n'+
+  const code=source.slice(source.indexOf('function boundManagedPage('),source.indexOf('\nfunction samePhysicalSpace',source.indexOf('function boundManagedPage(')))+'const cleanupAllocatedPage=async(_r,_t,p,v)=>closeEmptyPage(p,await p.url(),v);const handoffAllocatedPage=async()=>{};const allocateManagedPage=(t)=>t.newPage();'+section('function normalizeRuntime','\nconst CAPACITY_WAIT_STATUS')+'\n'+section('function managedSpacePlan','\nasync function accountManagedTask')+'\n'+
     section('async function overflowManagedTask','\nasync function newManagedPage')+'\n'+section('async function closeEmptyPage','\nasync function nativeSubmissionWitness')+'\n'+section('async function observeOperation','\nasync function ensurePage');
   const observe=await new AsyncFunction(...Object.keys(values),code+';return observeOperation;')(...Object.values(values));
   const before=structuredClone({reg,runtime,operation});

@@ -20,7 +20,8 @@ async function fixture(status="RESULT_RECORDED",tab={},snapshot={}) {
     state=async()=>f.snapshot;
     listTaskSpaces=async()=>[{id:7,name:'managed',profileId:'P1',ownership:'agent',createdBy:'agent'}];
     coordinated=command=>{if(command!=='page-reclaim-context')throw Error(command);return {sessionRefs:[],unboundProjectIds:[],unboundAny:false};};
-    openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,tabs:async()=>f.closed?[]:[f.tab],page:()=>({url:async()=>f.tab.url,evaluate:async()=>"login-a",close:async()=>{f.closed++;}})}});
+    f.tab.targetId="native-p1";f.tab.page={label:f.tab.label,targetId:f.tab.targetId,spaceId:7,url:async()=>f.tab.url,evaluate:async()=>"login-a",close:async()=>{f.closed++;}};
+    openBoundTask=async()=>({binding:f.binding,task:{spaceId:7,tabs:async()=>f.closed?[]:[f.tab]}});
     return detachTerminalTaskPages;
   `)(f);
   f.out=await detach(f.reg,"P","a");return f;
