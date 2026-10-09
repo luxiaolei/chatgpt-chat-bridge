@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,mkdir,writeFile,readFile,rm,stat,realpath} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,rm,stat,realpath,symlink} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
@@ -95,6 +95,79 @@ test('a reload intent preserves old UNKNOWN and an uncertain reload fences norma
       assert.notEqual(f.run('page-release-record',{...next,phase:'INTENT'}).status,0);
     }
     assert.equal(f.rawOperation(op.operationId),raw);
+  }finally{await rm(f.root,{recursive:true,force:true});}
+});
+async function failedReload(f,outcome={closeAttempted:false,reloadAttempted:true},intentData={reloadHome:true}) {
+  const reg=structuredClone(f.registry);reg.projects.P.lifecycle={draftPolicy:'discard'};reg.managementAdmins=['owner'];f.put('registry',reg);
+  const reload={...f.payload,reloadHome:true},intent=f.call('page-release-record',{...reload,phase:'INTENT',data:intentData});
+  const unknown=f.call('page-release-record',{...reload,releaseIntent:intent,phase:'UNKNOWN',data:outcome});
+  return {reg,intent,unknown,payload:{...f.payload,terminateAfterReloadUnknown:{path:unknown.path,sha256:unknown.sha256}}};
+}
+test('independent termination intent binds the exact failed reload and never alters original release UNKNOWN or business state',async()=>{
+  for(const phase of ['INTENT','RELEASED','UNKNOWN','REFUSED']) {
+    const f=await fixture();try {
+      const op=f.call('submit',{requestId:'old-business',callerRef:'owner',project:'P',account:'a',role:'worker',message:'synthetic'});f.call('work-one');
+      const original=f.rawOperation(op.operationId),x=await failedReload(f),old=await readFile(x.unknown.path),oldIntent=await readFile(x.intent.path);
+      assert.equal(f.call('page-reclaim-context',x.payload).resourceRelease.allowed,true);
+      assert.notEqual(f.run('page-release-record',{...x.payload,phase:'INTENT'}).status,0);
+      const intent=f.call('page-termination-record',{...x.payload,phase:'INTENT'});
+      const recorded=JSON.parse(await readFile(intent.path));assert.equal(recorded.predecessor.unknown.sha256,x.unknown.sha256);assert.equal(recorded.predecessor.intent.sha256,x.intent.sha256);
+      assert.equal(recorded.rendererStateVerified,false);assert.equal((await stat(intent.path)).mode&0o777,0o600);
+      assert.equal(f.call('page-reclaim-context',x.payload).resourceRelease.allowed,false);
+      assert.equal(f.call('page-reclaim-context',{...x.payload,terminationIntent:intent}).resourceRelease.allowed,true);
+      if(phase!=='INTENT') f.call('page-termination-record',{...x.payload,terminationIntent:intent,phase,data:{closeAttempted:phase!=='REFUSED',closeAcknowledged:true,targetAbsent:true}});
+      assert.notEqual(f.run('page-termination-record',{...x.payload,phase:'INTENT'}).status,0);
+      assert.equal(f.call('page-release-status',f.payload).phase,'UNKNOWN');
+      assert.equal(f.call('page-reclaim-context',f.payload).resourceRelease.allowed,false);
+      assert.equal(f.call('page-reclaim-context',{...f.payload,reloadHome:true}).resourceRelease.allowed,false);
+      assert.deepEqual(await readFile(x.unknown.path),old);assert.deepEqual(await readFile(x.intent.path),oldIntent);assert.equal(f.rawOperation(op.operationId),original);
+    }finally{await rm(f.root,{recursive:true,force:true});}
+  }
+});
+test('termination refuses wrong hash/path, CID, actor, protected scope and any absent/uncertain prior close evidence',async()=>{
+  const f=await fixture();try {
+    const x=await failedReload(f),deny=payload=>assert.notEqual(f.run('page-termination-record',{...payload,phase:'INTENT'}).status,0);
+    for(const patch of [{confirm:false},{reloadHome:true},{candidate:{id:'missing'}},
+      {terminateAfterReloadUnknown:{...x.payload.terminateAfterReloadUnknown,sha256:'0'.repeat(64)}},
+      {terminateAfterReloadUnknown:{...x.payload.terminateAfterReloadUnknown,path:x.intent.path}},
+      ...[{targetId:'other'},{profileId:'other'},{spaceId:8},{purpose:'ORPHAN_IDLE'},{url:home.replace('/project','/c/11111111-1111-4111-8111-111111111111')}].map(p=>({resourceTarget:{...f.target,...p}}))])deny({...x.payload,...patch});
+    const web=spawnSync('python3',[coordinator,'page-termination-record',f.config,f.state],{encoding:'utf8',input:JSON.stringify({...x.payload,callerRef:'owner',phase:'INTENT'}),env:{...process.env,CHAT_BRIDGE_FROM_ACCOUNT_ID:scope}});assert.notEqual(web.status,0);
+    for(const patch of [r=>{r.projects.P.lifecycle.draftPolicy='preserve';},r=>{r.chats.other={page:'p9',spaceId:9};},r=>{r.chats.other={targetId:'target-one',page:'other'};},r=>{r.projects.P.bindings.a.controlPage='p9';}]){const reg=structuredClone(x.reg);patch(reg);f.put('registry',reg);deny(x.payload);f.put('registry',x.reg);}
+    for(const runtime of [{projects:{P:{watchdogPausedForUserControl:true}}},{tasks:{other:{page:'p9',spaceId:9}}},{sessions:{other:{pageTargetId:'target-one'}}}]){f.put('runtime',runtime);deny(x.payload);f.put('runtime',{tasks:{}});}
+    const alias=x.unknown.path+'.symlink';await symlink(x.unknown.path,alias);deny({...x.payload,terminateAfterReloadUnknown:{...x.payload.terminateAfterReloadUnknown,path:alias}});
+    const original=await readFile(x.unknown.path),changed=JSON.parse(original);changed.data.reason='changed';await writeFile(x.unknown.path,JSON.stringify(changed));deny(x.payload);
+    for(const data of [{reloadAttempted:true,closeAttempted:true},{reloadAttempted:true},{closeAttempted:false},{reloadAttempted:false,closeAttempted:false}]){changed.data=data;await writeFile(x.unknown.path,JSON.stringify(changed));const hash=crypto.createHash('sha256').update(await readFile(x.unknown.path)).digest('hex');deny({...x.payload,terminateAfterReloadUnknown:{path:x.unknown.path,sha256:hash}});}
+    await writeFile(x.unknown.path,original);
+    const backup=x.unknown.path+'.backup';await writeFile(backup,original,{mode:0o600});await rm(x.unknown.path);await symlink(backup,x.unknown.path);deny(x.payload);await rm(x.unknown.path);await writeFile(x.unknown.path,original,{mode:0o600});
+    const raw=JSON.parse(await readFile(x.intent.path));delete raw.data.reloadHome;await writeFile(x.intent.path,JSON.stringify(raw));deny(x.payload);
+  }finally{await rm(f.root,{recursive:true,force:true});}
+});
+test('termination cannot be authorized by an incomplete reload intent, other outcome or current writer',async()=>{
+  for(const phase of ['INTENT','REFUSED','RELEASED']) {
+    const f=await fixture();try {
+      const reg=structuredClone(f.registry);reg.projects.P.lifecycle={draftPolicy:'discard'};f.put('registry',reg);
+      const payload={...f.payload,reloadHome:true},intent=f.call('page-release-record',{...payload,phase:'INTENT',data:{reloadHome:true}});
+      if(phase!=='INTENT')f.call('page-release-record',{...payload,releaseIntent:intent,phase,data:{closeAttempted:phase==='RELEASED',closeAcknowledged:true,targetAbsent:true}});
+      assert.notEqual(f.run('page-termination-record',{...f.payload,phase:'INTENT',terminateAfterReloadUnknown:{path:intent.path.replace('INTENT','UNKNOWN'),sha256:'0'.repeat(64)}}).status,0);
+    }finally{await rm(f.root,{recursive:true,force:true});}
+  }
+  const f=await fixture();try {
+    const x=await failedReload(f),op=f.call('submit',{requestId:'current-writer',callerRef:'owner',project:'P',account:'a',role:'worker',message:'synthetic'});
+    const update=spawnSync('python3',['-c',"import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); c.execute(\"UPDATE operations SET status='DISPATCHING' WHERE id=?\",(sys.argv[2],)); c.commit()",path.join(f.state,'bridge.sqlite3'),op.operationId],{encoding:'utf8'});assert.equal(update.status,0,update.stderr);
+    assert.equal(f.call('page-reclaim-context',x.payload).resourceRelease.reason,'PHYSICAL_TARGET_ACTIVE_WRITER');
+    assert.notEqual(f.run('page-termination-record',{...x.payload,phase:'INTENT'}).status,0);
+  }finally{await rm(f.root,{recursive:true,force:true});}
+});
+test('a changed predecessor, lost termination ACK or malformed terminal receipt cannot arm a later close',async()=>{
+  const f=await fixture();try {
+    const x=await failedReload(f),intent=f.call('page-termination-record',{...x.payload,phase:'INTENT'});
+    assert.notEqual(f.run('page-termination-record',{...x.payload,terminationIntent:{...intent,sha256:'0'.repeat(64)},phase:'RELEASED',data:{closeAttempted:true,closeAcknowledged:true,targetAbsent:true}}).status,0);
+    assert.notEqual(f.run('page-termination-record',{...x.payload,terminationIntent:intent,phase:'RELEASED',data:{closeAttempted:true,targetAbsent:true}}).status,0);
+    const old=await readFile(x.unknown.path),record=JSON.parse(old);record.data.reason='late change';await writeFile(x.unknown.path,JSON.stringify(record));
+    assert.notEqual(f.run('page-termination-record',{...x.payload,terminationIntent:intent,phase:'UNKNOWN',data:{closeAttempted:true}}).status,0);
+    await writeFile(x.unknown.path,old);f.call('page-termination-record',{...x.payload,terminationIntent:intent,phase:'UNKNOWN',data:{closeAttempted:true}});
+    assert.equal(f.call('page-reclaim-context',{...x.payload,terminationIntent:intent}).resourceRelease.allowed,false);
+    assert.notEqual(f.run('page-termination-record',{...x.payload,phase:'INTENT'}).status,0);
   }finally{await rm(f.root,{recursive:true,force:true});}
 });
 test('ensure blocks replacement of a disappeared target after uncertain close but permits confirmed release or refusal',async()=>{

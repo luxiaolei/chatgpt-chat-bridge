@@ -238,7 +238,68 @@ def page_release_latest(state, target):
                 phase == "REFUSED" and (outcome.get("data", {}).get("closeAttempted") is not False or outcome.get("data", {}).get("reloadAttempted") is True)):
             raise ValueError("PAGE_RELEASE_EVIDENCE_INVALID")
         value["outcome"] = phase
+        value["outcomeReference"], value["outcomeData"] = saved, outcome.get("data") or {}
     return value
+
+
+def page_termination_predecessor(state, target, unknown):
+    previous = page_release_latest(state, target)
+    if (not previous or previous["target"] != target or previous["outcome"] != "UNKNOWN" or
+            previous.get("data", {}).get("reloadHome") is not True or
+            previous.get("outcomeData", {}).get("reloadAttempted") is not True or
+            previous.get("outcomeData", {}).get("closeAttempted") is not False or
+            not isinstance(unknown, dict) or any(previous["outcomeReference"][key] != unknown.get(key) for key in ("path", "sha256"))):
+        raise ValueError("PAGE_TERMINATION_RELOAD_UNKNOWN_UNPROVEN")
+    return {"intent": previous["reference"], "unknown": previous["outcomeReference"]}
+
+
+def page_termination_latest(state, target):
+    try:
+        directory = page_release_directory(state, target)
+        raw, reference = read_capture(directory / "TERMINATION_INTENT.json")
+    except FileNotFoundError:
+        return None
+    value = json.loads(raw)
+    if (not reference["captureStable"] or value.get("format") != "chat-bridge-page-termination-v1" or
+            value.get("phase") != "INTENT" or value.get("target") != target):
+        raise ValueError("PAGE_TERMINATION_EVIDENCE_INVALID")
+    predecessor = value.get("predecessor") or {}
+    if page_termination_predecessor(state, target, predecessor.get("unknown")) != predecessor:
+        raise ValueError("PAGE_TERMINATION_PREDECESSOR_CHANGED")
+    value["reference"], value["outcome"] = reference, None
+    for phase in ("RELEASED", "UNKNOWN", "REFUSED"):
+        path = directory / f"TERMINATION_{phase}.json"
+        if not path.exists():
+            continue
+        raw, saved = read_capture(path)
+        outcome = json.loads(raw)
+        if (value["outcome"] or not saved["captureStable"] or outcome.get("format") != value["format"] or
+                outcome.get("phase") != phase or outcome.get("target") != target or outcome.get("predecessor") != value.get("predecessor") or
+                phase == "REFUSED" and outcome.get("data", {}).get("closeAttempted") is not False or
+                phase == "RELEASED" and any(outcome.get("data", {}).get(key) is not True for key in ("closeAttempted", "closeAcknowledged", "targetAbsent"))):
+            raise ValueError("PAGE_TERMINATION_EVIDENCE_INVALID")
+        value["outcome"] = phase
+    return value
+
+
+def page_termination_record(state, target, unknown, phase, data, intent=None):
+    predecessor = page_termination_predecessor(state, target, unknown)
+    latest = page_termination_latest(state, target)
+    if phase == "INTENT":
+        if latest:
+            raise ValueError("PAGE_TERMINATION_ALREADY_ATTEMPTED")
+    elif phase not in {"RELEASED", "UNKNOWN", "REFUSED"}:
+        raise ValueError("PAGE_TERMINATION_PHASE_INVALID")
+    elif (not latest or latest["outcome"] is not None or latest.get("predecessor") != predecessor or not isinstance(intent, dict) or
+          any(intent.get(key) != latest["reference"][key] for key in ("path", "sha256", "bytes"))):
+        raise ValueError("PAGE_TERMINATION_INTENT_CHANGED")
+    if (phase == "REFUSED" and data.get("closeAttempted") is not False or
+            phase == "RELEASED" and any(data.get(key) is not True for key in ("closeAttempted", "closeAcknowledged", "targetAbsent"))):
+        raise ValueError("PAGE_TERMINATION_OUTCOME_INVALID")
+    return write_once(page_release_directory(state, target) / f"TERMINATION_{phase}.json", {
+        "format": "chat-bridge-page-termination-v1", "phase": phase, "target": target, "predecessor": predecessor,
+        "recordedAt": datetime.now(timezone.utc).isoformat(), "data": data,
+        "rendererStateVerified": False, "deliveryProven": False, "remoteExecutionStopped": False, "retryAuthorized": False})
 
 
 def page_release_record(state, target, phase, data, intent=None):
