@@ -31,6 +31,7 @@ GitHub Issue / PR（项目真实状态）
 - Session Archive / Retire / Delete / Forget 生命周期
 - 本地持久化 registry 与独立 runtime task cache
 - 内置项目总控 Skill，支持单总控和 `rootController → domain controller → worker` 分层路由
+- 内置 Ego Lite 直接会话通信 Skill：精确定位 Chat、发送任务、回读回复并核验 GitHub 证据
 
 ## 安装
 
@@ -39,6 +40,13 @@ git clone https://github.com/luxiaolei/chatgpt-chat-bridge.git
 cd chatgpt-chat-bridge
 ./scripts/install.sh
 ```
+
+如果只需要直接浏览器通信 Skill，不安装 Bridge CLI/runtime：
+
+~~~bash
+mkdir -p ~/.agents/skills/ego-lite-session-bridge
+cp skills/ego-lite-session-bridge/SKILL.md ~/.agents/skills/ego-lite-session-bridge/SKILL.md
+~~~
 
 ## 快速开始
 
@@ -243,6 +251,12 @@ chat-bridge policy show --project "My Project"
 
 ```text
 skills/project-conductor/SKILL.md
+```
+
+直接浏览器会话通信的备用 Skill 在：
+
+```text
+skills/ego-lite-session-bridge/SKILL.md
 ```
 
 ## Chat 端连接本地
