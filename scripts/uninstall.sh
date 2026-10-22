@@ -8,7 +8,7 @@ SKILLS_DIR="${CHAT_BRIDGE_SKILLS_DIR:-$HOME/.agents/skills}"
 if [[ -x "$SHARE_DIR/uninstall-watchdog.sh" ]]; then "$SHARE_DIR/uninstall-watchdog.sh" || true; fi
 rm -f "$BIN_DIR/chat-bridge"
 rm -rf "$SHARE_DIR"
-rm -rf "$SKILLS_DIR/chat-bridge" "$SKILLS_DIR/project-conductor"
+rm -rf "$SKILLS_DIR/chat-bridge" "$SKILLS_DIR/project-conductor" "$SKILLS_DIR/ego-lite-session-bridge"
 
 echo "Removed chat-bridge runtime and skills."
 echo "Registry was preserved at ~/.config/chat-bridge/registry.json"

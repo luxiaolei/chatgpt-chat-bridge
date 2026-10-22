@@ -73,6 +73,16 @@ This installs:
 - `~/.local/share/chatgpt-chat-bridge/main.js`
 - `~/.agents/skills/chat-bridge/SKILL.md`
 - `~/.agents/skills/project-conductor/SKILL.md`
+- `~/.agents/skills/ego-lite-session-bridge/SKILL.md`
+
+### Install only the direct-browser skill
+
+If you only need the low-level Ego Lite session skill and do not want to install the Bridge CLI/runtime, copy the skill into your Agent Skills directory:
+
+~~~bash
+mkdir -p ~/.agents/skills/ego-lite-session-bridge
+cp skills/ego-lite-session-bridge/SKILL.md ~/.agents/skills/ego-lite-session-bridge/SKILL.md
+~~~
 
 ## Quick start
 
@@ -320,6 +330,7 @@ scripts/install.sh              Installer
 scripts/uninstall.sh            Uninstaller
 skills/chat-bridge/             Worker/routing skill
 skills/project-conductor/       Conductor skill
+skills/ego-lite-session-bridge/ Direct Ego Lite browser fallback skill
 docs/architecture.md            Architecture and control plane
 .github/ISSUE_TEMPLATE/         Suggested durable task format
 tests/static.sh                 Static checks

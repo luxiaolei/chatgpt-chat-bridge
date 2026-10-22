@@ -8,7 +8,7 @@ SKILLS_DIR="${CHAT_BRIDGE_SKILLS_DIR:-$HOME/.agents/skills}"
 
 SOURCE_RELEASE="$(python3 "$ROOT/src/release-version.py" preflight "$ROOT")"
 
-mkdir -p "$BIN_DIR" "$SHARE_DIR" "$SKILLS_DIR/chat-bridge" "$SKILLS_DIR/project-conductor"
+mkdir -p "$BIN_DIR" "$SHARE_DIR" "$SKILLS_DIR/chat-bridge" "$SKILLS_DIR/project-conductor" "$SKILLS_DIR/ego-lite-session-bridge"
 COPY_MAP="$(mktemp "$SHARE_DIR/.release-copy-map.XXXXXX")"
 trap 'rm -f "$COPY_MAP"' EXIT
 copy_file() {
@@ -55,6 +55,7 @@ copy_file "$ROOT/scripts/uninstall-coordinator.sh" "$SHARE_DIR/uninstall-coordin
 copy_file "$ROOT/bin/chat-bridge" "$BIN_DIR/chat-bridge"
 copy_file "$ROOT/skills/chat-bridge/SKILL.md" "$SKILLS_DIR/chat-bridge/SKILL.md"
 copy_file "$ROOT/skills/project-conductor/SKILL.md" "$SKILLS_DIR/project-conductor/SKILL.md"
+copy_file "$ROOT/skills/ego-lite-session-bridge/SKILL.md" "$SKILLS_DIR/ego-lite-session-bridge/SKILL.md"
 chmod +x "$BIN_DIR/chat-bridge" "$SHARE_DIR/install-watchdog.sh" "$SHARE_DIR/uninstall-watchdog.sh" "$SHARE_DIR/install-coordinator.sh" "$SHARE_DIR/uninstall-coordinator.sh"
 
 python3 "$ROOT/src/release-version.py" install "$ROOT" "$COPY_MAP" "$SHARE_DIR/release-manifest.json" "$SOURCE_RELEASE"
@@ -64,4 +65,4 @@ echo "  CLI:    $BIN_DIR/chat-bridge"
 echo "  Runtime:$SHARE_DIR/main.js"
 echo "  Watchdog installer: $SHARE_DIR/install-watchdog.sh"
 echo "  Queue installer: $SHARE_DIR/install-coordinator.sh"
-echo "  Skills: $SKILLS_DIR/chat-bridge, $SKILLS_DIR/project-conductor"
+echo "  Skills: $SKILLS_DIR/chat-bridge, $SKILLS_DIR/project-conductor, $SKILLS_DIR/ego-lite-session-bridge"
