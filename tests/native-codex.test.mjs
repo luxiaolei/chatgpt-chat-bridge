@@ -67,6 +67,7 @@ test('standard installation includes native adapter and a missing adapter is PRE
     const installed=spawnSync('zsh',['scripts/install.sh'],{env,encoding:'utf8'});
     assert.equal(installed.status,0,installed.stderr);
     assert.equal(await readFile(path.join(share,'native-codex.mjs'),'utf8'),await readFile('src/native-codex.mjs','utf8'));
+    assert.equal(await readFile(path.join(root,'skills','ego-lite-session-bridge','SKILL.md'),'utf8'),await readFile('skills/ego-lite-session-bridge/SKILL.md','utf8'));
     const create=()=>spawnSync('python3',[path.join(share,'coordinator.py'),'native-create',config,state,'--native-host',hostname(),'--native-cwd',root,'--native-socket',path.join(root,'absent.sock'),'--confirm'],{env,encoding:'utf8'});
     let result=create();assert.equal(result.status,2,result.stderr);
     assert.equal(JSON.parse(result.stdout).code,'NATIVE_SHARED_RUNTIME_UNAVAILABLE');
